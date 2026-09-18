@@ -49,6 +49,18 @@ STREET_WIDTH = 6.0
 AVENUE_WIDTH = 11.0
 BLOCK_INSET = 3.0
 
+# City Hall stands on ground no district may build on.  The hall is scaled to the
+# skyline, but the plaza has to stay a plaza: if it grew with the tallest building
+# a small repository would be nothing but forecourt, so the reserve is capped as a
+# share of the plan and the hall is scaled back to fit whatever is left.
+CITY_HALL_PLAZA_MARGIN = 3.0
+CITY_HALL_MAX_HALF_SHARE = 0.16
+CITY_HALL_MIN_SCALE = 0.3        # absolute floor, for a plan of almost nothing
+CITY_HALL_MAX_SCALE = 4.5
+CITY_HALL_BASE_SCALE = 1.6
+CITY_HALL_PLAZA_RADIUS = 26.0   # per unit of hall scale; mirrored by the viewer
+CITY_HALL_HEIGHT_DIVISOR = 34.0
+
 
 @dataclass
 class Rect:
@@ -123,6 +135,42 @@ class CityLayout:
     streets: list[Rect] = field(default_factory=list)
     bounds: Rect = field(default_factory=lambda: Rect(0, 0, 0, 0))
     depth: int = 1
+    # Ground reserved for City Hall. Empty until build_layout runs; districts are
+    # never placed on it, which is what keeps the landmark out of the skyline.
+    plaza: Rect | None = None
+    hall_scale: float = 0.0
+
+    def city_hall(self) -> dict | None:
+        """Where the landmark stands and how big it is.
+
+        Emitted so the viewer never has to re-derive the hall's size: the reserve
+        and the massing have to agree, and the only way to guarantee that is for
+        one side to compute both.
+        """
+        if self.plaza is None or self.hall_scale <= 0:
+            return None
+        scale = self.hall_scale
+        cx = self.plaza.cx
+        cz = self.plaza.cy
+        return {
+            "centre": [round(cx, 3), round(cz, 3)],
+            "scale": round(scale, 4),
+            "plazaRadius": round(CITY_HALL_PLAZA_RADIUS * scale, 3),
+            "plaza": [
+                round(self.plaza.x, 3),
+                round(self.plaza.y, 3),
+                round(self.plaza.w, 3),
+                round(self.plaza.h, 3),
+            ],
+            # The hall's own collision box: 30 x 20 at scale, matching the
+            # viewer's massing, so walk mode cannot stand inside it.
+            "footprint": [
+                round(cx - 15 * scale, 3),
+                round(cz - 10 * scale, 3),
+                round(30 * scale, 3),
+                round(20 * scale, 3),
+            ],
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -130,6 +178,7 @@ class CityLayout:
             "bounds": [self.bounds.x, self.bounds.y, self.bounds.w, self.bounds.h],
             "streets": [[s.x, s.y, s.w, s.h] for s in self.streets],
             "districts": [d.to_dict() for d in self.districts],
+            "cityHall": self.city_hall(),
         }
 
 
@@ -257,6 +306,95 @@ def _treemap(
     _treemap(second, r2, out, streets, depth + 1)
 
 
+def _city_hall_scale(side: float, max_height: float) -> float:
+    """How big City Hall may be, given the plan it has to stand on.
+
+    The viewer scales the hall from the skyline, but a plaza that grew without
+    limit would swallow a small repository whole -- the tallest building in a
+    160 m plan would raise a landmark wider than the city. So the reserve is
+    capped as a share of the plan and the hall is scaled down to whatever fits,
+    with an absolute floor for a plan that is barely a plan at all.
+    """
+    base = min(
+        CITY_HALL_MAX_SCALE,
+        max(CITY_HALL_BASE_SCALE, max_height / CITY_HALL_HEIGHT_DIVISOR),
+    )
+    capped_half = CITY_HALL_MAX_HALF_SHARE * side
+    fitted = (capped_half - CITY_HALL_PLAZA_MARGIN) / CITY_HALL_PLAZA_RADIUS
+    return max(CITY_HALL_MIN_SCALE, min(base, fitted))
+
+
+def _reserve(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> Rect:
+    """The plaza plus the avenue that rings it, which districts must leave clear."""
+    return Rect(plaza.x - gap, plaza.y - gap, plaza.w + 2 * gap, plaza.h + 2 * gap)
+
+
+def _frame_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> list[Rect]:
+    """The four bands of `rect` that surround the reserve, leaving it clear.
+
+    A treemap covers whatever rectangle it is given, so reserving ground for the
+    landmark means never handing it the middle of the plan: the districts are laid
+    out in a frame instead, and the hole is where City Hall stands. The bands tile
+    the plan minus the reserve exactly once, so no district is lost and none
+    overlaps the landmark.
+    """
+    reserve = _reserve(rect, plaza, gap)
+    bands = [
+        Rect(rect.x, rect.y, rect.w, reserve.y - rect.y),                                  # top
+        Rect(rect.x, reserve.y + reserve.h, rect.w, rect.y + rect.h - (reserve.y + reserve.h)),  # bottom
+        Rect(rect.x, reserve.y, reserve.x - rect.x, reserve.h),                            # left
+        Rect(reserve.x + reserve.w, reserve.y, rect.x + rect.w - (reserve.x + reserve.w), reserve.h),  # right
+    ]
+    return [b for b in bands if b.w > 1.0 and b.h > 1.0]
+
+
+def _streets_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> list[Rect]:
+    """The avenue ring around City Hall, and the seams where the bands meet.
+
+    The frame leaves the districts touching along the reserve's edges; a street
+    down each seam is what keeps two neighbourhoods from sharing a party wall.
+    Seams are centred on the boundary, which is ground the plot inset already
+    keeps clear of buildings.
+    """
+    reserve = _reserve(rect, plaza, gap)
+    seam = STREET_WIDTH
+    half = seam / 2.0
+    right_x = reserve.x + reserve.w
+    bottom_y = reserve.y + reserve.h
+    return [
+        # The ring: City Hall is approached from an avenue, not from a back alley.
+        Rect(reserve.x, reserve.y, reserve.w, gap),
+        Rect(reserve.x, bottom_y - gap, reserve.w, gap),
+        Rect(reserve.x, reserve.y + gap, gap, reserve.h - 2 * gap),
+        Rect(right_x - gap, reserve.y + gap, gap, reserve.h - 2 * gap),
+        # The seams, outside the reserve, where the four bands meet.
+        Rect(rect.x, reserve.y - half, reserve.x - rect.x, seam),
+        Rect(right_x, reserve.y - half, rect.x + rect.w - right_x, seam),
+        Rect(rect.x, bottom_y - half, reserve.x - rect.x, seam),
+        Rect(right_x, bottom_y - half, rect.x + rect.w - right_x, seam),
+    ]
+
+
+def _spread_over_bands(entries: list[tuple[str, float]], bands: list[Rect]) -> list[list]:
+    """Deal districts into the frame, heaviest first, into the roomiest band.
+
+    Districts keep their descending weight, so each band receives a contiguous
+    run of the ordering and its own treemap subdivides that run normally.
+    """
+    if not bands:
+        return []
+    total = sum(w for _, w in entries) or 1.0
+    areas = [max(1.0, b.w * b.h) for b in bands]
+    area_total = sum(areas)
+    room = [total * a / area_total for a in areas]
+    groups: list[list] = [[] for _ in bands]
+    for key, weight in entries:
+        target = max(range(len(bands)), key=lambda i: room[i])
+        groups[target].append((key, weight))
+        room[target] -= weight
+    return groups
+
+
 def plan_dims(record) -> tuple[float, float]:
     """A file's plot as (long side, short side) in metres.
 
@@ -332,9 +470,30 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
     side = max(60.0, math.sqrt(city_area))
     root = Rect(0.0, 0.0, side, side)
 
+    # Reserve the middle of the plan before any district is placed, so the
+    # landmark is ground nobody builds on rather than a building dropped into
+    # somebody's block.
+    scale = _city_hall_scale(side, max((f.height for f in files), default=0.0))
+    plaza_half = CITY_HALL_PLAZA_RADIUS * scale + CITY_HALL_PLAZA_MARGIN
+    plaza = Rect(
+        side / 2.0 - plaza_half,
+        side / 2.0 - plaza_half,
+        2.0 * plaza_half,
+        2.0 * plaza_half,
+    )
+    layout.plaza = plaza
+    layout.hall_scale = scale
+
     rects: dict[str, Rect] = {}
     streets: list[Rect] = []
-    _treemap(entries, root, rects, streets)
+    # The reserve is capped so the four bands always survive, which is what the
+    # layout test pins down for plan sizes from 60 m to 3.2 km.
+    bands = _frame_around(root, plaza)
+    layout.plaza = plaza
+    layout.hall_scale = scale
+    streets.extend(_streets_around(root, plaza))
+    for band, group in zip(bands, _spread_over_bands(entries, bands)):
+        _treemap(group, band, rects, streets)
 
     for key, members in grouped.items():
         rect = rects.get(key, Rect(0, 0, 0, 0))

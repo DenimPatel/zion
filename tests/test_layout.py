@@ -9,7 +9,12 @@ from support import TempRepoCase, make_repo
 
 from analyzer.gitmeta import read_git_index
 from analyzer.layout import (
+    CITY_HALL_PLAZA_MARGIN,
+    CITY_HALL_PLAZA_RADIUS,
     ROOT_DISTRICT,
+    Rect,
+    _city_hall_scale,
+    _frame_around,
     build_layout,
     choose_depth,
     district_counts,
@@ -17,6 +22,16 @@ from analyzer.layout import (
 )
 from analyzer.metrics import analyze
 from analyzer.walk import FileWalker
+
+
+def _overlaps(a, b) -> bool:
+    """Do two axis-aligned rectangles share ground?"""
+    return not (
+        a.x + a.w <= b.x
+        or b.x + b.w <= a.x
+        or a.y + a.h <= b.y
+        or b.y + b.h <= a.y
+    )
 
 
 
@@ -101,6 +116,62 @@ class TreemapTests(TempRepoCase):
             for street in layout.streets:
                 self.assertGreater(street.w, 0)
                 self.assertGreater(street.h, 0)
+
+    def test_no_building_stands_on_the_city_hall_plaza(self):
+        """The landmark owns its ground: nothing is built inside the reserve."""
+        repo = make_repo(self.scratch())
+        analysis, layout = self._layout(repo)
+
+        self.assertIsNotNone(layout.plaza)
+        self.assertGreater(layout.hall_scale, 0)
+        plaza = layout.plaza
+
+        # The reserve is inside the plan, not hanging off it.
+        self.assertGreaterEqual(plaza.x, layout.bounds.x)
+        self.assertGreaterEqual(plaza.y, layout.bounds.y)
+        self.assertLessEqual(plaza.x + plaza.w, layout.bounds.x + layout.bounds.w + 1e-6)
+        self.assertLessEqual(plaza.y + plaza.h, layout.bounds.y + layout.bounds.h + 1e-6)
+
+        hall = layout.city_hall()
+        self.assertIsNotNone(hall)
+        fx, fz, fw, fh = hall["footprint"]
+        self.assertGreaterEqual(fx, plaza.x)
+        self.assertGreaterEqual(fz, plaza.y)
+        self.assertLessEqual(fx + fw, plaza.x + plaza.w + 1e-6)
+        self.assertLessEqual(fz + fh, plaza.y + plaza.h + 1e-6)
+
+        # The plaza a district may reach into is a plaza, not a plot.
+        for district in layout.districts:
+            self.assertFalse(
+                _overlaps(district.rect, plaza),
+                f"district {district.key} covers the City Hall plaza",
+            )
+            for building in district.buildings:
+                self.assertFalse(
+                    _overlaps(
+                        Rect(building.x, building.y, building.width, building.depth),
+                        plaza,
+                    ),
+                    f"{building.rel} is built on the City Hall plaza",
+                )
+
+    def test_a_small_plan_still_leaves_a_usable_frame(self):
+        """A tiny city must not be all forecourt: the frame survives the reserve.
+
+        The tallest building drives the hall's size, which is exactly how a small
+        repository would end up with nothing but plaza. The scale is capped by the
+        plan, so every plan size keeps ground for districts on all four sides.
+        """
+        for side in (60.0, 90.0, 159.0, 700.0, 3200.0):
+            scale = _city_hall_scale(side, 400.0)
+            half = CITY_HALL_PLAZA_RADIUS * scale + CITY_HALL_PLAZA_MARGIN
+            self.assertLess(half, side / 2.0, f"plaza swallowed a {side} m plan")
+            plaza = Rect(side / 2.0 - half, side / 2.0 - half, 2 * half, 2 * half)
+            bands = _frame_around(Rect(0.0, 0.0, side, side), plaza)
+            self.assertEqual(len(bands), 4, f"a {side} m plan lost a band")
+            for band in bands:
+                self.assertGreater(band.w, 1.0)
+                self.assertGreater(band.h, 1.0)
 
     def _layout(self, repo):
         walk = FileWalker(repo).walk()

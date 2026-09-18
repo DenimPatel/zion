@@ -297,6 +297,7 @@ def build_manifest(
             round(layout.bounds.h, 3),
         ],
         "streets": [[round(s.x, 2), round(s.y, 2), round(s.w, 2), round(s.h, 2)] for s in layout.streets],
+        "cityHall": layout.city_hall(),
         "camera": _camera(layout.bounds.w, layout.bounds.h, max_height),
         "districts": districts,
         "stats": stats,

@@ -1930,7 +1930,7 @@ async function boot() {
   context.sky = new SkyRig(THREE, scene, bounds);
 
   progress('raising the landmark');
-  context.hall = createCityHall(THREE, bounds, maxHeightOf(manifest));
+  context.hall = createCityHall(THREE, bounds, maxHeightOf(manifest), manifest.cityHall);
   scene.add(context.hall);
 
   // One reusable outline marks whatever the cursor is over.

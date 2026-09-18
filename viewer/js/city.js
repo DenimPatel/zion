@@ -634,13 +634,21 @@ export function createHoverOutline(THREE) {
   return outline;
 }
 
-export function createCityHall(THREE, bounds, maxHeight) {
+export function createCityHall(THREE, bounds, maxHeight, hall = null) {
   const group = new THREE.Group();
   group.name = 'city-hall';
   const [bx, bz, bw, bh] = bounds;
-  const cx = bx + bw / 2;
-  const cz = bz + bh / 2;
-  const scale = Math.max(1.6, Math.min(4.5, maxHeight / 34));
+  // The analyzer reserves a plaza and emits exactly where the landmark stands and
+  // how big it is, so the massing here and the reserved ground there cannot drift
+  // apart. The old centre-of-the-plan derivation stays as a fallback for
+  // manifests built before the reserve existed -- those may still have buildings
+  // standing on the spot.
+  const centre = hall && hall.centre ? hall.centre : [bx + bw / 2, bz + bh / 2];
+  const cx = centre[0];
+  const cz = centre[1];
+  const scale = hall && hall.scale
+    ? hall.scale
+    : Math.max(1.6, Math.min(4.5, maxHeight / 34));
 
   const stone = new THREE.MeshStandardMaterial({ color: 0xd8c9a4, roughness: 0.75, metalness: 0.05 });
   const trim = new THREE.MeshStandardMaterial({ color: 0xb99f6b, roughness: 0.6, metalness: 0.15 });
@@ -710,17 +718,25 @@ export function createCityHall(THREE, bounds, maxHeight) {
   beacon.position.set(cx, 31.4 * scale, cz);
   group.add(beacon);
 
+  // The same rectangle the analyzer kept clear, so what walk mode collides with
+  // is exactly the ground no building was put on.
+  const footprint = hall && hall.footprint
+    ? {
+        x0: hall.footprint[0],
+        z0: hall.footprint[1],
+        x1: hall.footprint[0] + hall.footprint[2],
+        z1: hall.footprint[1] + hall.footprint[3],
+      }
+    : { x0: cx - 15 * scale, z0: cz - 10 * scale, x1: cx + 15 * scale, z1: cz + 10 * scale };
+
   group.userData = {
     centre: new THREE.Vector3(cx, 0, cz),
-    radius: 30 * scale,
+    radius: hall && hall.plazaRadius ? hall.plazaRadius : 30 * scale,
     // Occupies the plan so walk mode cannot stand inside it.
     box: {
       id: -1,
       rel: '__city_hall__',
-      x0: cx - 15 * scale,
-      z0: cz - 10 * scale,
-      x1: cx + 15 * scale,
-      z1: cz + 10 * scale,
+      ...footprint,
       height: 33 * scale,
       isCityHall: true,
     },

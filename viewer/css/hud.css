@@ -1,9 +1,19 @@
 :root {
   --ink: #e8ecf4;
-  --ink-dim: #94a3b8;
-  --panel: rgba(10, 14, 24, 0.82);
+  --ink-dim: #a8b4c8;
+  /* Panels sit on top of a lit city, so their tint cannot be so weak that
+     bright geometry behind them lifts the background and eats the text. At
+     0.95 the worst case -- a near-white facade directly behind a panel --
+     still leaves the dimmest label at 8.4:1, against 4.7:1 at the old 0.82. */
+  --panel: rgba(10, 14, 24, 0.95);
   --panel-solid: #0b1220;
   --edge: rgba(148, 163, 184, 0.22);
+  /* Both side panels live in the same grid row as a fixed 14px page padding, a
+     one-line titlebar, a one-line footer and the two 12px gaps between them:
+     about 355px of chrome that no panel may occupy. Capping a panel at a
+     percentage of the viewport instead gets this wrong at every size but the
+     one it was tuned on -- at 720px tall a 62vh legend ran into the footer. */
+  --panel-space: calc(100vh - 355px);
   --accent: #ffb347;
   --accent-dim: #7c5a2a;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -61,6 +71,9 @@ section, footer#controls {
   border: 1px solid var(--edge);
   border-radius: 10px;
   backdrop-filter: blur(9px);
+  /* The shadow, not more opacity, is what separates a panel from the city:
+     it reads as a raised surface without making the text any dimmer. */
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   padding: 11px 12px;
 }
 
@@ -78,7 +91,10 @@ h2 {
   grid-column: 1;
   grid-row: 2;
   align-self: start;
-  max-height: 46vh;
+  /* Thirteen rows plus the notes come to ~543px at this type size; the cap
+     only bites on a window too short to show them, where the panel scrolls
+     instead of running under the footer. */
+  max-height: var(--panel-space);
   overflow: auto;
 }
 #legend-list { margin: 0; padding: 0; list-style: none; }
@@ -91,8 +107,11 @@ h2 {
   line-height: 1.35;
 }
 #legend-list li:last-child { border-bottom: 0; }
-#legend-list li.disabled { opacity: 0.42; }
-#legend-list li.disabled .swatch { background: #475569 !important; }
+/* An entry whose metric family the confidence rules switched off. It still has
+   to be *readable* -- "off" is information, and at the old 0.42 the row was
+   gone (2.0:1 against the panel) along with the reason it was dimmed. */
+#legend-list li.disabled { opacity: 0.62; }
+#legend-list li.disabled .swatch { background: #64748b !important; }
 .swatch {
   flex: 0 0 auto;
   width: 9px;
@@ -102,7 +121,7 @@ h2 {
   background: var(--accent);
 }
 .legend-unit {
-  color: var(--ink-dim);
+  color: #c3ccdc;
   font-family: var(--mono);
   font-size: 10.5px;
 }
@@ -123,7 +142,7 @@ h2 {
   grid-row: 2;
   align-self: start;
   position: relative;
-  max-height: 62vh;
+  max-height: var(--panel-space);
   overflow: auto;
 }
 #inspector[hidden] { display: none; }
@@ -179,11 +198,20 @@ h2 {
 #xray-table { border-collapse: collapse; font-size: 11.5px; }
 #xray-table td { padding: 2px 0 2px 9px; }
 #xray-table td:first-child { padding-left: 0; color: var(--ink-dim); }
+/*
+ * The chip is the building's own colour, so the fill cannot be brightened to
+ * make it show up -- a legend that lies about the colour is worse than a dim
+ * one. `ruin` (#4a4d55) is at 2.1:1 against this panel, under the 3:1 floor
+ * for a graphic object, so the edge is what carries it: a hairline ring in
+ * the label ink defines every chip without touching a single fill.
+ */
 .chip {
   display: inline-block;
-  width: 11px;
-  height: 11px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
   border-radius: 2px;
+  border: 1px solid rgba(232, 236, 244, 0.34);
   vertical-align: -1px;
 }
 

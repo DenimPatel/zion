@@ -142,7 +142,8 @@ ahead. Cities with more than 32 districts are sampled evenly, and the label says
 so rather than silently dropping most of the map.
 
 **City Hall** is the one building that is not a file: it is the repository's own
-report card, standing at the centre of the plan. It carries the language
+report card, standing at the centre of the plan on a plaza the districts are laid
+out around rather than over. It carries the language
 breakdown, the documentation coverage, the district table and the largest files,
 and **clicking any row flies you to that building**.
 
@@ -277,6 +278,16 @@ enormous districts). `--district-depth` overrides it.
 Street geometry falls out of the treemap: each subdivision line is where a street
 goes, so blocks and roads are the same decision rather than two.
 
+**City Hall's plaza is reserved ground, not a building dropped into a block.** The
+treemap is never handed the middle of the plan: the plan is framed around a central
+reserve, districts are dealt into the four bands by weight, and an avenue rings the
+open square. A treemap covers whatever rectangle it is given, so the only way to
+guarantee the landmark is not standing inside somebody's district is to leave that
+rectangle out of the layout altogether — which is also why the plaza is capped as a
+share of the plan, and the hall scaled down to fit it rather than the other way
+round. The hall's position and size are emitted in the manifest, so the massing in
+the viewer and the ground the analyzer kept clear cannot drift apart.
+
 ---
 
 ## What is deliberately not done
@@ -331,14 +342,17 @@ any name appears. This is the natural artifact to share.
 ## How it is verified
 
 ```
-python3 -m unittest discover -s tests -p 'test_*.py'     # 72 tests, stdlib only
+python3 -m unittest discover -s tests -p 'test_*.py'     # 74 tests, stdlib only
 ```
 
 **Analyzer.** Golden tests build a committed fixture repository of known shape and
 assert its city: four districts, a Town Hall in `alpha` and not in `beta`, a park
 for `tests/`, a silo for the CSV, a notebook interior containing `math.pi` and
 **not** the base64 blob, floor slices that equal the original source lines, and
-flags computed from the degeneration rules.
+flags computed from the degeneration rules. A layout test asserts what the picture
+is supposed to show: that no district and no building stands on the City Hall
+plaza, that the hall fits inside the reserve, and that every plan size from 60 m to
+3.2 km still keeps ground for districts on all four sides.
 
 **The reference repositories**, whose numbers are cited throughout this README:
 
@@ -383,6 +397,23 @@ budget.
 `--enable-unsafe-swiftshader` is required. Without it, headless Chrome reports
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.
 
+**The HUD itself** needs eyes, not assertions: contrast is the one property none
+of those 40 checks measures. Chrome's `--screenshot` flag cannot capture this
+viewer at all — the frame loop never lets `--virtual-time-budget` expire, so the
+process hangs — so `tests/capture.py` drives Chrome over the DevTools Protocol,
+waits on wall-clock time, and runs a snippet before capturing (opening the
+inspector on a real building or district, driving the clock to night, changing
+the viewport):
+
+```
+python3 tests/capture.py --url http://127.0.0.1:8791/ --out /tmp/hud.png --js
+python3 tests/capture.py --url http://127.0.0.1:8792/ --out /tmp/hud.png --js --district
+```
+
+It is a developer tool: not part of the suite (the `test_*.py` pattern never
+collects it) and not part of the viewer. The one dependency beyond the standard
+library is `websocket-client`, needed only to speak CDP.
+
 **Encryption** is verified from both ends. In Python: NIST vectors, a tampered
 ciphertext and a tampered tag both rejected, additional data actually
 authenticated, district chunks byte-identical between the plain and encrypted
@@ -426,7 +457,7 @@ viewer/
   js/  main · loader · city · stream · interior · cityhall/tour · cameras
        · collision · inspector · sky · vault
 vendor/                  three.module.js (pinned, with provenance) · aes_gcm.py
-tests/                   72 stdlib tests + committed fixture repositories
+tests/                   74 stdlib tests + committed fixture repositories
 bench/                   synthetic repository generator and measured results
 ```
 
