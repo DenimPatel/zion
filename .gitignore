@@ -1,0 +1,14 @@
+# Generated cities
+out/
+*.city.html
+
+# Benchmark scratch (the 50k synthetic repo is regenerated, never committed)
+bench/tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store

@@ -1,0 +1,5 @@
+/* A second file in the spaced directory, so depth 1 has no single-building
+   district and the district-depth rule can prefer the shallower layout. */
+.thing {
+  color: rebeccapurple;
+}

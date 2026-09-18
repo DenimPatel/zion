@@ -1,0 +1,7 @@
+# Fixture repo ignore rules.  The test suite copies this template to a temp
+# directory, injects matching noise files there, and then git-inits it -- so the
+# walker's git-first path is exercised against real ignore semantics.
+build/
+*.log
+__pycache__/
+.DS_Store
