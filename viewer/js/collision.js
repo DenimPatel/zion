@@ -190,7 +190,8 @@ export class WalkCamera {
     this.yaw = fly.yaw;
     this.pitch = Math.max(-1.2, Math.min(0.6, fly.pitch));
     this.vertical = 0;
-    this.onGround = true;
+    // Grounded only if we actually landed on something.
+    this.onGround = this.position.y <= this.grid.roofHeight(this.position.x, this.position.z) + 0.01;
   }
 
   apply() {
@@ -238,11 +239,15 @@ export class WalkCamera {
     this.position.y += this.vertical * dt;
 
     const roof = this.grid.roofHeight(this.position.x, this.position.z);
-    const ground = roof;
-    if (this.position.y <= ground) {
-      this.position.y = ground;
+    if (this.position.y <= roof) {
+      this.position.y = roof;
       this.vertical = 0;
       this.onGround = true;
+    } else {
+      // Falling is not standing. Without this the player is reported as
+      // grounded for the whole fall, which hides the fact that they are still
+      // in the air.
+      this.onGround = false;
     }
 
     this.apply();

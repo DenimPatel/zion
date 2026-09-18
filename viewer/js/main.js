@@ -757,11 +757,31 @@ async function runSelfTest() {
     detail: `tour=${Boolean(tourNode)} htmlLen=${tourNode ? tourNode.innerHTML.length : -1} label=${Boolean(document.getElementById('tour-label'))} caption=${Boolean(document.getElementById('tour-caption'))} ids=${document.querySelectorAll('[id]').length}`,
   });
 
-  // 1. Walk mode puts the player on the ground and collides with buildings.
+  // 1. Walk mode: gravity pulls the player down and they come to rest *on* a
+  //    surface rather than sinking through it. An absolute height bound here
+  //    would only test how tall the city happens to be.
   setMode('walk');
   check('walk-mode', state.mode === 'walk' && context.walk.enabled);
-  const groundY = context.walk.position.y;
-  check('walk-gravity', groundY >= -0.01 && groundY < 200, `y=${groundY.toFixed(2)}`);
+  const spawnY = context.walk.position.y;
+  let steps = 0;
+  // Simulate until the player actually comes to rest; a fixed step count would
+  // just measure how tall this particular city happens to be. The first update
+  // must always run, because standing still is a valid starting state.
+  do {
+    context.walk.update(1 / 60);
+    steps++;
+  } while (steps < 1200 && !context.walk.onGround);
+  const landedY = context.walk.position.y;
+  const underfoot = context.grid.roofHeight(context.walk.position.x, context.walk.position.z);
+  check(
+    'walk-gravity',
+    context.walk.onGround &&
+      Number.isFinite(landedY) &&
+      landedY <= spawnY + 0.01 &&
+      landedY >= -0.01 &&
+      Math.abs(landedY - underfoot) < 0.1,
+    `spawn ${spawnY.toFixed(1)} -> rest ${landedY.toFixed(1)} on ${underfoot.toFixed(1)} after ${steps} steps`
+  );
 
   const solid = context.resident.filter((b) => b.archetype !== 'park');
   check('collision-grid', context.grid.count > 0, `${context.grid.count} solid boxes`);
