@@ -23,8 +23,22 @@ from .metrics import FileMetrics, RepoAnalysis
 # District count band.  Below the minimum the city has no neighbourhoods; above
 # the maximum it is a field of single-building districts.
 MIN_DISTRICTS = 4
-MAX_DISTRICTS = 64
+MAX_DISTRICTS_SMALL = 64
+MAX_DISTRICTS_LARGE = 400
+LARGE_REPO_FILES = 5000
 MAX_DEPTH = 8
+
+
+def district_band(file_count: int) -> tuple[int, int]:
+    """Readable district-count band, scaled to the size of the repo.
+
+    A fixed ceiling would describe a 50,000-file repository with eight enormous
+    districts, even though its folder tree plainly offers hundreds of
+    neighbourhoods.
+    """
+    if file_count > LARGE_REPO_FILES:
+        return MIN_DISTRICTS, MAX_DISTRICTS_LARGE
+    return MIN_DISTRICTS, MAX_DISTRICTS_SMALL
 
 ROOT_DISTRICT = "(root)"
 
@@ -163,16 +177,19 @@ def choose_depth(files: list[FileMetrics], max_depth: int = MAX_DEPTH) -> int:
     if not files:
         return 1
     counts = district_counts(files, max_depth)
-    in_band = {d: c for d, c in counts.items() if MIN_DISTRICTS <= c <= MAX_DISTRICTS}
+    low, high = district_band(len(files))
+    in_band = {d: c for d, c in counts.items() if low <= c <= high}
     if in_band:
         no_singletons = [d for d in in_band if _single_building_districts(files, d) == 0]
         candidates = no_singletons or list(in_band)
         best = max(counts[d] for d in candidates)
         return min(d for d in candidates if counts[d] == best)
 
+    low, high = district_band(len(files))
+
     def distance(item: tuple[int, int]) -> tuple[int, int]:
         depth, count = item
-        gap = (MIN_DISTRICTS - count) if count < MIN_DISTRICTS else (count - MAX_DISTRICTS)
+        gap = (low - count) if count < low else (count - high)
         return (gap, depth)
 
     return min(counts.items(), key=distance)[0]

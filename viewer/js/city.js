@@ -434,3 +434,45 @@ export function createCityHall(THREE, bounds, maxHeight) {
   };
   return group;
 }
+
+/**
+ * L3 impostors: one box per district that is not currently resident.
+ *
+ * Chunk streaming keeps a bounded working set, which would otherwise leave a
+ * hard edge where the loaded city stops. A single impostor box per unloaded
+ * district -- sized from the manifest's own skyline envelope and maximum
+ * height -- fills the horizon for one extra draw call, no matter how many
+ * districts are missing.
+ */
+export function createImpostors(THREE, manifest, residentIds) {
+  const missing = manifest.districts.filter((d) => !residentIds.has(d.id));
+  if (!missing.length) return null;
+
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  geometry.translate(0, 0.5, 0);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x59637a,
+    roughness: 0.95,
+    metalness: 0.05,
+    emissive: new THREE.Color(0x2a2f3d),
+    emissiveIntensity: 1,
+  });
+  const mesh = new THREE.InstancedMesh(geometry, material, missing.length);
+  mesh.name = 'district-impostors';
+  const matrix = new THREE.Matrix4();
+
+  missing.forEach((district, index) => {
+    const [x, z, w, h] = district.rect;
+    const envelope = district.skyline.envelope || [10, 10];
+    // One massing block standing in for the district's skyline: wide enough to
+    // read as a block, tall enough to read as its tallest building.
+    const width = Math.max(8, Math.min(w * 0.7, envelope[0] * 3));
+    const depth = Math.max(8, Math.min(h * 0.7, envelope[1] * 3));
+    const height = Math.max(6, district.skyline.maxHeight * 0.85);
+    matrix.makeScale(width, height, depth);
+    matrix.setPosition(x + w / 2, 0, z + h / 2);
+    mesh.setMatrixAt(index, matrix);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  return mesh;
+}

@@ -8,7 +8,13 @@
 
 import * as THREE from 'three';
 import { CitySource } from './loader.js';
-import { CityMesh, createCityHall, ARCHETYPE_COLORS, archetypeLabel } from './city.js';
+import {
+  CityMesh,
+  createCityHall,
+  createImpostors,
+  ARCHETYPE_COLORS,
+  archetypeLabel,
+} from './city.js';
 import { SkyRig } from './sky.js';
 import { FlyCamera, OverviewCamera, CameraFlight } from './cameras.js';
 import { CollisionGrid, WalkCamera } from './collision.js';
@@ -22,14 +28,21 @@ const loading = document.getElementById('loading');
 const loadingText = document.getElementById('loading-text');
 const promptEl = document.getElementById('prompt');
 
+const params = new URLSearchParams(location.search);
+
 const state = {
   source: new CitySource('.'),
   mode: 'fly', // fly | walk | overview | interior
   night: 0,
   litScale: 1,
   time: 12,
-  bench: new URLSearchParams(location.search).has('bench'),
-  selftest: new URLSearchParams(location.search).has('selftest'),
+  bench: params.has('bench'),
+  selftest: params.has('selftest'),
+  // Overrides used by the scale benchmark: software rendering in headless
+  // Chrome cannot carry a 20,000-building working set with shadows, so the
+  // benchmark can shrink either without changing the code paths under test.
+  maxResident: Number(params.get('maxres')) || null,
+  shadows: params.get('shadows') !== '0',
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -38,7 +51,7 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance',
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = state.shadows;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
@@ -175,6 +188,11 @@ function rebuildCity(buildings) {
   mesh.build(buildings, {
     cameraXZ: { x: camera.position.x, z: camera.position.z },
   });
+  // Stand-in massing for districts that are not resident, so streaming does not
+  // leave a hard edge at the horizon.
+  const residentIds = new Set(context.streamer ? context.streamer.resident.keys() : []);
+  const impostors = createImpostors(THREE, state.source.manifest, residentIds);
+  if (impostors) mesh.group.add(impostors);
   scene.add(mesh.group);
   if (previous) {
     scene.remove(previous.group);
@@ -725,11 +743,18 @@ async function boot() {
   scene.add(context.hall);
 
   const span = Math.max(bounds[2], bounds[3]);
+  // A span-proportional radius would cover an entire 6.7 km city at once, so the
+  // working set is bounded in metres and then capped by building count.
+  const near = Math.min(2500, Math.max(400, span * 0.2));
   context.streamer = new DistrictStreamer(state.source, {
     span,
-    near: 1.0,
-    far: 1.9,
-    maxResident: manifest.meta.buildingCount > 20000 ? 20000 : Infinity,
+    near,
+    far: near * 1.9,
+    maxResident: state.maxResident
+      ? state.maxResident
+      : manifest.meta.buildingCount > 20000
+        ? 20000
+        : Infinity,
   });
 
   progress('placing buildings');

@@ -152,9 +152,15 @@ def build_manifest(
         )
 
     # ---- districts, with skyline envelopes for the overview impostors ----
+    # Group once: scanning every file for every district is O(districts x files),
+    # which at 320 districts and 50,000 files is 16M comparisons per pass.
+    members_by_district: dict[str, list[FileMetrics]] = {}
+    for record in analysis.files:
+        members_by_district.setdefault(record.district, []).append(record)
+
     districts = []
     for index, district in enumerate(layout.districts):
-        members = [f for f in analysis.files if f.district == district.key]
+        members = members_by_district.get(district.key, [])
         heights = [f.height for f in members] or [0.0]
         envelope_w = max((b.width for b in district.buildings), default=0.0)
         envelope_d = max((b.depth for b in district.buildings), default=0.0)
