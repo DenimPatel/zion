@@ -634,6 +634,120 @@ export function createHoverOutline(THREE) {
   return outline;
 }
 
+/**
+ * One InstancedMesh from a placement list.
+ *
+ * The landmark is a few hundred small solids -- pilasters, capitals, acroteria
+ * -- and batching them by material keeps the whole hall at a handful of draw
+ * calls instead of a few hundred. A placement is
+ * `[x, y, z, sx, sy, sz, rx, ry, rz]`; rotation is optional and defaults to none.
+ */
+function instancePlacements(THREE, geometry, material, placements) {
+  const mesh = new THREE.InstancedMesh(geometry, material, placements.length);
+  const position = new THREE.Vector3();
+  const scale = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const euler = new THREE.Euler();
+  const matrix = new THREE.Matrix4();
+  placements.forEach((place, index) => {
+    position.set(place[0], place[1], place[2]);
+    scale.set(place[3], place[4], place[5]);
+    euler.set(place[6] || 0, place[7] || 0, place[8] || 0);
+    quaternion.setFromEuler(euler);
+    matrix.compose(position, quaternion, scale);
+    mesh.setMatrixAt(index, matrix);
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/** Concentric paving and an avenue cross, so the plaza is ground, not a disc. */
+function makePlazaTexture(THREE) {
+  const size = 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = size / 2;
+  ctx.fillStyle = '#2f3542';
+  ctx.fillRect(0, 0, size, size);
+  ctx.save();
+  ctx.translate(c, c);
+  ctx.strokeStyle = 'rgba(216,201,164,0.20)';
+  for (let r = 40; r < c; r += 34) {
+    ctx.lineWidth = r % 68 === 40 ? 3 : 1.4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(216,201,164,0.11)';
+  ctx.lineWidth = 1.2;
+  for (let i = 0; i < 24; i += 1) {
+    const a = (i / 24) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * 40, Math.sin(a) * 40);
+    ctx.lineTo(Math.cos(a) * c, Math.sin(a) * c);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(216,201,164,0.16)';
+  ctx.lineWidth = 7;
+  ctx.beginPath();
+  ctx.moveTo(-c, 0);
+  ctx.lineTo(c, 0);
+  ctx.moveTo(0, -c);
+  ctx.lineTo(0, c);
+  ctx.stroke();
+  ctx.restore();
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.anisotropy = 4;
+  return texture;
+}
+
+/** A painted clock face for the tower, so the landmark tells the hour twice a day. */
+function makeClockTexture(THREE) {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c = size / 2;
+  ctx.fillStyle = '#f2ead6';
+  ctx.beginPath();
+  ctx.arc(c, c, c, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#8c6f3f';
+  ctx.lineWidth = size * 0.055;
+  ctx.beginPath();
+  ctx.arc(c, c, c * 0.94, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#2b2b2b';
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 12; i += 1) {
+    const a = (i / 12) * Math.PI * 2;
+    const inner = c * (i % 3 === 0 ? 0.68 : 0.76);
+    const outer = c * 0.86;
+    ctx.lineWidth = i % 3 === 0 ? size * 0.03 : size * 0.014;
+    ctx.beginPath();
+    ctx.moveTo(c + Math.sin(a) * inner, c - Math.cos(a) * inner);
+    ctx.lineTo(c + Math.sin(a) * outer, c - Math.cos(a) * outer);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#2b2b2b';
+  const hand = (turns, length, width) => {
+    ctx.save();
+    ctx.translate(c, c);
+    ctx.rotate(turns * Math.PI * 2);
+    ctx.fillRect(-width / 2, -length, width, length);
+    ctx.restore();
+  };
+  hand(10.17 / 12, c * 0.44, size * 0.036);
+  hand(10 / 60, c * 0.66, size * 0.022);
+  ctx.beginPath();
+  ctx.arc(c, c, size * 0.03, 0, Math.PI * 2);
+  ctx.fill();
+  return new THREE.CanvasTexture(canvas);
+}
+
 export function createCityHall(THREE, bounds, maxHeight, hall = null) {
   const group = new THREE.Group();
   group.name = 'city-hall';
@@ -653,70 +767,229 @@ export function createCityHall(THREE, bounds, maxHeight, hall = null) {
   const stone = new THREE.MeshStandardMaterial({ color: 0xd8c9a4, roughness: 0.75, metalness: 0.05 });
   const trim = new THREE.MeshStandardMaterial({ color: 0xb99f6b, roughness: 0.6, metalness: 0.15 });
   const roof = new THREE.MeshStandardMaterial({ color: 0x8c6f3f, roughness: 0.5, metalness: 0.3 });
+  const glass = new THREE.MeshStandardMaterial({
+    color: 0x1d2a42,
+    roughness: 0.25,
+    metalness: 0.15,
+    emissive: 0xffc978,
+    emissiveIntensity: 0.3,
+  });
+  const glow = new THREE.MeshStandardMaterial({
+    color: 0xffc978,
+    emissive: 0xffb347,
+    emissiveIntensity: 1.1,
+  });
 
-  // A plaza so the landmark reads as public ground rather than a plot.
-  const plaza = new THREE.Mesh(
-    new THREE.CircleGeometry(26 * scale, 48),
-    new THREE.MeshStandardMaterial({ color: 0x3a3f4c, roughness: 1 })
-  );
-  plaza.rotation.x = -Math.PI / 2;
-  plaza.position.set(cx, 0.09, cz);
-  // The plaza is ground, not a target. Leaving it raycastable made a wide disc
-  // at the centre of the plan swallow every hover and click near it.
-  plaza.raycast = () => {};
-  group.add(plaza);
+  // The hall is laid out in its own frame, front facing -Z, and then the whole
+  // group is dropped onto the reserved centre and scaled to the plaza. Working
+  // in local units keeps the dimensions readable against each other.
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const unitColumn = new THREE.CylinderGeometry(1, 1, 1, 16);
+  const unitCone = new THREE.ConeGeometry(1, 1, 12);
+  const unitSphere = new THREE.SphereGeometry(1, 12, 10);
+  const unitPlane = new THREE.PlaneGeometry(1, 1);
 
-  // Stepped base.
-  const base = new THREE.Mesh(new THREE.BoxGeometry(30 * scale, 2.2 * scale, 20 * scale), stone);
-  base.position.set(cx, 1.1 * scale, cz);
-  base.castShadow = true;
-  base.receiveShadow = true;
-  group.add(base);
+  const stoneBoxes = [];
+  const trimBoxes = [];
+  const roofBoxes = [];
+  const glassBoxes = [];
+  const columns = [];
+  const colonnade = [];
+  const trimColumns = [];
+  const roofCones = [];
+  const trimCones = [];
+  const glows = [];
+  const clockFaces = [];
 
-  const steps = new THREE.Mesh(new THREE.BoxGeometry(24 * scale, 3.4 * scale, 16 * scale), stone);
-  steps.position.set(cx, 3.9 * scale, cz);
-  steps.castShadow = true;
-  group.add(steps);
+  // Podium: two tiers, the lower one exactly the footprint the analyzer reserved.
+  stoneBoxes.push([0, 0.7, 0, 30, 1.4, 20]);
+  stoneBoxes.push([0, 2.0, 0, 27, 1.2, 18]);
 
-  // Colonnade front.
-  const columnGeometry = new THREE.CylinderGeometry(0.85 * scale, 0.85 * scale, 6.4 * scale, 12);
-  const columnCount = 6;
-  const columns = new THREE.InstancedMesh(columnGeometry, trim, columnCount);
-  columns.castShadow = true;
-  const matrix = new THREE.Matrix4();
-  for (let i = 0; i < columnCount; i++) {
-    const offset = (i - (columnCount - 1) / 2) * 3.4 * scale;
-    matrix.makeTranslation(cx + offset, 8.9 * scale, cz - 8 * scale);
-    columns.setMatrixAt(i, matrix);
+  // A grand flight down the front; each step shallower as it rises.
+  for (let i = 0; i < 6; i += 1) {
+    const top = (2.6 * (i + 1)) / 6;
+    const far = -11.4 + i * 0.55;
+    stoneBoxes.push([0, top / 2, (far - 8.6) / 2, 17 - i * 0.4, top, -8.6 - far]);
   }
-  columns.instanceMatrix.needsUpdate = true;
-  group.add(columns);
 
-  const pediment = new THREE.Mesh(new THREE.BoxGeometry(24 * scale, 2.2 * scale, 16 * scale), roof);
-  pediment.position.set(cx, 11.2 * scale, cz);
-  pediment.castShadow = true;
-  group.add(pediment);
+  // The body: a windowed block, pilastered, with a hooded entrance.
+  stoneBoxes.push([0, 6.1, 1.8, 20, 7.0, 14]);
+  for (const sx of [-1, 1]) {
+    for (const z of [-4.8, 8.4]) {
+      trimBoxes.push([sx * 10.05, 6.1, z, 0.5, 7.2, 1.0]);
+    }
+    for (const z of [-3.8, -1.2, 1.4, 4.0, 6.6]) {
+      trimBoxes.push([sx * 10.05, 6.1, z, 0.5, 7.2, 0.9]);
+    }
+    for (const z of [-2.5, 0.1, 2.7, 5.3]) {
+      glassBoxes.push([sx * 10.12, 6.2, z, 0.18, 3.9, 1.3]);
+    }
+  }
+  for (const x of [-8.2, -4.1, 0, 4.1, 8.2]) {
+    trimBoxes.push([x, 6.1, 8.85, 0.9, 7.2, 0.5]);
+  }
+  for (const x of [-6.1, -2.0, 2.0, 6.1]) {
+    glassBoxes.push([x, 6.2, 8.85, 1.3, 3.9, 0.18]);
+  }
+  roofBoxes.push([0, 4.6, -5.3, 3.6, 4.0, 0.25]);
+  trimBoxes.push([-1.95, 4.7, -5.32, 0.4, 4.2, 0.3]);
+  trimBoxes.push([1.95, 4.7, -5.32, 0.4, 4.2, 0.3]);
+  trimBoxes.push([0, 6.95, -5.35, 4.8, 0.5, 0.4]);
+  glassBoxes.push([-4.2, 6.2, -5.25, 1.3, 3.9, 0.18]);
+  glassBoxes.push([4.2, 6.2, -5.25, 1.3, 3.9, 0.18]);
 
-  // A clock tower with a dome, to be visible from across the city.
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(7 * scale, 14 * scale, 7 * scale), stone);
-  tower.position.set(cx, 19.3 * scale, cz);
-  tower.castShadow = true;
-  group.add(tower);
+  // Colonnade of eight, standing proud of the wall and carrying the entablature.
+  // The shafts are the darker trim tone, so the colonnade separates from the
+  // wall behind it instead of reading as one flat facade.
+  const columnCount = 8;
+  const columnSpread = 19;
+  for (let i = 0; i < columnCount; i += 1) {
+    const x = (i - (columnCount - 1) / 2) * (columnSpread / (columnCount - 1));
+    colonnade.push([x, 6.1, -7.2, 0.62, 7.0, 0.62]);
+    stoneBoxes.push([x, 2.8, -7.2, 1.5, 0.4, 1.5]);
+    trimBoxes.push([x, 9.35, -7.2, 1.6, 0.5, 1.6]);
+  }
 
-  const dome = new THREE.Mesh(
-    new THREE.SphereGeometry(4.4 * scale, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+  // Entablature: architrave, frieze and a cornice wide enough to roof the colonnade.
+  stoneBoxes.push([0, 10.0, 1.2, 21, 0.8, 17.8]);
+  trimBoxes.push([0, 10.9, 1.2, 21, 1.0, 17.8]);
+  stoneBoxes.push([0, 11.75, 1.2, 22.4, 0.7, 18.6]);
+
+  // A real gable over the colonnade: a triangular prism with a raking cornice,
+  // a medallion in the tympanum, and acroteria on its three points.
+  const pedimentShape = new THREE.Shape();
+  pedimentShape.moveTo(-11.2, 0);
+  pedimentShape.lineTo(11.2, 0);
+  pedimentShape.lineTo(0, 3.4);
+  pedimentShape.closePath();
+  const pediment = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(pedimentShape, { depth: 6.0, bevelEnabled: false }),
     roof
   );
-  dome.position.set(cx, 26.3 * scale, cz);
+  pediment.position.set(0, 12.1, -8.3);
+  pediment.castShadow = true;
+  pediment.receiveShadow = true;
+  group.add(pediment);
+
+  // The doorway gets its own small gable, so the entrance reads as the entrance.
+  const doorShape = new THREE.Shape();
+  doorShape.moveTo(-2.4, 0);
+  doorShape.lineTo(2.4, 0);
+  doorShape.lineTo(0, 1.0);
+  doorShape.closePath();
+  const doorPediment = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(doorShape, { depth: 0.7, bevelEnabled: false }),
+    trim
+  );
+  doorPediment.position.set(0, 6.95, -5.5);
+  doorPediment.castShadow = true;
+  group.add(doorPediment);
+
+  const raking = Math.atan2(3.4, 11.2);
+  trimBoxes.push([-5.6, 13.8, -8.55, 11.7, 0.5, 0.5, 0, 0, raking]);
+  trimBoxes.push([5.6, 13.8, -8.55, 11.7, 0.5, 0.5, 0, 0, -raking]);
+  trimBoxes.push([0, 12.25, -8.55, 23, 0.35, 0.6]);
+  trimColumns.push([0, 13.3, -8.6, 1.0, 0.4, 1.0, Math.PI / 2, 0, 0]);
+  trimCones.push([0, 16.0, -7.1, 0.5, 1.0, 0.5]);
+  trimCones.push([-11.2, 12.6, -7.1, 0.45, 0.9, 0.45]);
+  trimCones.push([11.2, 12.6, -7.1, 0.45, 0.9, 0.45]);
+
+  // The tower: clock stage, open belfry, drum and dome -- the silhouette the
+  // rest of the city navigates by.
+  const towerZ = 3.5;
+  stoneBoxes.push([0, 12.35, towerZ, 21, 0.5, 9.6]);
+  stoneBoxes.push([0, 13.1, towerZ, 10, 1.2, 10]);
+  stoneBoxes.push([0, 18.7, towerZ, 8, 10, 8]);
+  for (const sx of [-1, 1]) {
+    for (const dz of [-1, 1]) {
+      trimBoxes.push([sx * 3.7, 18.7, towerZ + dz * 3.7, 0.7, 10, 0.7]);
+    }
+  }
+  trimBoxes.push([0, 16.0, towerZ, 8.4, 0.4, 8.4]);
+
+  for (const [nx, nz, ry] of [[0, -1, Math.PI], [0, 1, 0], [-1, 0, -Math.PI / 2], [1, 0, Math.PI / 2]]) {
+    const wide = nz !== 0;
+    trimBoxes.push([
+      nx * 4.03, 21.0, towerZ + nz * 4.03,
+      wide ? 4.0 : 0.2, 4.0, wide ? 0.2 : 4.0,
+    ]);
+    clockFaces.push([nx * 4.16, 21.0, towerZ + nz * 4.16, 3.2, 3.2, 1, 0, ry, 0]);
+  }
+
+  stoneBoxes.push([0, 24.1, towerZ, 9.6, 0.8, 9.6]);
+  trimBoxes.push([0, 24.6, towerZ, 9.9, 0.3, 9.9]);
+  for (const sx of [-1, 1]) {
+    for (const dz of [-1, 1]) {
+      stoneBoxes.push([sx * 2.95, 26.15, towerZ + dz * 2.95, 1.1, 2.8, 1.1]);
+    }
+  }
+  stoneBoxes.push([0, 27.9, towerZ, 8.6, 0.7, 8.6]);
+  trimBoxes.push([0, 28.35, towerZ, 8.9, 0.2, 8.9]);
+
+  columns.push([0, 29.35, towerZ, 3.1, 2.2, 3.1]);
+  for (let i = 0; i < 8; i += 1) {
+    const a = (i / 8) * Math.PI * 2;
+    columns.push([Math.cos(a) * 3.0, 29.3, towerZ + Math.sin(a) * 3.0, 0.22, 2.0, 0.22]);
+  }
+  trimColumns.push([0, 30.6, towerZ, 3.5, 0.3, 3.5]);
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(3.0, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+    roof
+  );
+  dome.position.set(0, 30.75, towerZ);
   dome.castShadow = true;
   group.add(dome);
 
-  const beacon = new THREE.Mesh(
-    new THREE.SphereGeometry(1.3 * scale, 16, 12),
-    new THREE.MeshStandardMaterial({ color: 0xffc978, emissive: 0xffb347, emissiveIntensity: 1.1 })
+  trimColumns.push([0, 34.5, towerZ, 0.9, 1.5, 0.9]);
+  roofCones.push([0, 35.65, towerZ, 1.15, 0.8, 1.15]);
+  trimColumns.push([0, 36.5, towerZ, 0.12, 0.9, 0.12]);
+  glows.push([0, 37.2, towerZ, 0.5, 0.5, 0.5]);
+
+  // Plaza: reserved ground, paved, and not a raycast target. A wide disc left
+  // raycastable swallowed every hover and click near the centre of the plan.
+  const plaza = new THREE.Mesh(
+    new THREE.CircleGeometry(26, 64),
+    new THREE.MeshStandardMaterial({ map: makePlazaTexture(THREE), roughness: 0.95 })
   );
-  beacon.position.set(cx, 31.4 * scale, cz);
-  group.add(beacon);
+  plaza.rotation.x = -Math.PI / 2;
+  plaza.position.set(0, 0.09, 0);
+  plaza.raycast = () => {};
+  group.add(plaza);
+
+  const curb = new THREE.Mesh(new THREE.RingGeometry(25.2, 26, 64), trim);
+  curb.rotation.x = -Math.PI / 2;
+  curb.position.set(0, 0.14, 0);
+  curb.raycast = () => {};
+  group.add(curb);
+
+  for (let i = 0; i < 4; i += 1) {
+    const a = Math.PI / 4 + i * (Math.PI / 2);
+    const x = Math.cos(a) * 21;
+    const z = Math.sin(a) * 21;
+    trimColumns.push([x, 2.0, z, 0.16, 4.0, 0.16]);
+    glows.push([x, 4.2, z, 0.4, 0.4, 0.4]);
+  }
+
+  group.add(instancePlacements(THREE, unitBox, stone, stoneBoxes));
+  group.add(instancePlacements(THREE, unitBox, trim, trimBoxes));
+  group.add(instancePlacements(THREE, unitBox, roof, roofBoxes));
+  group.add(instancePlacements(THREE, unitBox, glass, glassBoxes));
+  group.add(instancePlacements(THREE, unitColumn, stone, columns));
+  group.add(instancePlacements(THREE, unitColumn, trim, colonnade));
+  group.add(instancePlacements(THREE, unitColumn, trim, trimColumns));
+  group.add(instancePlacements(THREE, unitCone, roof, roofCones));
+  group.add(instancePlacements(THREE, unitCone, trim, trimCones));
+  group.add(instancePlacements(THREE, unitSphere, glow, glows));
+  group.add(instancePlacements(
+    THREE,
+    unitPlane,
+    new THREE.MeshStandardMaterial({ map: makeClockTexture(THREE), roughness: 0.5, metalness: 0.05 }),
+    clockFaces
+  ));
+
+  group.position.set(cx, 0, cz);
+  group.scale.setScalar(scale);
 
   // The same rectangle the analyzer kept clear, so what walk mode collides with
   // is exactly the ground no building was put on.
@@ -737,7 +1010,7 @@ export function createCityHall(THREE, bounds, maxHeight, hall = null) {
       id: -1,
       rel: '__city_hall__',
       ...footprint,
-      height: 33 * scale,
+      height: 38 * scale,
       isCityHall: true,
     },
   };

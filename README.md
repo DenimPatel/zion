@@ -410,8 +410,23 @@ python3 tests/capture.py --url http://127.0.0.1:8791/ --out /tmp/hud.png --js
 python3 tests/capture.py --url http://127.0.0.1:8792/ --out /tmp/hud.png --js --district
 ```
 
-It is a developer tool: not part of the suite (the `test_*.py` pattern never
-collects it) and not part of the viewer. The one dependency beyond the standard
+**The landmark** gets the same treatment from `tests/capture_hall.py`, which
+reads `manifest.cityHall` and places the fly camera on an orbit around it, so the
+hall is framed the same way whatever plan it stands on:
+
+```
+python3 tests/capture_hall.py --url http://127.0.0.1:8791/ --out /tmp/hall.png
+python3 tests/capture_hall.py --url http://127.0.0.1:8791/ --out /tmp/hall-front.png --dist 62 --eye 16 --angle -1.5708 --look-y 9
+```
+
+`--dist` and `--eye` are in multiples of the hall's own scale and `--angle`
+orbits it (`-1.5708` is dead ahead of the portico), so the massing can be
+inspected from the street, the hero angle or above without flying there by hand.
+The short repo is often enough to iterate on the design; the same invocation
+frames it in `deepseek-harness` at ten times the scale.
+
+Both are developer tools: not part of the suite (the `test_*.py` pattern never
+collects them) and not part of the viewer. The one dependency beyond the standard
 library is `websocket-client`, needed only to speak CDP.
 
 **Encryption** is verified from both ends. In Python: NIST vectors, a tampered
