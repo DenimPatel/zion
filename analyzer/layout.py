@@ -44,6 +44,7 @@ ROOT_DISTRICT = "(root)"
 
 # World units are metres.
 PLOT_AREA_PER_BUILDING = 900.0   # ~30 m x 30 m
+PLOT_GAP = 2.0                   # kept clear between neighbouring plots
 STREET_WIDTH = 6.0
 AVENUE_WIDTH = 11.0
 BLOCK_INSET = 3.0
@@ -256,6 +257,23 @@ def _treemap(
     _treemap(second, r2, out, streets, depth + 1)
 
 
+def plan_dims(record) -> tuple[float, float]:
+    """A file's plot as (long side, short side) in metres.
+
+    Records built before footprints had two dimensions -- and any the parser
+    could describe no floor plan for -- fall back to a square off `footprint`.
+    """
+    width = getattr(record, "footprint_w", 0.0) or record.footprint
+    depth = getattr(record, "footprint_d", 0.0) or record.footprint
+    return max(width, depth), min(width, depth)
+
+
+def plot_demand(record) -> float:
+    """Ground a file's plot needs, gap included, in square metres."""
+    long_side, short_side = plan_dims(record)
+    return (long_side + PLOT_GAP) * (short_side + PLOT_GAP)
+
+
 def _grid_for(rect: Rect, count: int) -> tuple[int, int, float, float]:
     """Choose a column/row grid for `count` buildings inside `rect`."""
     if count <= 0:
@@ -293,10 +311,21 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
         for record in members:
             record.district = key
 
-    entries = sorted(
-        ((key, sum(max(1e-6, f.weight) for f in members)) for key, members in grouped.items()),
-        key=lambda kv: -kv[1],
-    )
+    # District area is folder content weight -- but never less than the ground
+    # its buildings actually need.
+    #
+    # Without that floor, a folder of two hundred small files gets a rect sized
+    # by its line count, the per-building cells come out a few metres across,
+    # and every footprint is clipped to the cell: which is exactly how a
+    # repository ended up as a field of identical squares regardless of what
+    # `footprint_for` computed. Both terms are already in square metres, so the
+    # floor is a plain max.
+    def district_weight(members: list[FileMetrics]) -> float:
+        content = sum(max(1e-6, f.weight) for f in members)
+        return max(content, sum(plot_demand(f) for f in members))
+
+    weights = {key: district_weight(members) for key, members in grouped.items()}
+    entries = sorted(weights.items(), key=lambda kv: -kv[1])
 
     total_weight = sum(w for _, w in entries)
     city_area = max(PLOT_AREA_PER_BUILDING * len(files), total_weight)
@@ -318,7 +347,7 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
             name=key if key == ROOT_DISTRICT else key.rsplit("/", 1)[-1],
             depth=chosen,
             rect=rect,
-            weight=sum(max(1e-6, f.weight) for f in members),
+            weight=weights[key],
             building_count=len(members),
             has_readme=any(f.is_doc for f in members),
             readme_rel=next((f.rel for f in members if f.is_doc), ""),
@@ -331,15 +360,48 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
         if analysis.flags.authorship:
             district.mayor = _mayor(members)
 
+        # Keep a visible gap between neighbours so the grid reads as plots.
+        gap = min(PLOT_GAP, cell_w * 0.18, cell_h * 0.18)
+        landscape = cell_w >= cell_h
+        avail_long = max(1.0, max(cell_w, cell_h) - gap)
+        avail_short = max(1.0, min(cell_w, cell_h) - gap)
+
+        # One scale for the district, not a clamp per building.
+        #
+        # Clipping each plot to its cell independently destroyed exactly the
+        # information the footprint carried: every building big enough to hit
+        # the cell came out the same size as every other, which in a dense
+        # district is most of them. Scaling the whole block by a single factor
+        # keeps every plot's size *relative to its neighbours* intact, which is
+        # the part that can actually be read.
+        #
+        # The factor fits nine plots in ten rather than all of them, because
+        # taking the minimum lets one 3,000-line outlier shrink its three
+        # thousand neighbours to specks. The few that still overflow are
+        # clipped to their lot below, with their proportions kept.
+        needs = sorted(
+            min(avail_long / long_side, avail_short / short_side)
+            for long_side, short_side in (plan_dims(record) for record in members)
+        )
+        fit = min(1.0, needs[max(0, math.ceil(0.9 * len(needs)) - 1)])
+
         for index, record in enumerate(members):
             col = index % cols if cols else 0
             row = index // cols if cols else 0
             cell_x = block.x + col * cell_w
             cell_y = block.y + row * cell_h
-            # Keep a visible gap between neighbours so the grid reads as plots.
-            gap = min(2.0, cell_w * 0.18, cell_h * 0.18)
-            width = max(2.5, min(record.footprint, cell_w - gap))
-            depth_m = max(2.5, min(record.footprint, cell_h - gap))
+            long_side, short_side = plan_dims(record)
+            # A slab lies along its plot rather than across it, the way a plan
+            # turns a long building to fit its lot.
+            plan_w = long_side if landscape else short_side
+            plan_d = short_side if landscape else long_side
+            width = plan_w * fit
+            depth_m = plan_d * fit
+            # An oversized plot is trimmed to its lot, not squared off: both
+            # sides come down together so the building keeps its proportions.
+            over = max(1.0, width / (cell_w - gap), depth_m / (cell_h - gap))
+            width = max(1.5, width / over)
+            depth_m = max(1.5, depth_m / over)
             district.buildings.append(
                 PlacedBuilding(
                     rel=record.rel,

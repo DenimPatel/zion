@@ -2,7 +2,7 @@
  * Zion viewer entry point.
  *
  * Loads the city, streams districts around the camera, runs the render loop,
- * and routes input to the right mode: fly, overview, walk, or inside a
+ * and routes input to the right mode: fly, orbit, walk, or inside a
  * building. All analysis happened in Python; nothing here parses source.
  */
 
@@ -19,7 +19,7 @@ import {
   archetypeLabel,
 } from './city.js';
 import { SkyRig } from './sky.js';
-import { FlyCamera, OverviewCamera, CameraFlight } from './cameras.js';
+import { FlyCamera, OrbitCamera, CameraFlight } from './cameras.js';
 import { CollisionGrid, WalkCamera } from './collision.js';
 import { Interior } from './interior.js';
 import { CityHall, Tour } from './tour.js';
@@ -36,7 +36,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   source: new CitySource('.'),
-  mode: 'fly', // fly | walk | overview | interior
+  mode: 'fly', // fly | walk | orbit | interior
   night: 0,
   litScale: 1,
   time: 12,
@@ -70,7 +70,7 @@ const context = {
   hall: null,
   sky: null,
   fly: null,
-  overview: null,
+  orbit: null,
   flight: null,
   walk: null,
   grid: null,
@@ -546,9 +546,15 @@ function lookDelta(dx, dy) {
     context.walk.lookDelta(dx, dy);
   } else if (state.mode === 'walk') {
     context.walk.lookDelta(dx, dy);
-  } else if (state.mode === 'fly' || state.mode === 'overview') {
+  } else if (state.mode === 'orbit') {
+    // Dragging in orbit swings around the target rather than dropping the user
+    // back into free flight, which is what used to happen and cost them the
+    // vantage they had just found.
+    if (pointerState.button === 2) context.orbit.panDelta(dx, dy);
+    else context.orbit.orbitDelta(dx, dy);
+    setOrbitPrompt();
+  } else if (state.mode === 'fly') {
     context.fly.lookDelta(dx, dy);
-    if (state.mode === 'overview') setMode('fly');
   }
 }
 
@@ -617,9 +623,38 @@ function activate(target) {
   }
   if (target.kind === 'district') {
     context.inspector.showDistrict(target.district);
+    orbitAround(target);
     return;
   }
   context.inspector.showBuilding(target.building);
+  orbitAround(target);
+}
+
+/**
+ * Clicking while orbiting re-centres the circle on what was clicked.
+ *
+ * The orbit is around a point, not around the city, so the same gesture that
+ * inspects a file also puts the camera into a lap around it -- which is the
+ * fastest way there is to see a building from every side, and it costs the user
+ * no new control to learn.
+ */
+function orbitAround(target) {
+  if (state.mode !== 'orbit') return;
+  if (target.kind === 'district') {
+    const [x, z, w, h] = target.district.rect;
+    context.orbit.focusOn({ x: x + w / 2, z: z + h / 2 }, Math.max(w, h) * 0.6);
+  } else if (target.kind === 'building') {
+    const b = target.building;
+    const w = b.width || 4;
+    const d = b.depth || 4;
+    context.orbit.focusOn(
+      { x: (b.x || 0) + w / 2, z: (b.y || 0) + d / 2 },
+      Math.max(w, d, (b.height || 6) * 0.5),
+      (b.height || 6) * 0.45
+    );
+  }
+  context.orbit.spinning = true;
+  setOrbitPrompt();
 }
 
 canvas.addEventListener('pointercancel', () => {
@@ -638,9 +673,83 @@ canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 // movementX/Y and a click inspects whatever the crosshair is over.
 document.addEventListener('mousemove', (event) => {
   if (!pointerLocked()) return;
-  if (state.mode === 'overview') return;
+  if (state.mode === 'orbit') return;
   lookDelta(event.movementX || 0, event.movementY || 0);
 });
+
+/**
+ * Say what the orbit is doing, because an automatic camera with no caption
+ * reads as the viewer having taken control away from you.
+ */
+function setOrbitPrompt() {
+  if (state.mode !== 'orbit') return;
+  setPrompt(
+    context.orbit.spinning
+      ? '<kbd>Space</kbd> to stop here &nbsp;·&nbsp; drag to swing, right-drag to pan, wheel to zoom &nbsp;·&nbsp; <kbd>O</kbd> to fly from here'
+      : '<kbd>Space</kbd> to circle the city &nbsp;·&nbsp; drag to swing, right-drag to pan, wheel to zoom &nbsp;·&nbsp; <kbd>O</kbd> to fly from here'
+  );
+}
+
+/**
+ * Orbit keys.
+ *
+ * Handled before the global switch so that the movement keys mean something
+ * here -- W and S change the radius, A and D the bearing, Q and E the height --
+ * instead of silently doing nothing because the fly camera is disabled.
+ * Returns true when the key was ours.
+ */
+function handleOrbitKey(code) {
+  if (state.mode !== 'orbit') return false;
+  const orbit = context.orbit;
+  switch (code) {
+    case 'Space':
+      orbit.toggleSpin();
+      break;
+    case 'KeyA': case 'ArrowLeft':
+      orbit.nudge({ azimuth: -0.12 });
+      break;
+    case 'KeyD': case 'ArrowRight':
+      orbit.nudge({ azimuth: 0.12 });
+      break;
+    case 'KeyW': case 'ArrowUp':
+      orbit.nudge({ distance: 0.9 });
+      break;
+    case 'KeyS': case 'ArrowDown':
+      orbit.nudge({ distance: 1 / 0.9 });
+      break;
+    case 'KeyE':
+      orbit.nudge({ elevation: 0.07 });
+      break;
+    case 'KeyQ':
+      orbit.nudge({ elevation: -0.07 });
+      break;
+    default:
+      return false;
+  }
+  setOrbitPrompt();
+  return true;
+}
+
+/**
+ * The wheel.
+ *
+ * Flying had no wheel binding at all, so a mouse could turn the camera but
+ * never take it anywhere -- the most basic thing anyone tries first in a 3D
+ * view, and it did nothing.
+ */
+canvas.addEventListener('wheel', (event) => {
+  if (state.mode === 'interior' || state.mode === 'walk') return;
+  event.preventDefault();
+  // Wheels, trackpads and high-resolution mice all report different units;
+  // what matters is the direction and roughly one step per gesture.
+  const notches = Math.max(-3, Math.min(3, event.deltaY / 100)) || Math.sign(event.deltaY);
+  if (state.mode === 'orbit') {
+    context.orbit.zoomBy(-notches);
+    setOrbitPrompt();
+  } else {
+    context.fly.dolly(-notches);
+  }
+}, { passive: false });
 
 function setCapture(on) {
   if (on) {
@@ -673,20 +782,30 @@ function setMode(mode) {
   }
   applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
+  const previous = state.mode;
   state.mode = mode;
   context.fly.enabled = mode === 'fly';
-  context.overview.active = mode === 'overview';
+  context.orbit.active = mode === 'orbit';
   context.walk.enabled = mode === 'walk';
-  if (mode === 'overview') {
-    context.overview.frame(state.source.manifest.bounds);
+  if (mode === 'orbit') {
+    // Pick up wherever the view already is, and start the lap: "show me the
+    // city from all sides" is the whole reason to be here, so it should not
+    // need a second keystroke.
+    context.orbit.adopt(context.fly);
+    context.orbit.spinning = true;
     document.exitPointerLock?.();
+  } else if (previous === 'orbit') {
+    // ...and leaving hands the exact vantage back, so O is a genuine toggle
+    // rather than two different teleports.
+    context.orbit.handOff(context.fly);
   }
   if (mode === 'walk') {
     context.walk.fromFlyingCamera(context.fly);
     context.walk.apply();
   }
   if (mode !== 'fly') document.exitPointerLock?.();
-  setPrompt('');
+  if (mode === 'orbit') setOrbitPrompt();
+  else setPrompt('');
 }
 
 async function enterInterior(building) {
@@ -699,7 +818,7 @@ async function enterInterior(building) {
   state.mode = 'interior';
   context.fly.enabled = false;
   context.walk.enabled = false;
-  context.overview.active = false;
+  context.orbit.active = false;
   document.exitPointerLock?.();
   setPrompt(
     '<kbd>[</kbd><kbd>]</kbd> change floor &nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp; ' +
@@ -781,12 +900,24 @@ window.addEventListener('keydown', async (event) => {
     setPrompt('');
   }
 
+  if (handleOrbitKey(event.code)) {
+    event.preventDefault();
+    return;
+  }
+
   switch (event.code) {
     case 'KeyV':
       setMode(state.mode === 'walk' ? 'fly' : 'walk');
       break;
     case 'KeyO':
-      setMode(state.mode === 'overview' ? 'fly' : 'overview');
+      setMode(state.mode === 'orbit' ? 'fly' : 'orbit');
+      break;
+    case 'KeyR':
+      // Re-frame the whole plan without leaving the orbit.
+      if (state.mode === 'orbit') {
+        context.orbit.frame(state.source.manifest.bounds);
+        setOrbitPrompt();
+      }
       break;
     case 'KeyN':
       context.tour.skipToNext();
@@ -1037,8 +1168,8 @@ function frame(now) {
     }
     if (context.flight.active) {
       context.flight.update(dt);
-    } else if (state.mode === 'overview') {
-      context.overview.update(dt);
+    } else if (state.mode === 'orbit') {
+      context.orbit.update(dt);
     } else if (state.mode === 'walk') {
       context.walk.update(dt);
       updateWalkPrompt();
@@ -1839,7 +1970,7 @@ async function boot() {
   rebuildCity(context.resident);
 
   context.fly = new FlyCamera(THREE, camera, bounds);
-  context.overview = new OverviewCamera(THREE, camera, bounds);
+  context.orbit = new OrbitCamera(THREE, camera, bounds);
   context.flight = new CameraFlight(camera);
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
@@ -1868,7 +1999,7 @@ async function boot() {
   });
 
   context.fly.setFromManifest(manifest.camera);
-  context.overview.frame(bounds);
+  context.orbit.frame(bounds);
   camera.far = manifest.camera.far;
   camera.fov = manifest.camera.fov;
   camera.updateProjectionMatrix();

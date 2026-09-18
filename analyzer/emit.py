@@ -28,7 +28,7 @@ STRING_MAGIC = b"ZIONSTR1"
 # Legend entries, in display order.  `enabled` is decided by RepoFlags.
 LEGEND_SPEC = [
     ("height", "Logical source lines -> building height", "loc"),
-    ("footprint", "Size on disk (capped) -> footprint", "bytes"),
+    ("footprint", "Lines per floor -> footprint; even floors -> square plan", "plate"),
     ("floors", "Functions, classes, headings, cells -> floors", "count"),
     ("district_area", "Folder content weight -> district area", "weight"),
     ("author_tint", "Dominant author -> building tint and Mayor", "authors"),
@@ -401,6 +401,7 @@ def _building_record(
         "lastMessage": strings.add(record.last_message) if record.last_message else -1,
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
+        "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
         "detail": f"f/{index}.json",
         "source": f"f/{index}.src" if _includes_source(record) else "",
     }

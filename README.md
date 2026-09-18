@@ -29,7 +29,8 @@ Everything in the city is one of these, and nothing is decoration.
 | Repo signal | City form |
 |---|---|
 | **logical source lines** (never bytes on disk) | building height |
-| size on disk, capped | footprint |
+| **logical lines per floor** (bytes on disk only when there is no floor plan) | footprint area |
+| how evenly the file divides into floors | footprint shape: even → square, lopsided → slab |
 | top-level functions / classes / headings / notebook cells | floors |
 | folder content weight | district area (treemap) |
 | dominant author by lines owned | building tint, district Mayor |
@@ -215,17 +216,37 @@ Measured, not estimated — see `bench/results.md`.
 
 **Draw calls do not grow with building count.** One `InstancedMesh` exists per
 archetype per LOD tier, so 28 buildings and 20,000 resident buildings cost the
-same handful of calls. Per-building differences — footprint, height, tint, and
-the fraction of lit windows — ride in the instance matrix, the instance colour,
-and one extra instanced attribute.
+same handful of calls. Per-building differences — footprint, height, tint, the
+fraction of lit windows, the storey height, the facade family, the weathering
+and the seed that decides the roofline — ride in the instance matrix, the
+instance colour, and six instanced attributes.
+
+**Detail does not grow them either.** Buildings are unique in three ways, none
+of which costs a call. Each archetype has its own massing (`viewer/js/shapes.js`)
+— podium, shaft, setback, crown — and the vertex shader moves the ornament of
+that massing per instance, so a district of towers is a skyline rather than a
+comb. Each wall is computed per fragment from the building's own metrics
+(`viewer/js/facade.js`) rather than sampled from one shared bitmap, so window
+rows *are* the floors the parser found: a three-function module gets three rows
+and a forty-class one gets forty. And the whole city's rooftop plant, tanks and
+masts are a single extra instanced cluster.
+
+The facade antialiases itself with screen-space derivatives, dissolving into the
+average it would have integrated to once a window cell drops below a pixel —
+which is what lets a ten-thousand-building skyline carry window-level detail
+without shimmering. "Lit means documented" survives that averaging, because the
+average of the per-window dice roll *is* the building's documented ratio.
 
 Three mechanisms keep a big city finite:
 
 1. **Chunk streaming.** A camera-centred working set, bounded in metres and then
    capped by building count. The 50k benchmark holds 19,880 of 50,013 buildings
    across 129 of 320 chunks.
-2. **Level of detail.** Distant buildings keep their glow but drop the window
-   texture, which is the expensive part of the fragment shader.
+2. **Level of detail.** Distant buildings keep their facade and their glow — the
+   metaphor has to survive at range — but fall back to box massing, which is
+   where the triangles actually go. The detailed tier is bounded by radius and
+   then by count, so a dense repository degrades gracefully instead of all at
+   once.
 3. **L3 district impostors.** Every district that is *not* resident is drawn as a
    single box sized from the manifest's own skyline envelope, so streaming leaves
    no hard edge at the horizon — for one extra draw call no matter how many

@@ -234,7 +234,13 @@ def cmd_serve(args) -> int:
         def log_message(self, *a):  # pragma: no cover - noise control
             pass
 
-    with socketserver.TCPServer(("127.0.0.1", args.port), QuietHandler) as httpd:
+    class Server(socketserver.ThreadingTCPServer):
+        # Restarting on the same port must just work: the default leaves the
+        # socket in TIME_WAIT and the next start fails with EADDRINUSE.
+        allow_reuse_address = True
+        daemon_threads = True
+
+    with Server(("127.0.0.1", args.port), QuietHandler) as httpd:
         url = f"http://127.0.0.1:{httpd.server_address[1]}/"
         print(f"Zion serving {out_dir}")
         print(f"  {url}")

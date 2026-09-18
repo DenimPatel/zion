@@ -101,9 +101,63 @@ def height_for(language: str, logical_loc: int, rows: int | None, is_binary: boo
     return 6.0 + 3.20 * math.sqrt(max(0, logical_loc))
 
 
-def footprint_for(size: int) -> float:
-    """Footprint in metres from bytes on disk, capped so one blob cannot dominate."""
-    return min(40.0, max(3.5, 4.0 + 0.055 * math.sqrt(max(0, size))))
+def footprint_for(
+    size: int,
+    logical_loc: int = 0,
+    floor_lines: list[int] | None = None,
+    physical_lines: int = 0,
+) -> tuple[float, float]:
+    """Plan dimensions in metres: width and depth, which are not the same number.
+
+    Bytes on disk alone made every building a square, and a square whose side
+    barely moved: file sizes cluster hard, so a repository came out as a field
+    of identical plots.  The floor plan is the better question anyway -- a
+    building's footprint should say how much code stands on one floor.
+
+    * **Area** is the average logical lines per floor.  A module of twenty
+      hundred-line functions has deep floor plates; one of two hundred
+      five-line functions has small ones, even when the two files are the same
+      size on disk and therefore exactly as tall.
+    * **Aspect** is how evenly the file divides up -- its longest section
+      against its average one.  Code whose functions are all about the same
+      length is a squarish block; a file with one enormous function among small
+      ones is a slab.  So a square building now means something: evenly divided
+      code.
+
+    Section lengths are measured from where the floors *start*, not from
+    ``Floor.loc``: several parsers use that field for the source slice an
+    interior should show, and a markdown heading's slice is deliberately one
+    line.  Gaps between successive floors are the same measurement in every
+    language, which is what a legend entry needs to be.
+
+    Files with no floor plan at all -- data blobs, lock files, anything the
+    parser could not read -- fall back to bytes on disk for area, and to their
+    own mean line length for aspect: a file of long lines is a wide building.
+    """
+    lines = sorted(n for n in (floor_lines or []) if n > 0)
+
+    if lines and logical_loc > 0:
+        plate = logical_loc / len(lines)
+        side = 3.5 + 1.45 * math.sqrt(plate)
+        end = max(physical_lines, lines[-1]) + 1
+        spans = [b - a for a, b in zip(lines, lines[1:] + [end]) if b > a]
+        mean = sum(spans) / len(spans) if spans else 0.0
+        spread = max(spans) / mean if mean > 0 else 1.0
+    else:
+        side = 4.0 + 0.055 * math.sqrt(max(0, size))
+        # Mean bytes per line against a plain 45-character line.
+        mean_line = size / physical_lines if physical_lines > 0 else 45.0
+        spread = (mean_line / 45.0) ** 2
+
+    side = min(40.0, max(3.5, side))
+    # The fourth root keeps a very lopsided file from becoming a wall, and the
+    # square root on each half keeps width * depth equal to the area the plate
+    # asked for -- so the aspect never smuggles in extra floor space.
+    ratio = math.sqrt(min(2.6, max(0.5, math.sqrt(math.sqrt(max(1e-6, spread))))))
+    # Clamp the dimensions themselves, not just the area's side, so no single
+    # file can put a wall across its district.
+    clamp = lambda metres: min(46.0, max(2.5, metres))
+    return clamp(side * ratio), clamp(side / ratio)
 
 
 def archetype_for(
@@ -205,7 +259,7 @@ class FileMetrics:
     is_ruin: bool
     archetype: str
     height: float
-    footprint: float
+    footprint: float  # the plot's mean side, kept for the legend and for stats
     doc_ratio: float
     lit_windows: float | None
     confidence: dict[str, str] = field(default_factory=dict)
@@ -221,6 +275,10 @@ class FileMetrics:
     ownership_share: float = 0.0
     authors: dict[str, int] = field(default_factory=dict)
     recency_days: float = 0.0
+    # Plan dimensions, which are not each other; see footprint_for. Defaulted so
+    # a record built without them still lays out, as a square, off `footprint`.
+    footprint_w: float = 0.0
+    footprint_d: float = 0.0
 
     @property
     def weight(self) -> float:
@@ -337,6 +395,11 @@ def analyze(
         doc_ratio = min(1.0, result.doc_lines / denom)
         lit = None if (entry.is_binary or result.rows is not None) else doc_ratio
 
+        _footprint_w, _footprint_d = footprint_for(
+            entry.size, logical, [floor.line for floor in floors], result.physical_lines
+        )
+        _footprint = math.sqrt(_footprint_w * _footprint_d)
+
         record = FileMetrics(
             rel=entry.rel,
             name=entry.name,
@@ -355,7 +418,9 @@ def analyze(
             is_ruin=is_ruin,
             archetype=archetype,
             height=height,
-            footprint=footprint_for(entry.size),
+            footprint=_footprint,
+            footprint_w=_footprint_w,
+            footprint_d=_footprint_d,
             doc_ratio=doc_ratio,
             lit_windows=lit,
             parse_confidence=result.confidence,

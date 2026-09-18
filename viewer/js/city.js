@@ -3,10 +3,63 @@
  *
  * Draw calls stay bounded by the number of archetypes (~8), not by the number
  * of buildings, so a 50,000-file repo renders in the same number of calls as a
- * 28-file one. Everything per-building -- footprint, height, tint, and the
- * fraction of lit windows -- rides in the instance matrix, the instance colour,
- * and one extra instanced attribute.
+ * 28-file one. Everything per-building -- footprint, height, tint, the fraction
+ * of lit windows, the storey height, the facade family, how weathered it is and
+ * the seed that decides its roofline -- rides in the instance matrix, the
+ * instance colour, and six instanced attributes.
+ *
+ * That last part is the whole reason a large repository no longer looks like a
+ * field of identical boxes. The massing comes from `shapes.js` (eight silhouettes
+ * rather than one, varied per instance in the vertex shader) and the walls come
+ * from `facade.js` (computed per fragment from the building's own metrics rather
+ * than sampled from one shared bitmap). Neither costs a draw call.
  */
+
+import { farGeometry, nearGeometry, roofPropGeometry } from './shapes.js';
+import {
+  makeMassingDepthMaterial,
+  patchFacade,
+  patchRoofProps,
+  seedFor,
+  styleFor,
+} from './facade.js';
+
+/** Archetypes whose walls are walls. Parks and monuments get stone, not glass. */
+const WINDOWED = new Set(['tower', 'slab', 'warehouse', 'silo', 'town_hall', 'ruin']);
+
+/**
+ * Where a flat roof actually is, as a fraction of the building's height.
+ *
+ * Only the two flat-topped office forms get clutter, and it sits on the top of
+ * their *body* -- the terrace the setback rises out of -- rather than at some
+ * fraction of the overall height, which would leave equipment hanging in the
+ * air beside a crown. Gables, domes and pyramidions have nowhere to put a
+ * water tank, so they get none.
+ */
+const ROOF_DECK = { tower: 0.73, slab: 0.91 };
+
+/**
+ * Detailed massing is ~50 triangles a building against the far tier's 12, so
+ * the near tier is capped by count as well as by radius: past this many, the
+ * furthest of them fall back to boxes rather than the frame rate falling over.
+ *
+ * At this budget a fully detailed near field is roughly 300,000 triangles --
+ * about what one modest character model costs -- which is why the radius below
+ * can afford to be generous.
+ */
+const MAX_DETAILED = 6000;
+
+/** Rooftop clutter, tallest buildings first, in one extra draw call. */
+const MAX_ROOF_PROPS = 3000;
+
+/**
+ * The eight massing geometries, built once for the life of the page.
+ *
+ * Streaming rebuilds the city whenever the working set changes, and rebuilding
+ * eight merged geometries on every chunk boundary would be a stutter for no
+ * reason: they never depend on which buildings are resident.
+ */
+const MASSING_CACHE = new Map();
 
 export const ARCHETYPE_COLORS = {
   tower: 0x8895a8,
@@ -34,35 +87,26 @@ export function archetypeLabel(name) {
   return ARCHETYPE_NAMES[name] || name;
 }
 
-/** A small procedural window grid, used as the emissive map. */
-export function makeWindowTexture(THREE) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+/** A second, decorrelated number from one seed, so X and Z jitter differ. */
+function seedOffset(seed) {
+  const x = Math.sin(seed * 127.1) * 43758.5453;
+  return x - Math.floor(x);
+}
 
-  const cols = 4;
-  const rows = 12;
-  const cellW = canvas.width / cols;
-  const cellH = canvas.height / rows;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const x = col * cellW + cellW * 0.22;
-      const y = row * cellH + cellH * 0.2;
-      const w = cellW * 0.56;
-      const h = cellH * 0.5;
-      const shade = 120 + Math.floor(Math.random() * 135);
-      ctx.fillStyle = `rgb(${shade}, ${Math.floor(shade * 0.88)}, ${Math.floor(shade * 0.66)})`;
-      ctx.fillRect(x, y, w, h);
-    }
-  }
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.repeat.set(2, 2);
-  return texture;
+/**
+ * How tall one storey is on a given building, in metres.
+ *
+ * Where the parser found floors -- functions, classes, headings, notebook cells
+ * -- the window rows *are* those floors: a three-function module gets three rows
+ * of windows and a forty-class one gets forty, at a glance, from the street.
+ * Files the parser could not read fall back to a seeded storey height so they
+ * still differ from their neighbours.
+ */
+function storeyHeight(building, seed) {
+  const floors = building.floors || 0;
+  const height = building.height || 3;
+  if (floors > 0) return Math.min(4.4, Math.max(2.5, height / floors));
+  return 2.9 + seed * 1.4;
 }
 
 /** Ground: dark asphalt with a faint grid so motion reads at low altitude. */
@@ -89,31 +133,6 @@ export function makeGroundTexture(THREE) {
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
   return texture;
-}
-
-/**
- * Inject a per-instance "lit windows" scalar into the standard material.
- *
- * The emissive map draws the windows; this attribute decides how brightly each
- * individual building's windows glow, which is the whole metaphor -- lit means
- * documented.
- */
-function patchLitWindows(material) {
-  material.onBeforeCompile = (shader) => {
-    shader.vertexShader =
-      'attribute float aLit;\nvarying float vLit;\n' +
-      shader.vertexShader.replace(
-        '#include <begin_vertex>',
-        '#include <begin_vertex>\n  vLit = aLit;'
-      );
-    shader.fragmentShader =
-      'varying float vLit;\n' +
-      shader.fragmentShader.replace(
-        '#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n  totalEmissiveRadiance *= vLit;'
-      );
-  };
-  material.customProgramCacheKey = () => 'zion-lit-windows';
 }
 
 function hueFor(text) {
@@ -164,60 +183,81 @@ export class CityMesh {
 
     // Level of detail: one instanced mesh per archetype per tier, so draw calls
     // scale with archetypes, never with building count. Distant buildings keep
-    // their glow (the metaphor must survive at range) but drop the window
-    // texture, which is the expensive part of the fragment shader.
+    // their facade and their glow -- the metaphor must survive at range, and
+    // the shader averages the window grid rather than dropping it -- but fall
+    // back to box massing, which is where the triangles actually go.
     const lodNear = options.lodNear !== undefined
       ? options.lodNear
-      : Math.min(900, Math.max(140, Math.max(bw, bh) * 0.45));
+      : Math.min(1800, Math.max(240, Math.max(bw, bh) * 0.75));
     const cameraXZ = options.cameraXZ || null;
 
-    const byArchetype = new Map();
+    // Detail is budgeted twice: by radius, and then by count. The radius alone
+    // is not enough -- a dense repository can put ten thousand buildings inside
+    // it -- so the nearest MAX_DETAILED win the detailed massing and the rest
+    // are demoted to boxes. Nothing disappears; only its triangle count does.
+    const ranked = [];
     for (const building of buildings) {
-      const key = building.archetype || 'warehouse';
-      if (!byArchetype.has(key)) byArchetype.set(key, { near: [], far: [] });
-      const bucket = byArchetype.get(key);
-      if (cameraXZ) {
-        const dx = (building.x || 0) - cameraXZ.x;
-        const dz = (building.y || 0) - cameraXZ.z;
-        (Math.hypot(dx, dz) <= lodNear ? bucket.near : bucket.far).push(building);
-      } else {
-        bucket.near.push(building);
-      }
+      const dx = (building.x || 0) - (cameraXZ ? cameraXZ.x : 0);
+      const dz = (building.y || 0) - (cameraXZ ? cameraXZ.z : 0);
+      ranked.push({ building, distance: cameraXZ ? Math.hypot(dx, dz) : 0 });
     }
+    if (cameraXZ && ranked.length > MAX_DETAILED) ranked.sort((a, b) => a.distance - b.distance);
 
-    const geometry = new THREE.BoxGeometry(1, 1, 1);
-    geometry.translate(0, 0.5, 0); // origin at the base, so scaling grows upward
-    const windowTexture = makeWindowTexture(THREE);
+    const byArchetype = new Map();
+    ranked.forEach((entry, rank) => {
+      const key = entry.building.archetype || 'warehouse';
+      if (!byArchetype.has(key)) byArchetype.set(key, { near: [], far: [] });
+      const detailed = rank < MAX_DETAILED && (!cameraXZ || entry.distance <= lodNear);
+      byArchetype.get(key)[detailed ? 'near' : 'far'].push(entry.building);
+    });
+
+    const far = farGeometry(THREE);
+    const weathering = Boolean(manifest.flags && manifest.flags.recency);
 
     const matrix = new THREE.Matrix4();
     const colour = new THREE.Color();
+    const roofCandidates = [];
 
     for (const [archetype, tiers] of byArchetype) {
       for (const tier of ['near', 'far']) {
       const members = tiers[tier];
       if (!members.length) continue;
+      const detailed = tier === 'near';
       const material = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         roughness: archetype === 'park' ? 0.95 : 0.72,
         metalness: archetype === 'monument' ? 0.35 : 0.08,
-        emissive: new THREE.Color(0xffc978),
-        emissiveMap: tier === 'near' ? windowTexture : null,
+        emissive: new THREE.Color(0xffffff),
         emissiveIntensity: 0,
       });
-      patchLitWindows(material);
+      patchFacade(material, { hasWindows: WINDOWED.has(archetype), detail: detailed });
 
-      const mesh = new THREE.InstancedMesh(geometry.clone(), material, members.length);
-      mesh.name = `buildings-${archetype}${tier === 'far' ? '-far' : ''}`;
-      mesh.castShadow = tier === 'near' && archetype !== 'park';
-      mesh.receiveShadow = tier === 'near';
+      const geometry = detailed
+        ? nearGeometry(THREE, archetype, MASSING_CACHE).clone()
+        : far.clone();
+      const mesh = new THREE.InstancedMesh(geometry, material, members.length);
+      mesh.name = `buildings-${archetype}${detailed ? '' : '-far'}`;
+      mesh.castShadow = detailed && archetype !== 'park';
+      mesh.receiveShadow = detailed;
+      // The displaced crowns and setbacks have to reach the shadow map too.
+      if (mesh.castShadow) mesh.customDepthMaterial = makeMassingDepthMaterial(THREE);
 
+      // (lit, style, weather, hover) per instance, in one attribute. A
+      // building already spends eleven of the sixteen vertex attribute slots
+      // WebGL guarantees, and the highlight needs a channel of its own rather
+      // than borrowing the lit-window one.
+      const traits = new Float32Array(members.length * 4);
+      const seeds = new Float32Array(members.length);
+      const storeys = new Float32Array(members.length);
       const lit = new Float32Array(members.length);
+
       members.forEach((building, index) => {
         const width = building.width || 4;
         const depth = building.depth || 4;
+        const height = building.height || 3;
         const x = (building.x || 0) + width / 2;
         const z = (building.y || 0) + depth / 2;
-        matrix.makeScale(width, building.height || 3, depth);
+        matrix.makeScale(width, height, depth);
         matrix.setPosition(x, 0, z);
         mesh.setMatrixAt(index, matrix);
 
@@ -231,11 +271,33 @@ export class CityMesh {
           ? (archetype === 'park' ? 0 : 0.18)
           : building.lit;
         lit[index] = Math.min(litCap, Math.max(0, value));
+        traits[index * 4] = lit[index];
+        traits[index * 4 + 1] = styleFor(building);
+
+        const seed = seedFor(building);
+        seeds[index] = seed;
+        storeys[index] = storeyHeight(building, seed);
+        // Weathering only when the repository has enough history for "days
+        // since last commit" to mean anything; a shallow clone gets clean walls
+        // rather than a made-up patina. Saturates at two years.
+        traits[index * 4 + 2] = weathering
+          ? Math.min(1, (building.recencyDays || 0) / 730)
+          : 0;
+
+        // Detailed tier only. The far tier's massing is a plain box with no
+        // terrace to stand on, so clutter there would either float above the
+        // roofline or be buried inside it -- and at that range it is a pixel.
+        const deck = ROOF_DECK[archetype];
+        if (detailed && deck !== undefined && height > 9) {
+          roofCandidates.push({ x, z, width, depth, height, deck, seed });
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.geometry.setAttribute('aLit', new THREE.InstancedBufferAttribute(lit, 1));
+      mesh.geometry.setAttribute('aTraits', new THREE.InstancedBufferAttribute(traits, 4));
+      mesh.geometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seeds, 1));
+      mesh.geometry.setAttribute('aFloorH', new THREE.InstancedBufferAttribute(storeys, 1));
       // Keep the untouched colours so a hover highlight can be reverted exactly.
       if (mesh.instanceColor) {
         mesh.userData.baseColors = Float32Array.from(mesh.instanceColor.array);
@@ -248,11 +310,71 @@ export class CityMesh {
       this.group.add(mesh);
       }
     }
+    far.dispose();
 
+    this._addRoofProps(roofCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
     return this.group;
+  }
+
+  /**
+   * Rooftop plant, tanks and masts, for every detailed building tall enough to
+   * have a roof worth looking at.
+   *
+   * One instanced cluster, so the whole city's roofs are a single draw call, and
+   * which pieces of the cluster survive is the same per-instance seed that
+   * shaped the crown -- a building's roof and its roofline agree. Aerial is the
+   * view people actually spend their time in, and a flat lid on every tower was
+   * most of what made the overview read as a spreadsheet.
+   */
+  _addRoofProps(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    // Tallest first: on a crowded roofline the tall roofs are the ones in view.
+    if (candidates.length > MAX_ROOF_PROPS) {
+      candidates.sort((a, b) => b.height - a.height);
+      candidates.length = MAX_ROOF_PROPS;
+    }
+
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x6a7280,
+      roughness: 0.68,
+      metalness: 0.35,
+    });
+    patchRoofProps(material);
+
+    const mesh = new THREE.InstancedMesh(roofPropGeometry(THREE), material, candidates.length);
+    mesh.name = 'roof-props';
+    mesh.castShadow = true;
+    mesh.customDepthMaterial = makeMassingDepthMaterial(THREE);
+    // Clutter is scenery, not a target: a mast must not steal the click that
+    // belongs to the building it stands on.
+    mesh.raycast = () => {};
+
+    const matrix = new THREE.Matrix4();
+    const seeds = new Float32Array(candidates.length);
+    candidates.forEach((roof, index) => {
+      // Sized off the smaller footprint dimension so clutter never overhangs,
+      // and kept within a storey or two so it reads as equipment rather than as
+      // another floor.
+      const spread = Math.min(roof.width, roof.depth) * 0.8;
+      const tall = Math.min(9, Math.max(2.5, spread * 1.15));
+      matrix.makeScale(spread, tall, spread);
+      // Sunk very slightly into the deck, so no gap opens under a tank when the
+      // instance scale stretches a footprint.
+      matrix.setPosition(
+        roof.x + (roof.seed - 0.5) * roof.width * 0.16,
+        roof.height * roof.deck - tall * 0.04,
+        roof.z + (seedOffset(roof.seed) - 0.5) * roof.depth * 0.16
+      );
+      mesh.setMatrixAt(index, matrix);
+      seeds[index] = roof.seed;
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.geometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seeds, 1));
+    this.group.add(mesh);
   }
 
   _addGround(bx, bz, bw, bh, buildings) {
@@ -364,15 +486,14 @@ export class CityMesh {
     mesh.setColorAt(instanceId, colour);
     mesh.instanceColor.needsUpdate = true;
 
-    // Buildings carry a lit-window scalar; plates and impostors do not.
-    const litAttribute = mesh.geometry.getAttribute('aLit');
-    if (litAttribute && mesh.userData.baseLit) {
-      const boosted = Math.min(1, Math.max(0.75, mesh.userData.baseLit[instanceId] + 0.55));
-      litAttribute.setX(instanceId, boosted);
-      litAttribute.needsUpdate = true;
+    // Buildings carry a hover channel; plates and impostors do not.
+    const traits = mesh.geometry.getAttribute('aTraits');
+    if (traits) {
+      traits.setW(instanceId, 1);
+      traits.needsUpdate = true;
     }
 
-    this._hover = { mesh, instanceId, baseLit: mesh.userData.baseLit ? mesh.userData.baseLit[instanceId] : 0 };
+    this._hover = { mesh, instanceId };
   }
 
   clearHighlight() {
@@ -392,10 +513,10 @@ export class CityMesh {
       );
       mesh.instanceColor.needsUpdate = true;
     }
-    const litAttribute = mesh.geometry.getAttribute('aLit');
-    if (litAttribute && mesh.userData.baseLit) {
-      litAttribute.setX(instanceId, hover.baseLit);
-      litAttribute.needsUpdate = true;
+    const traits = mesh.geometry.getAttribute('aTraits');
+    if (traits) {
+      traits.setW(instanceId, 0);
+      traits.needsUpdate = true;
     }
   }
 
@@ -416,7 +537,9 @@ export class CityMesh {
       const mesh = this.meshes.get(uuid);
       if (!mesh || !mesh.userData.baseColors) continue;
       const base = mesh.userData.baseColors;
-      const litAttribute = mesh.geometry.getAttribute('aLit');
+      // Same honest channel as the single-building highlight: a folder being
+      // pointed out must not make every file in it look documented.
+      const hoverAttribute = mesh.geometry.getAttribute('aTraits');
       let any = false;
       members.forEach((building, index) => {
         if (building.districtId !== districtId) return;
@@ -427,27 +550,27 @@ export class CityMesh {
             strength
           )
         );
-        if (litAttribute && mesh.userData.baseLit) {
-          touched.push({ litAttribute, index, base: mesh.userData.baseLit[index] });
-          litAttribute.setX(index, 1);
+        if (hoverAttribute) {
+          touched.push({ hoverAttribute, index });
+          hoverAttribute.setW(index, 0.55);
         }
         any = true;
       });
       if (any) {
         mesh.instanceColor.needsUpdate = true;
-        if (litAttribute) litAttribute.needsUpdate = true;
+        if (hoverAttribute) hoverAttribute.needsUpdate = true;
       }
     }
-    this._districtHighlight = { districtId, meshCount: this.records.size, lit: touched };
+    this._districtHighlight = { districtId, meshCount: this.records.size, marked: touched };
   }
 
   clearDistrictHighlight() {
     const previous = this._districtHighlight;
     if (!previous) return;
     this._districtHighlight = null;
-    for (const entry of previous.lit || []) {
-      entry.litAttribute.setX(entry.index, entry.base);
-      entry.litAttribute.needsUpdate = true;
+    for (const entry of previous.marked || []) {
+      entry.hoverAttribute.setW(entry.index, 0);
+      entry.hoverAttribute.needsUpdate = true;
     }
     for (const [uuid, members] of this.records) {
       const mesh = this.meshes.get(uuid);
@@ -469,7 +592,7 @@ export class CityMesh {
   /**
    * Set the emissive strength for every building at once.
    *
-   * Per-building differences are baked into the `aLit` instanced attribute;
+   * Per-building differences are baked into the `aTraits` instanced attribute;
    * this is the single global multiplier the "lit windows" slider drives.
    */
   setGlow(value) {

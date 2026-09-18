@@ -32,6 +32,8 @@ class EmitTests(TempRepoCase):
             "css/hud.css",
             "js/main.js",
             "js/city.js",
+            "js/shapes.js",
+            "js/facade.js",
             "js/loader.js",
             "js/cameras.js",
             "js/sky.js",

@@ -10,13 +10,24 @@ import { archetypeLabel } from './city.js';
 
 const FORMULA = {
   height: (b) => `${b.loc.toLocaleString()} logical lines`,
-  footprint: (b) => `${formatBytes(b.bytes)} on disk`,
+  footprint: (b, dims) =>
+    (b.plate === null || b.plate === undefined
+      ? `${formatBytes(b.bytes)} on disk`
+      : `${b.plate} lines per floor`) + (dims ? ` \u00b7 ${dims}` : ''),
   floors: (b) => `${b.floors} ${b.floors === 1 ? 'floor' : 'floors'}`,
   lit: (b) => (b.lit === null ? 'no windows (data or binary)' : `${Math.round((b.lit || 0) * 100)}% of windows lit`),
   commits: (b) => `${b.commits} ${b.commits === 1 ? 'commit' : 'commits'} touching this file`,
   recency: (b) => `${Math.round(b.recencyDays)} days since last commit`,
   churn: (b) => `${b.churn} lines added + deleted`,
 };
+
+/** The plot as it was actually placed, in metres. */
+function plotSize(building) {
+  const w = building.width;
+  const d = building.depth;
+  if (!w || !d) return '';
+  return `${w.toFixed(1)} \u00d7 ${d.toFixed(1)} m plot`;
+}
 
 export function formatBytes(value) {
   if (value === null || value === undefined) return '0 B';
@@ -62,7 +73,7 @@ export class Inspector {
       ['language', source.s(building.language)],
       ['form', archetypeLabel(building.archetype)],
       ['height', FORMULA.height(building)],
-      ['footprint', FORMULA.footprint(building)],
+      ['footprint', FORMULA.footprint(building, plotSize(building))],
       ['floors', FORMULA.floors(building)],
       ['documented', `${Math.round((building.docRatio || 0) * 100)}%`],
       ['windows', FORMULA.lit(building)],
