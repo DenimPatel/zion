@@ -106,20 +106,39 @@ that one is the repository root in each case.
 | `E` | enter the building you are facing, or City Hall when you are standing at it |
 | `U` | unlock an encrypted city |
 | `[` `]` | change floor while inside a building |
-| `T` | guided tour: one cinematic stop per district with a caption |
+| `T` | guided tour: one continuous route, holding at each district with a caption |
+| `N` | skip to the next stop during the tour |
 | `C` | City Hall |
 | `L` | hide the legend |
 | drag | look around (the cursor stays visible) |
 | click | inspect the building you are pointing at |
 | `F` | capture the mouse for continuous flying (crosshair appears); `Esc` releases |
 
-**Hover tells you what is clickable.** Point at a building and it brightens, a
-wireframe outline snaps to its footprint, the cursor becomes a pointer, and a
-tooltip names it with its form, language and size. Hover and click share one
-raycast, so the building that lights up is exactly the building that opens —
-asserted in the self-test rather than assumed. At scale the raycast is
-rate-limited (about 7 passes a second at 20,000 resident buildings), because
-testing every instance is the one interactive cost that grows with city size.
+**Hover tells you what is clickable — and everything on the map is clickable.**
+Because districts are folders and buildings are files, both are targets:
+
+| Under the cursor | Highlight | Click opens |
+|---|---|---|
+| a building | brightens, outline snaps to it, lit windows jump | that file's inspector |
+| a district block (or its distant impostor) | the whole block is outlined and every building in it tints amber | that folder's inspector |
+| City Hall | outline + tooltip | the repository report card |
+
+The cursor becomes a pointer and a tooltip names the thing with its numbers
+(`folder · 10 buildings · 1,231 lines · no README`, or
+`tower · python · 191 logical lines · 23 floors · click to inspect`). Hover and
+click share a single raycast, so what lights up is exactly what opens — asserted
+in the self-test rather than assumed. At scale the raycast is rate-limited (about
+7 passes a second at 20,000 resident buildings), because testing every instance
+is the one interactive cost that grows with city size.
+
+**The tour holds, and shows you what it is describing.** It flies one continuous
+closed route through the districts, and at each stop it *stops* — the dwell is as
+long as the travel leg, so each stop gets twice the time of simply passing
+through. While it holds, the district being described is marked on the ground and
+**every building in it lights up amber**, the caption gives that district's
+numbers, and a progress bar shows how far along the circuit is. Press `N` to skip
+ahead. Cities with more than 32 districts are sampled evenly, and the label says
+so rather than silently dropping most of the map.
 
 **City Hall** is the one building that is not a file: it is the repository's own
 report card, standing at the centre of the plan. It carries the language
@@ -329,14 +348,16 @@ because "it renders" is not the same as "it works":
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-which returns `ZION_SELFTEST {…}` containing 29 checks: walk gravity (simulated
+which returns `ZION_SELFTEST {…}` containing 40 checks: walk gravity (simulated
 until the player actually comes to rest on a surface), a collision test that
 drives the player into a building and asserts they stop outside it, drag-to-look
 rotating the camera without capturing the pointer or opening the inspector, a
 click on a building's projected position opening it, hover reporting the same
 building that the click then acts on, interior floors and source, an interior
 wall texture confirmed to contain rendered text, City Hall's clickable rows,
-teleport, the tour and its caption, and the draw-call budget.
+teleport, the tour and its caption, hover/click agreement, district hover and
+district click, the tour's dwell share and district highlight, and the draw-call
+budget.
 
 `--enable-unsafe-swiftshader` is required. Without it, headless Chrome reports
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.

@@ -166,9 +166,17 @@ const CRUISE_SPEED = 60; // metres per second, before normalising
 
 // A whole circuit is paced to roughly this long, so a 4-district village and a
 // 30-district city both read as a tour rather than a sprint or a crawl.
-const SECONDS_PER_STOP = 3.4;
-const MIN_CIRCUIT_SECONDS = 13;
-const MAX_CIRCUIT_SECONDS = 105;
+// Each stop gets a dwell as long as its travel leg, so the camera actually
+// stops and holds on what the caption is describing -- twice the time per stop
+// compared with travelling straight through.
+const DWELL_FACTOR = 1.0;
+const SECONDS_PER_STOP = 6.8;
+const MIN_CIRCUIT_SECONDS = 20;
+const MAX_CIRCUIT_SECONDS = 150;
+
+// A tour of 320 districts is not a tour. Beyond this, stops are sampled evenly
+// so the circuit stays an overview, and the label says so.
+const MAX_TOUR_STOPS = 32;
 
 /** Zero velocity at both ends, so the camera eases into each stop. */
 function smootherStep(t) {
@@ -190,11 +198,24 @@ export class Tour {
     this.elapsed = 0;
   }
 
-  /** One stop per district, carrying that district's numbers as the caption. */
+  /**
+   * One stop per district, carrying that district's numbers as the caption.
+   *
+   * Capped at `MAX_TOUR_STOPS`, sampled evenly, because a 320-district city
+   * should still produce a watchable tour.
+   */
   get stops() {
     const manifest = this.source.manifest;
     const s = (i) => this.source.s(i);
-    return manifest.districts.map((district) => {
+    const all = manifest.districts;
+    const districts =
+      all.length <= MAX_TOUR_STOPS
+        ? all
+        : Array.from({ length: MAX_TOUR_STOPS }, (_, i) =>
+            all[Math.floor((i * all.length) / MAX_TOUR_STOPS)]
+          );
+    this.sampledFrom = all.length;
+    return districts.map((district) => {
       const [x, z, w, h] = district.rect;
       const span = Math.max(w, h);
       const height = Math.max(24, district.skyline.maxHeight);
@@ -272,7 +293,8 @@ export class Tour {
       MAX_CIRCUIT_SECONDS,
       Math.max(MIN_CIRCUIT_SECONDS, stops.length * SECONDS_PER_STOP)
     );
-    const scale = rawTotal > 0 ? target / rawTotal : 1;
+    const factor = 1 + DWELL_FACTOR;
+    const scale = rawTotal > 0 ? target / (rawTotal * factor) : 1;
 
     let accumulated = 0;
     for (const time of raw) {
@@ -282,6 +304,26 @@ export class Tour {
       accumulated += scaled;
     }
     this.route.total = accumulated;
+
+    // Interleave a dwell at every stop with the travel between stops. Building
+    // the schedule explicitly keeps "hold here" and "move there" as separate,
+    // readable states instead of hiding the pause inside an easing curve.
+    this.route.segments = [];
+    let clock = 0;
+    for (let i = 0; i < stops.length; i++) {
+      const dwell = this.route.legTimes[i] * DWELL_FACTOR;
+      this.route.segments.push({ type: 'dwell', stop: i, start: clock, duration: dwell });
+      clock += dwell;
+      this.route.segments.push({
+        type: 'travel',
+        from: i,
+        to: (i + 1) % stops.length,
+        start: clock,
+        duration: this.route.legTimes[i],
+      });
+      clock += this.route.legTimes[i];
+    }
+    this.route.total = clock;
 
     this.phase = 'lead';
     this.elapsed = 0;
@@ -302,19 +344,45 @@ export class Tour {
 
   get progress() {
     if (!this.running || !this.route) return 0;
-    const legs = this.route.stops.length + 1;
-    if (this.phase === 'lead') {
-      return (this.elapsed / this.lead.duration) / legs;
+    if (this.phase === 'lead') return 0;
+    return Math.max(0, Math.min(1, this.elapsed / this.route.total));
+  }
+
+  /** Jump straight to the next stop, for when the tour is taking too long. */
+  skipToNext() {
+    if (!this.running || !this.route || this.phase !== 'loop') return false;
+    const index = this._segmentAt(this.elapsed);
+    for (let i = index + 1; i < this.route.segments.length; i++) {
+      if (this.route.segments[i].type === 'dwell') {
+        this.elapsed = this.route.segments[i].start;
+        return true;
+      }
     }
-    return Math.min(1, (1 + (this.elapsed / this.route.total)) / legs);
+    // Past the last dwell: wrap to the first.
+    this.elapsed = 0;
+    return true;
+  }
+
+  _segmentAt(elapsed) {
+    const segments = this.route.segments;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (elapsed >= segments[i].start) return i;
+    }
+    return 0;
   }
 
   _announce(index) {
     if (index === this.stopIndex) return;
     this.stopIndex = index;
     const stop = this.route.stops[index];
-    this.dom.label.textContent = `Tour ${index + 1} / ${this.route.stops.length}`;
+    const total = this.route.stops.length;
+    const sampled =
+      this.sampledFrom && this.sampledFrom > total ? ` of ${this.sampledFrom} districts` : '';
+    this.dom.label.textContent = `Tour ${index + 1} / ${total}${sampled}`;
     this.dom.caption.textContent = stop.caption;
+    // Tell the viewer which block is being described, so there is something to
+    // look at while the camera holds.
+    if (this.dom.onStop) this.dom.onStop(stop.district, index);
   }
 
   /** Advance the tour. Returns true when it drove the camera this frame. */
@@ -339,29 +407,38 @@ export class Tour {
       return true;
     }
 
-    // Phase 2: continuous loop. Wrap rather than stop, so the route never
-    // doubles back on itself.
+    // Phase 2: continuous loop of dwells and travels. Wrap rather than stop, so
+    // the route never doubles back on itself.
     if (this.elapsed >= this.route.total) {
       this.elapsed -= this.route.total;
       this.stopIndex = -1;
     }
 
-    let leg = 0;
-    for (let i = this.route.legStarts.length - 1; i >= 0; i--) {
-      if (this.elapsed >= this.route.legStarts[i]) {
-        leg = i;
-        break;
-      }
-    }
-    const legElapsed = this.elapsed - this.route.legStarts[leg];
-    const local = Math.max(0, Math.min(1, legElapsed / this.route.legTimes[leg]));
-    const eased = smootherStep(local);
-    // `getPoint`, not `getPointAt`: parameterising by segment is what makes one
-    // leg correspond to exactly one stop, which is what the easing assumes.
-    const u = (leg + eased) / this.route.stops.length;
+    const segment = this.route.segments[this._segmentAt(this.elapsed)];
+    const legs = this.route.stops.length;
 
-    this._announce(leg);
-    this._place(this.route.eye.getPoint(u), this.route.look.getPoint(u));
+    if (segment.type === 'dwell') {
+      // Hold on the stop. A slow drift inward keeps it from looking frozen
+      // while still not moving away from what is being described.
+      const local = Math.max(0, Math.min(1, (this.elapsed - segment.start) / segment.duration));
+      const u = segment.stop / legs;
+      const position = this.route.eye.getPoint(u);
+      const target = this.route.look.getPoint(u);
+      const push = 0.06 * local;
+      position.lerp(target, push);
+      this._announce(segment.stop);
+      this._place(position, target);
+    } else {
+      const local = Math.max(0, Math.min(1, (this.elapsed - segment.start) / segment.duration));
+      const eased = smootherStep(local);
+      // `getPoint`, not `getPointAt`: parameterising by segment is what makes one
+      // leg correspond to exactly one stop, which is what the easing assumes.
+      const u = (segment.from + eased) / legs;
+      // Announce the destination, so the highlight is already on the block the
+      // camera is approaching.
+      this._announce(segment.to);
+      this._place(this.route.eye.getPoint(u), this.route.look.getPoint(u));
+    }
     this._syncFly();
     return true;
   }

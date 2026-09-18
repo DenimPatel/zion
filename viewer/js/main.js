@@ -13,6 +13,8 @@ import {
   createCityHall,
   createImpostors,
   createHoverOutline,
+  createDistrictMarker,
+  placeDistrictMarker,
   ARCHETYPE_COLORS,
   archetypeLabel,
 } from './city.js';
@@ -51,6 +53,10 @@ const renderer = new THREE.WebGLRenderer({
   canvas,
   antialias: true,
   powerPreference: 'high-performance',
+  // Headless screenshots are taken outside the animation frame, and without
+  // this the drawing buffer has already been cleared by then. It costs
+  // performance, so it is only enabled for capture runs.
+  preserveDrawingBuffer: params.has('capture'),
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = state.shadows;
@@ -266,11 +272,23 @@ function raycastAt(ndcX, ndcY) {
     child.name.startsWith('buildings-')
   );
   const hits = raycaster.intersectObjects(targets, false);
-  if (!hits.length) return null;
+
+  // Districts are folders, and a folder is as clickable as a file. A building
+  // wins when both are under the cursor, because it is the smaller target.
+  const districtHits = raycastDistricts();
+
+  if (!hits.length) {
+    return districtHits;
+  }
   const hit = hits[0];
   const records = context.city.records.get(hit.object.uuid);
   const building = records && records[hit.instanceId];
-  if (!building) return null;
+  if (!building) return districtHits;
+  if (districtHits && districtHits.point.distanceTo(camera.position) <
+      hit.point.distanceTo(camera.position) - 0.5) {
+    // The ground plate is genuinely in front of the building.
+    return districtHits;
+  }
   return {
     kind: 'building',
     building,
@@ -280,10 +298,33 @@ function raycastAt(ndcX, ndcY) {
   };
 }
 
+/** District plates and district impostors: both stand for a folder. */
+function raycastDistricts() {
+  const meshes = context.city.group.children.filter(
+    (child) => child.name === 'district-plates' || child.name === 'district-impostors'
+  );
+  if (!meshes.length) return null;
+  const hits = raycaster.intersectObjects(meshes, false);
+  if (!hits.length) return null;
+  const hit = hits[0];
+  const districts = hit.object.userData.districts;
+  const district = districts && districts[hit.instanceId];
+  if (!district) return null;
+  return {
+    kind: 'district',
+    district,
+    mesh: hit.object,
+    instanceId: hit.instanceId,
+    point: hit.point,
+    distant: hit.object.name === 'district-impostors',
+  };
+}
+
 function sameTarget(a, b) {
   if (!a || !b) return a === b;
   if (a.kind !== b.kind) return false;
   if (a.kind === 'city_hall') return true;
+  if (a.kind === 'district') return a.district.id === b.district.id;
   return a.building === b.building;
 }
 
@@ -309,6 +350,10 @@ function showOutlineFor(target) {
   const outline = context.hoverOutline;
   if (!outline) return;
   if (!target) {
+    outline.visible = false;
+    return;
+  }
+  if (target.kind === 'district') {
     outline.visible = false;
     return;
   }
@@ -356,6 +401,18 @@ function tooltipFor(target) {
       hint: 'click, or press C, to open',
     };
   }
+  if (target.kind === 'district') {
+    const d = target.district;
+    return {
+      title: state.source.districtLabel(d),
+      meta:
+        `folder · ${d.buildings} buildings · ${(d.logicalLoc || 0).toLocaleString()} lines · ` +
+        `${d.documented} documented · ${d.hasReadme ? 'README' : 'no README'}`,
+      hint: target.distant
+        ? 'click to inspect this district'
+        : 'click to inspect · the block is a folder',
+    };
+  }
   const building = target.building;
   const parts = [archetypeLabel(building.archetype), source.s(building.language)];
   if (building.rows !== null && building.rows !== undefined) {
@@ -388,13 +445,20 @@ function applyHover(target, clientX, clientY) {
   hover.y = clientY;
 
   if (context.city) {
-    if (target && target.kind === 'building') {
-      context.city.setHighlight(target.mesh, target.instanceId);
+    if (target && (target.kind === 'building' || target.kind === 'district')) {
+      context.city.setHighlight(target.mesh, target.instanceId, target.kind === 'district' ? 0.45 : 0.62);
     } else {
       context.city.clearHighlight();
     }
   }
   showOutlineFor(target);
+  // A district is a folder, not an object, so it gets a ground outline of the
+  // whole block rather than a box around one mesh.
+  if (target && target.kind === 'district') {
+    placeDistrictMarker(context.hoverDistrictMarker, target.district.rect);
+  } else {
+    context.hoverDistrictMarker.visible = false;
+  }
 
   const tooltip = document.getElementById('tooltip');
   const info = tooltipFor(target);
@@ -528,12 +592,12 @@ canvas.addEventListener('pointerup', (event) => {
   // A press that did not move is a click. It acts on the highlighted target, so
   // what you saw lit up is exactly what responds.
   if (wasDragging && moved <= DRAG_THRESHOLD && event.button === 0 && state.mode !== 'interior') {
-    const target = hover.target;
+    const target = hover.target || raycastAtFromEvent(event);
     if (target && target.kind === 'city_hall') {
       context.cityHall.show();
       document.body.classList.add('hall-open');
     } else {
-      activate(target || raycastAtFromEvent(event));
+      activate(target);
     }
   }
 });
@@ -549,6 +613,10 @@ function raycastAtFromEvent(event) {
 function activate(target) {
   if (!target) {
     context.inspector.hide();
+    return;
+  }
+  if (target.kind === 'district') {
+    context.inspector.showDistrict(target.district);
     return;
   }
   context.inspector.showBuilding(target.building);
@@ -598,7 +666,11 @@ document.addEventListener('pointerlockchange', onPointerLockChange);
 // ---------------------------------------------------------------------------
 
 function setMode(mode) {
-  if (context.tour && context.tour.running) context.tour.stopTour();
+  if (context.tour && context.tour.running) {
+    context.tour.stopTour();
+    context.tourDistrictMarker.visible = false;
+    if (context.city) context.city.clearDistrictHighlight();
+  }
   applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
   state.mode = mode;
@@ -715,6 +787,9 @@ window.addEventListener('keydown', async (event) => {
       break;
     case 'KeyO':
       setMode(state.mode === 'overview' ? 'fly' : 'overview');
+      break;
+    case 'KeyN':
+      context.tour.skipToNext();
       break;
     case 'KeyT':
       context.tour.start();
@@ -948,17 +1023,28 @@ function frame(now) {
     return;
   }
 
-  if (context.tour.running) {
+  if (state.tourFrozen && context.tour.running) {
+    // Frozen for a deterministic capture: hold this exact frame. Any camera
+    // driver here would move the view away from what was measured.
+  } else if (context.tour.running) {
     context.tour.update(dt);
-  } else if (context.flight.active) {
-    context.flight.update(dt);
-  } else if (state.mode === 'overview') {
-    context.overview.update(dt);
-  } else if (state.mode === 'walk') {
-    context.walk.update(dt);
-    updateWalkPrompt();
+    document.getElementById('tour-progress-bar').style.width =
+      `${Math.round(context.tour.progress * 100)}%`;
   } else {
-    context.fly.update(dt);
+    if (context.tourDistrictMarker && context.tourDistrictMarker.visible) {
+      context.tourDistrictMarker.visible = false;
+      if (context.city) context.city.clearDistrictHighlight();
+    }
+    if (context.flight.active) {
+      context.flight.update(dt);
+    } else if (state.mode === 'overview') {
+      context.overview.update(dt);
+    } else if (state.mode === 'walk') {
+      context.walk.update(dt);
+      updateWalkPrompt();
+    } else {
+      context.fly.update(dt);
+    }
   }
 
   refreshResident();
@@ -1266,6 +1352,76 @@ async function runSelfTest() {
     check('hover-detects-building', false, 'no buildings to hover');
   }
 
+  // 0d. District plates are folders, so they are hoverable and clickable too.
+  const district = state.source.manifest.districts[0];
+  const corners = [
+    [0.06, 0.06],
+    [0.94, 0.06],
+    [0.06, 0.94],
+    [0.94, 0.94],
+  ];
+  let districtHit = null;
+  for (const [fx, fz] of corners) {
+    const px = district.rect[0] + district.rect[2] * fx;
+    const pz = district.rect[1] + district.rect[3] * fz;
+    context.fly.position.set(px, 90, pz + 0.002);
+    context.fly.yaw = 0;
+    context.fly.pitch = -Math.PI / 2;
+    context.fly.apply();
+    camera.updateMatrixWorld(true);
+    scene.updateMatrixWorld();
+    dispatch('pointermove', window.innerWidth / 2, window.innerHeight / 2);
+    refreshHover(true);
+    if (hover.target && hover.target.kind === 'district') {
+      districtHit = { fx, fz };
+      break;
+    }
+  }
+  check(
+    'district-hover',
+    Boolean(districtHit),
+    districtHit
+      ? `hovering ${state.source.districtLabel(hover.target.district)} at corner ${districtHit.fx},${districtHit.fz}`
+      : 'no district plate under the cursor'
+  );
+  check(
+    'district-hover-tooltip',
+    districtHit &&
+      !document.getElementById('tooltip').hidden &&
+      document.getElementById('tooltip-meta').textContent.includes('buildings'),
+    document.getElementById('tooltip-meta').textContent.slice(0, 60)
+  );
+  check(
+    'district-hover-marker',
+    districtHit && context.hoverDistrictMarker.visible,
+    context.hoverDistrictMarker.visible ? 'block outlined' : 'no district outline'
+  );
+
+  if (districtHit) {
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+    context.inspector.hide();
+    dispatch('pointerdown', cx, cy);
+    dispatch('pointerup', cx, cy);
+    const title = document.getElementById('inspector-title').textContent;
+    check(
+      'district-click-inspects',
+      !context.inspector.panel.hidden && title === state.source.districtLabel(district),
+      `inspector shows "${title}"`
+    );
+    context.inspector.hide();
+  } else {
+    check('district-click-inspects', false, 'no district to click');
+  }
+
+  // Impostors stand in for unloaded districts, so they must carry the same link.
+  const impostors = scene.getObjectByName('district-impostors');
+  check(
+    'impostors-carry-districts',
+    !impostors || (impostors.userData.districts && impostors.userData.districts.length > 0),
+    impostors ? `${impostors.userData.districts.length} impostor districts` : 'none needed (all resident)'
+  );
+
   const tourNode = document.getElementById('tour');
   results.push({
     step: 'dom-probe',
@@ -1375,14 +1531,30 @@ async function runSelfTest() {
 
   const tourTemplate = stops.map((stop) => new THREE.Vector3(...stop.eye));
   const path = [];
-  const labels = [];
+  const phases = [];
+  const dwellDistricts = [];
   // Step far enough for the approach plus a full circuit.
   const totalTime =
     context.tour.route.total + context.tour.lead.duration;
   for (let t = 0; t < totalTime + 2; t += 1 / 20) {
     context.tour.update(1 / 20);
     path.push(camera.position.clone());
-    labels.push(context.tour.stopIndex);
+    if (context.tour.phase === 'loop') {
+      const segment =
+        context.tour.route.segments[context.tour._segmentAt(context.tour.elapsed)];
+      phases.push(segment.type);
+      if (segment.type === 'dwell') {
+        dwellDistricts.push({
+          index: segment.stop,
+          district: context.tour.route.stops[segment.stop].district,
+          markerVisible: context.tourDistrictMarker.visible,
+          markerX: context.tourDistrictMarker.position.x,
+          markerZ: context.tourDistrictMarker.position.z,
+        });
+      }
+    } else {
+      phases.push('lead');
+    }
   }
 
   // (a) No teleports: every step is a small fraction of the biggest step.
@@ -1440,6 +1612,42 @@ async function runSelfTest() {
       : 'never returned to the start'
   );
 
+  // (c2) The tour must actually hold at each stop. Travel and dwell are separate
+  //      states, so their mean speeds can be compared directly.
+  const dwellSteps = [];
+  const travelSteps = [];
+  for (let i = 1; i < path.length; i++) {
+    const step = path[i].distanceTo(path[i - 1]);
+    const phase = phases[i - 1];
+    if (phase === 'dwell') dwellSteps.push(step);
+    else if (phase === 'travel') travelSteps.push(step);
+  }
+  const mean = (values) =>
+    values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+  const dwellShare = dwellSteps.length / Math.max(1, phases.length);
+  const dwellSpeed = mean(dwellSteps);
+  const travelSpeed = mean(travelSteps);
+  check(
+    'tour-dwells-at-stops',
+    dwellShare > 0.35 && dwellSpeed < travelSpeed * 0.5,
+    `holds ${(dwellShare * 100).toFixed(0)}% of the time at ${dwellSpeed.toFixed(2)}m/frame vs ` +
+      `${travelSpeed.toFixed(2)} while travelling`
+  );
+
+  // (c3) While holding, the district being described must be marked on the map.
+  const markerOk =
+    dwellDistricts.length > 0 &&
+    dwellDistricts.every(
+      (d) => d.markerVisible && Math.abs(d.markerX - d.district.rect[0]) < 0.01
+    );
+  check(
+    'tour-highlights-district',
+    markerOk,
+    markerOk
+      ? `marker shown on all ${dwellDistricts.length} held frames, e.g. district ${dwellDistricts[0].index}`
+      : 'district marker missing or misplaced during a stop'
+  );
+
   // (d) Handing control back must not move the camera at all.
   context.tour.stopTour();
   const beforeHandback = camera.position.clone();
@@ -1468,6 +1676,59 @@ async function runSelfTest() {
     document.body.classList.add('hall-open');
   } else if (hold === 'tour') {
     context.tour.start();
+    // Advance into a hold, so a screenshot captures the dwell and the district
+    // highlight rather than the approach.
+    let advanced = 0;
+    const until = context.tour.lead.duration + 0.6;
+    while (advanced < until && context.tour.running) {
+      context.tour.update(1 / 30);
+      advanced += 1 / 30;
+    }
+    // Hold this exact frame: under virtual time the loop keeps advancing, so a
+    // screenshot would otherwise land somewhere arbitrary.
+    state.tourFrozen = true;
+    // Render once so a screenshot has a painted frame to capture.
+    renderer.render(scene, camera);
+    const marker = context.tourDistrictMarker;
+    const pre = document.createElement('pre');
+    pre.id = 'tour-capture';
+    const drawn = {
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+    };
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    const meshes = context.city.group.children.filter((c) => c.name.startsWith('buildings-'));
+    const instances = meshes.reduce((sum, m) => sum + m.count, 0);
+    const visible = meshes.reduce((sum, m) => sum + (m.visible ? m.count : 0), 0);
+    pre.textContent =
+      `TOUR_CAPTURE camera=(${camera.position.x.toFixed(1)},${camera.position.y.toFixed(1)},${camera.position.z.toFixed(1)}) ` +
+      `dir=(${dir.x.toFixed(2)},${dir.y.toFixed(2)},${dir.z.toFixed(2)}) ` +
+      `flyYaw=${context.fly.yaw.toFixed(2)} flyPitch=${context.fly.pitch.toFixed(2)} ` +
+      `meshes=${meshes.length} instances=${instances} visible=${visible} ` +
+      `resident=${context.resident.length} frustumCulled=${meshes.map((m) => m.frustumCulled).join(',')} ` +
+      `bounds=${JSON.stringify(state.source.manifest.bounds)} ` +
+      `drawnCalls=${drawn.calls} drawnTriangles=${drawn.triangles} ` +
+      `skyVisible=${context.sky.sky.visible} ` +
+      `sunIntensity=${context.sky.sun.intensity.toFixed(2)} ` +
+      `elemEmissive=${context.city.group.children.find((c) => c.name.startsWith('buildings-')).material.emissiveIntensity.toFixed(2)}`;
+    document.body.append(pre);
+  } else if (hold === 'district') {
+    const d = state.source.manifest.districts[0];
+    for (const [fx, fz] of [[0.06, 0.06], [0.94, 0.06], [0.06, 0.94], [0.94, 0.94]]) {
+      const px = d.rect[0] + d.rect[2] * fx;
+      const pz = d.rect[1] + d.rect[3] * fz;
+      context.fly.position.set(px - 26, 74, pz + 30);
+      context.fly.yaw = Math.atan2(-26, -(-30));
+      context.fly.pitch = -0.86;
+      context.fly.apply();
+      renderer.render(scene, camera);
+      hover.active = true;
+      hover.x = window.innerWidth / 2;
+      hover.y = window.innerHeight / 2;
+      refreshHover(true);
+      if (hover.target && hover.target.kind === 'district') break;
+    }
   } else if (hold === 'hover') {
     const target = context.resident.find((b) => b.height > 6) || context.resident[0];
     if (target) {
@@ -1544,6 +1805,11 @@ async function boot() {
   // One reusable outline marks whatever the cursor is over.
   context.hoverOutline = createHoverOutline(THREE);
   scene.add(context.hoverOutline);
+  // Separate markers for hover and for the tour, so the two never fight.
+  context.hoverDistrictMarker = createDistrictMarker(THREE);
+  scene.add(context.hoverDistrictMarker);
+  context.tourDistrictMarker = createDistrictMarker(THREE);
+  scene.add(context.tourDistrictMarker);
 
   const span = Math.max(bounds[2], bounds[3]);
   // A span-proportional radius would cover an entire 6.7 km city at once, so the
@@ -1593,6 +1859,12 @@ async function boot() {
     label: document.getElementById('tour-label'),
     // The tour keeps this in step so handing control back never moves the view.
     fly: context.fly,
+    // Show the viewer which block is being described.
+    onStop: (district) => {
+      placeDistrictMarker(context.tourDistrictMarker, district.rect, 0.18);
+      // Light up everything that belongs to this district, not just its outline.
+      if (context.city) context.city.highlightDistrict(district.id);
+    },
   });
 
   context.fly.setFromManifest(manifest.camera);

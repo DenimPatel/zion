@@ -145,6 +145,7 @@ export class CityMesh {
     this.group = new THREE.Group();
     this.group.name = 'city';
     this.records = new Map(); // instanced mesh uuid -> building records
+    this.meshes = new Map();  // instanced mesh uuid -> the mesh itself
     this.maxHeight = 1;
   }
 
@@ -243,6 +244,7 @@ export class CityMesh {
       mesh.userData.baseEmissive = material.emissiveIntensity;
 
       this.records.set(mesh.uuid, members);
+      this.meshes.set(mesh.uuid, mesh);
       this.group.add(mesh);
       }
     }
@@ -307,13 +309,20 @@ export class CityMesh {
     mesh.name = 'district-plates';
     mesh.receiveShadow = true;
     const matrix = new THREE.Matrix4();
+    const white = new THREE.Color(0xffffff);
     districts.forEach((district, index) => {
       const [x, z, w, h] = district.rect;
       matrix.makeScale(w, 1, h);
       matrix.setPosition(x + w / 2, 0.03, z + h / 2);
       mesh.setMatrixAt(index, matrix);
+      mesh.setColorAt(index, white);
     });
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.userData.baseColors = Float32Array.from(mesh.instanceColor.array);
+    // instanceId -> district, so a plate under the cursor is a folder you can
+    // inspect like any other repository entity.
+    mesh.userData.districts = districts;
     this.group.add(mesh);
   }
 
@@ -336,7 +345,7 @@ export class CityMesh {
    * interactive by day and glows brighter at dusk -- without touching any other
    * building, and without a second draw call.
    */
-  setHighlight(mesh, instanceId) {
+  setHighlight(mesh, instanceId, strength = 0.62) {
     if (this._hover && (this._hover.mesh !== mesh || this._hover.instanceId !== instanceId)) {
       this.clearHighlight();
     }
@@ -351,18 +360,19 @@ export class CityMesh {
       base[instanceId * 3 + 1],
       base[instanceId * 3 + 2]
     );
-    colour.lerp(accent, 0.62);
+    colour.lerp(accent, strength);
     mesh.setColorAt(instanceId, colour);
     mesh.instanceColor.needsUpdate = true;
 
+    // Buildings carry a lit-window scalar; plates and impostors do not.
     const litAttribute = mesh.geometry.getAttribute('aLit');
-    if (litAttribute) {
+    if (litAttribute && mesh.userData.baseLit) {
       const boosted = Math.min(1, Math.max(0.75, mesh.userData.baseLit[instanceId] + 0.55));
       litAttribute.setX(instanceId, boosted);
       litAttribute.needsUpdate = true;
     }
 
-    this._hover = { mesh, instanceId, baseLit: mesh.userData.baseLit[instanceId] };
+    this._hover = { mesh, instanceId, baseLit: mesh.userData.baseLit ? mesh.userData.baseLit[instanceId] : 0 };
   }
 
   clearHighlight() {
@@ -383,9 +393,76 @@ export class CityMesh {
       mesh.instanceColor.needsUpdate = true;
     }
     const litAttribute = mesh.geometry.getAttribute('aLit');
-    if (litAttribute) {
+    if (litAttribute && mesh.userData.baseLit) {
       litAttribute.setX(instanceId, hover.baseLit);
       litAttribute.needsUpdate = true;
+    }
+  }
+
+  /**
+   * Light up every building that belongs to one district.
+   *
+   * A district is a folder, so "look at this" means "look at all of these", and
+   * one instance colour write per building says it far more clearly than an
+   * outline around a hundred metres of ground.
+   */
+  highlightDistrict(districtId, strength = 0.38) {
+    this.clearDistrictHighlight();
+    const THREE = this.THREE;
+    const accent = new THREE.Color(0xffc978);
+    const touched = [];
+
+    for (const [uuid, members] of this.records) {
+      const mesh = this.meshes.get(uuid);
+      if (!mesh || !mesh.userData.baseColors) continue;
+      const base = mesh.userData.baseColors;
+      const litAttribute = mesh.geometry.getAttribute('aLit');
+      let any = false;
+      members.forEach((building, index) => {
+        if (building.districtId !== districtId) return;
+        mesh.setColorAt(
+          index,
+          new THREE.Color(base[index * 3], base[index * 3 + 1], base[index * 3 + 2]).lerp(
+            accent,
+            strength
+          )
+        );
+        if (litAttribute && mesh.userData.baseLit) {
+          touched.push({ litAttribute, index, base: mesh.userData.baseLit[index] });
+          litAttribute.setX(index, 1);
+        }
+        any = true;
+      });
+      if (any) {
+        mesh.instanceColor.needsUpdate = true;
+        if (litAttribute) litAttribute.needsUpdate = true;
+      }
+    }
+    this._districtHighlight = { districtId, meshCount: this.records.size, lit: touched };
+  }
+
+  clearDistrictHighlight() {
+    const previous = this._districtHighlight;
+    if (!previous) return;
+    this._districtHighlight = null;
+    for (const entry of previous.lit || []) {
+      entry.litAttribute.setX(entry.index, entry.base);
+      entry.litAttribute.needsUpdate = true;
+    }
+    for (const [uuid, members] of this.records) {
+      const mesh = this.meshes.get(uuid);
+      if (!mesh || !mesh.userData.baseColors) continue;
+      const base = mesh.userData.baseColors;
+      let any = false;
+      members.forEach((building, index) => {
+        if (building.districtId !== previous.districtId) return;
+        mesh.setColorAt(
+          index,
+          new this.THREE.Color(base[index * 3], base[index * 3 + 1], base[index * 3 + 2])
+        );
+        any = true;
+      });
+      if (any) mesh.instanceColor.needsUpdate = true;
     }
   }
 
@@ -553,6 +630,7 @@ export function createImpostors(THREE, manifest, residentIds) {
   const mesh = new THREE.InstancedMesh(geometry, material, missing.length);
   mesh.name = 'district-impostors';
   const matrix = new THREE.Matrix4();
+  const white = new THREE.Color(0xffffff);
 
   missing.forEach((district, index) => {
     const [x, z, w, h] = district.rect;
@@ -565,7 +643,73 @@ export function createImpostors(THREE, manifest, residentIds) {
     matrix.makeScale(width, height, depth);
     matrix.setPosition(x + w / 2, 0, z + h / 2);
     mesh.setMatrixAt(index, matrix);
+    mesh.setColorAt(index, white);
   });
   mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  mesh.userData.baseColors = Float32Array.from(mesh.instanceColor.array);
+  mesh.userData.districts = missing;
   return mesh;
+}
+
+/**
+ * A marker for a whole district, used to show what is being talked about.
+ *
+ * A district is not one object -- it is a folder -- so it gets a ground outline
+ * and a translucent slab rather than a highlight on a single mesh.
+ */
+export function createDistrictMarker(THREE) {
+  const group = new THREE.Group();
+  group.name = 'district-marker';
+  group.visible = false;
+  group.renderOrder = 998;
+
+  const fill = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({
+      color: 0xffc978,
+      transparent: true,
+      opacity: 0.12,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+  );
+  fill.rotation.x = -Math.PI / 2;
+  fill.renderOrder = 998;
+  group.add(fill);
+
+  const loop = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(1, 0, 1),
+      new THREE.Vector3(0, 0, 1),
+    ]),
+    // Drawn through buildings on purpose: a district boundary should read even
+    // when towers stand on it. The fill stays depth-tested so it never paints
+    // over the city.
+    new THREE.LineBasicMaterial({
+      color: 0xffc978,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+    })
+  );
+  loop.renderOrder = 1000;
+  group.add(loop);
+
+  group.userData.outline = loop;
+  group.userData.fill = fill;
+  return group;
+}
+
+/** Place a district marker over a district rect, raised just above the plate. */
+export function placeDistrictMarker(marker, rect, y = 0.16) {
+  const [x, z, w, h] = rect;
+  marker.position.set(x, y, z);
+  marker.userData.outline.scale.set(w, 1, h);
+  marker.userData.fill.scale.set(w, 1, h);
+  marker.userData.fill.position.set(w / 2, 0, h / 2);
+  marker.userData.outline.position.set(0, 0, 0);
+  marker.visible = true;
 }

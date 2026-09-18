@@ -384,3 +384,18 @@ body.mouse-captured #hud > * { cursor: default; }
 }
 #tooltip-hint { font-size: 11px; color: var(--ink-dim); }
 body.mouse-captured #tooltip { pointer-events: none; }
+
+/* ---------- tour progress ---------- */
+#tour-progress {
+  margin-top: 9px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+#tour-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.12s linear;
+}
