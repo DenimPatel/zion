@@ -108,12 +108,17 @@ def _json(data) -> bytes:
 
 def _camera(bounds_w: float, bounds_h: float, max_height: float) -> dict:
     span = max(bounds_w, bounds_h)
+    centre_x = bounds_w / 2.0
+    centre_z = bounds_h / 2.0
+    # Look at a point partway up the skyline, from outside the city and high
+    # enough to see the whole footprint.
+    target_y = max(6.0, max_height * 0.28)
     return {
-        "eye": [bounds_w / 2.0, max(30.0, span * 0.42), span * 1.15],
-        "target": [bounds_w / 2.0, 0.0, bounds_h / 2.0],
+        "eye": [centre_x, span * 0.55, centre_z + span * 1.35],
+        "target": [centre_x, target_y, centre_z],
         "fov": 55.0,
         "near": 0.5,
-        "far": max(2000.0, span * 6.0),
+        "far": max(2000.0, span * 8.0),
     }
 
 
@@ -294,13 +299,70 @@ def _now_iso() -> str:
 
 
 # --------------------------------------------------------------------------
+# Viewer installation
+# --------------------------------------------------------------------------
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def install_viewer(out_dir: str) -> int:
+    """Copy the viewer and its vendored three.js next to the city data.
+
+    The output directory becomes the whole website: `zion serve` only has to
+    serve one folder, and a build stays self-contained when archived.
+    """
+    import shutil
+
+    written = 0
+    viewer = os.path.join(REPO_ROOT, "viewer")
+    vendor = os.path.join(REPO_ROOT, "vendor")
+
+    os.makedirs(os.path.join(out_dir, "js"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "css"), exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "vendor"), exist_ok=True)
+
+    for rel in ("index.html", os.path.join("css", "hud.css")):
+        destination = os.path.join(out_dir, rel)
+        shutil.copyfile(os.path.join(viewer, rel), destination)
+        written += os.path.getsize(destination)
+
+    for name in sorted(os.listdir(os.path.join(viewer, "js"))):
+        if not name.endswith(".js"):
+            continue
+        destination = os.path.join(out_dir, "js", name)
+        shutil.copyfile(os.path.join(viewer, "js", name), destination)
+        written += os.path.getsize(destination)
+
+    three = os.path.join(vendor, "three.module.js")
+    if os.path.exists(three):
+        destination = os.path.join(out_dir, "vendor", "three.module.js")
+        shutil.copyfile(three, destination)
+        written += os.path.getsize(destination)
+
+    return written
+
+
+# --------------------------------------------------------------------------
 # Chunks and floor detail
 # --------------------------------------------------------------------------
 
 
-def _building_record(index: int, record: FileMetrics, strings: StringTable, district_id: int) -> dict:
+def _building_record(
+    index: int,
+    record: FileMetrics,
+    strings: StringTable,
+    district_id: int,
+    placed=None,
+) -> dict:
+    placement = {
+        "x": round(placed.x, 3) if placed else 0.0,
+        "y": round(placed.y, 3) if placed else 0.0,
+        "width": round(placed.width, 3) if placed else 4.0,
+        "depth": round(placed.depth, 3) if placed else 4.0,
+    }
     return {
         "id": index,
+        **placement,
         "district": district_id,
         "name": strings.add(record.name),
         "path": strings.add(record.rel),
@@ -518,6 +580,11 @@ def emit_city(
         by_district.setdefault(record.district, []).append(record)
 
     district_order = {d.key: i for i, d in enumerate(layout.districts)}
+    # Placement is computed by layout, so carry it into the chunk records: the
+    # viewer positions instances from the chunk, not from the manifest.
+    placement = {
+        b.rel: b for district in layout.districts for b in district.buildings
+    }
     building_index: dict[str, int] = {}
     counter = 0
     for key in sorted(by_district, key=lambda k: district_order.get(k, 0)):
@@ -531,7 +598,9 @@ def emit_city(
     for key, members in by_district.items():
         district_id = district_order.get(key, 0)
         records = [
-            _building_record(building_index[m.rel], m, strings, district_id)
+            _building_record(
+                building_index[m.rel], m, strings, district_id, placement.get(m.rel)
+            )
             for m in sorted(members, key=lambda f: f.rel)
         ]
         payload = _json({"district": district_id, "buildings": records})
@@ -577,6 +646,8 @@ def emit_city(
     manifest = build_manifest(analysis, layout, strings, options, crypto_meta)
     manifest["stringTable"] = {"count": len(strings), "bytes": len(strings_bytes)}
     bytes_written += _write(os.path.join(out_dir, "city.json"), _json(manifest))
+
+    bytes_written += install_viewer(out_dir)
 
     result.manifest = manifest
     result.bytes_written = bytes_written

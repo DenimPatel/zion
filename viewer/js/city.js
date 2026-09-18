@@ -1,0 +1,319 @@
+/**
+ * Building the city: one InstancedMesh per archetype.
+ *
+ * Draw calls stay bounded by the number of archetypes (~8), not by the number
+ * of buildings, so a 50,000-file repo renders in the same number of calls as a
+ * 28-file one. Everything per-building -- footprint, height, tint, and the
+ * fraction of lit windows -- rides in the instance matrix, the instance colour,
+ * and one extra instanced attribute.
+ */
+
+export const ARCHETYPE_COLORS = {
+  tower: 0x8895a8,
+  slab: 0x74808f,
+  warehouse: 0x646d7a,
+  silo: 0x9b8b6d,
+  monument: 0xa093b0,
+  town_hall: 0xd9a441,
+  park: 0x4f7d4d,
+  ruin: 0x4a4d55,
+};
+
+const ARCHETYPE_NAMES = {
+  tower: 'tower',
+  slab: 'slab',
+  warehouse: 'warehouse',
+  silo: 'silo',
+  monument: 'monument',
+  town_hall: 'town hall',
+  park: 'park',
+  ruin: 'ruin',
+};
+
+export function archetypeLabel(name) {
+  return ARCHETYPE_NAMES[name] || name;
+}
+
+/** A small procedural window grid, used as the emissive map. */
+export function makeWindowTexture(THREE) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cols = 4;
+  const rows = 12;
+  const cellW = canvas.width / cols;
+  const cellH = canvas.height / rows;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const x = col * cellW + cellW * 0.22;
+      const y = row * cellH + cellH * 0.2;
+      const w = cellW * 0.56;
+      const h = cellH * 0.5;
+      const shade = 120 + Math.floor(Math.random() * 135);
+      ctx.fillStyle = `rgb(${shade}, ${Math.floor(shade * 0.88)}, ${Math.floor(shade * 0.66)})`;
+      ctx.fillRect(x, y, w, h);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(2, 2);
+  return texture;
+}
+
+/** Ground: dark asphalt with a faint grid so motion reads at low altitude. */
+export function makeGroundTexture(THREE) {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#12161f';
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = 'rgba(148,163,184,0.10)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= size; i += 32) {
+    ctx.beginPath();
+    ctx.moveTo(i, 0);
+    ctx.lineTo(i, size);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, i);
+    ctx.lineTo(size, i);
+    ctx.stroke();
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  return texture;
+}
+
+/**
+ * Inject a per-instance "lit windows" scalar into the standard material.
+ *
+ * The emissive map draws the windows; this attribute decides how brightly each
+ * individual building's windows glow, which is the whole metaphor -- lit means
+ * documented.
+ */
+function patchLitWindows(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader =
+      'attribute float aLit;\nvarying float vLit;\n' +
+      shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\n  vLit = aLit;'
+      );
+    shader.fragmentShader =
+      'varying float vLit;\n' +
+      shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n  totalEmissiveRadiance *= vLit;'
+      );
+  };
+  material.customProgramCacheKey = () => 'zion-lit-windows';
+}
+
+function hueFor(text) {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) % 360) / 360;
+}
+
+/**
+ * Tint a base colour toward an author's hue.
+ *
+ * Only used when the manifest says authorship is meaningful; a single-author
+ * repo falls back to the neutral palette rather than drawing a one-entry scale.
+ */
+function tintFor(THREE, baseHex, author, strength) {
+  const base = new THREE.Color(baseHex);
+  if (!author) return base;
+  const authorColor = new THREE.Color().setHSL(hueFor(author), 0.42, 0.55);
+  return base.clone().lerp(authorColor, strength);
+}
+
+export class CityMesh {
+  constructor(THREE, source) {
+    this.THREE = THREE;
+    this.source = source;
+    this.group = new THREE.Group();
+    this.group.name = 'city';
+    this.records = new Map(); // instanced mesh uuid -> building records
+    this.maxHeight = 1;
+  }
+
+  /**
+   * Build the whole city from a list of building records.
+   * Returns the THREE.Group; raycasting uses `this.records`.
+   */
+  build(buildings, options = {}) {
+    const THREE = this.THREE;
+    const manifest = this.source.manifest;
+    const [bx, bz, bw, bh] = manifest.bounds;
+    this.maxHeight = Math.max(1, ...buildings.map((b) => b.height || 0));
+
+    const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
+    const litCap = options.litCap === undefined ? 1 : options.litCap;
+
+    // Group buildings by archetype, then build one instanced mesh each.
+    const byArchetype = new Map();
+    for (const building of buildings) {
+      const key = building.archetype || 'warehouse';
+      if (!byArchetype.has(key)) byArchetype.set(key, []);
+      byArchetype.get(key).push(building);
+    }
+
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    geometry.translate(0, 0.5, 0); // origin at the base, so scaling grows upward
+    const windowTexture = makeWindowTexture(THREE);
+
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+
+    for (const [archetype, members] of byArchetype) {
+      const material = new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        roughness: archetype === 'park' ? 0.95 : 0.72,
+        metalness: archetype === 'monument' ? 0.35 : 0.08,
+        emissive: new THREE.Color(0xffc978),
+        emissiveMap: windowTexture,
+        emissiveIntensity: 0,
+      });
+      patchLitWindows(material);
+
+      const mesh = new THREE.InstancedMesh(geometry.clone(), material, members.length);
+      mesh.name = `buildings-${archetype}`;
+      mesh.castShadow = archetype !== 'park';
+      mesh.receiveShadow = true;
+
+      const lit = new Float32Array(members.length);
+      members.forEach((building, index) => {
+        const width = building.width || 4;
+        const depth = building.depth || 4;
+        const x = (building.x || 0) + width / 2;
+        const z = (building.y || 0) + depth / 2;
+        matrix.makeScale(width, building.height || 3, depth);
+        matrix.setPosition(x, 0, z);
+        mesh.setMatrixAt(index, matrix);
+
+        const author = authorTint ? this.source.s(building.author) : '';
+        colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+        mesh.setColorAt(index, colour);
+
+        // Parks and monuments carry no windows; everything else glows in
+        // proportion to how documented it is.
+        const value = building.lit === null || building.lit === undefined
+          ? (archetype === 'park' ? 0 : 0.18)
+          : building.lit;
+        lit[index] = Math.min(litCap, Math.max(0, value));
+      });
+
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.geometry.setAttribute('aLit', new THREE.InstancedBufferAttribute(lit, 1));
+
+      this.records.set(mesh.uuid, members);
+      this.group.add(mesh);
+    }
+
+    this._addGround(bx, bz, bw, bh, buildings);
+    this._addStreets(manifest.streets || []);
+    this._addDistricts(manifest.districts || []);
+    return this.group;
+  }
+
+  _addGround(bx, bz, bw, bh, buildings) {
+    const THREE = this.THREE;
+    const pad = Math.max(40, Math.max(bw, bh) * 0.18);
+    const texture = makeGroundTexture(THREE);
+    texture.repeat.set(Math.max(1, bw / 24), Math.max(1, bh / 24));
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(bw + pad * 2, bh + pad * 2),
+      new THREE.MeshStandardMaterial({ map: texture, roughness: 1, metalness: 0 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(bx + bw / 2, 0, bz + bh / 2);
+    ground.receiveShadow = true;
+    ground.name = 'ground';
+    this.group.add(ground);
+  }
+
+  _addStreets(streets) {
+    if (!streets.length) return;
+    const THREE = this.THREE;
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    geometry.rotateX(-Math.PI / 2);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x2b3140,
+      roughness: 0.9,
+      metalness: 0.05,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, streets.length);
+    mesh.name = 'streets';
+    mesh.receiveShadow = true;
+    const matrix = new THREE.Matrix4();
+    streets.forEach(([x, z, w, h], index) => {
+      matrix.makeScale(w, 1, h);
+      matrix.setPosition(x + w / 2, 0.06, z + h / 2);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A thin plate under each district so blocks read as blocks. */
+  _addDistricts(districts) {
+    if (!districts.length) return;
+    const THREE = this.THREE;
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    geometry.rotateX(-Math.PI / 2);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x1d2330,
+      roughness: 1,
+      metalness: 0,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, districts.length);
+    mesh.name = 'district-plates';
+    mesh.receiveShadow = true;
+    const matrix = new THREE.Matrix4();
+    districts.forEach((district, index) => {
+      const [x, z, w, h] = district.rect;
+      matrix.makeScale(w, 1, h);
+      matrix.setPosition(x + w / 2, 0.03, z + h / 2);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** Scale every building's glow together with the time-of-day control. */
+  setNightFactor(factor) {
+    this.group.children.forEach((child) => {
+      if (child.isInstancedMesh && child.material && child.material.emissiveIntensity !== undefined) {
+        if (child.name.startsWith('buildings-')) {
+          child.material.emissiveIntensity = factor;
+        }
+      }
+    });
+  }
+
+  /**
+   * Set the emissive strength for every building at once.
+   *
+   * Per-building differences are baked into the `aLit` instanced attribute;
+   * this is the single global multiplier the "lit windows" slider drives.
+   */
+  setGlow(value) {
+    this.group.children.forEach((child) => {
+      if (child.isInstancedMesh && child.name.startsWith('buildings-')) {
+        child.material.emissiveIntensity = value;
+      }
+    });
+  }
+}

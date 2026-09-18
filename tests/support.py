@@ -161,6 +161,11 @@ def read_json(path: str):
         return json.load(fh)
 
 
+def read_text(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def read_bytes(path: str) -> bytes:
     with open(path, "rb") as fh:
         return fh.read()
