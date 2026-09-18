@@ -161,12 +161,27 @@ export class CityMesh {
     const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
     const litCap = options.litCap === undefined ? 1 : options.litCap;
 
-    // Group buildings by archetype, then build one instanced mesh each.
+    // Level of detail: one instanced mesh per archetype per tier, so draw calls
+    // scale with archetypes, never with building count. Distant buildings keep
+    // their glow (the metaphor must survive at range) but drop the window
+    // texture, which is the expensive part of the fragment shader.
+    const lodNear = options.lodNear !== undefined
+      ? options.lodNear
+      : Math.min(900, Math.max(140, Math.max(bw, bh) * 0.45));
+    const cameraXZ = options.cameraXZ || null;
+
     const byArchetype = new Map();
     for (const building of buildings) {
       const key = building.archetype || 'warehouse';
-      if (!byArchetype.has(key)) byArchetype.set(key, []);
-      byArchetype.get(key).push(building);
+      if (!byArchetype.has(key)) byArchetype.set(key, { near: [], far: [] });
+      const bucket = byArchetype.get(key);
+      if (cameraXZ) {
+        const dx = (building.x || 0) - cameraXZ.x;
+        const dz = (building.y || 0) - cameraXZ.z;
+        (Math.hypot(dx, dz) <= lodNear ? bucket.near : bucket.far).push(building);
+      } else {
+        bucket.near.push(building);
+      }
     }
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -176,21 +191,24 @@ export class CityMesh {
     const matrix = new THREE.Matrix4();
     const colour = new THREE.Color();
 
-    for (const [archetype, members] of byArchetype) {
+    for (const [archetype, tiers] of byArchetype) {
+      for (const tier of ['near', 'far']) {
+      const members = tiers[tier];
+      if (!members.length) continue;
       const material = new THREE.MeshStandardMaterial({
         color: 0xffffff,
         roughness: archetype === 'park' ? 0.95 : 0.72,
         metalness: archetype === 'monument' ? 0.35 : 0.08,
         emissive: new THREE.Color(0xffc978),
-        emissiveMap: windowTexture,
+        emissiveMap: tier === 'near' ? windowTexture : null,
         emissiveIntensity: 0,
       });
       patchLitWindows(material);
 
       const mesh = new THREE.InstancedMesh(geometry.clone(), material, members.length);
-      mesh.name = `buildings-${archetype}`;
-      mesh.castShadow = archetype !== 'park';
-      mesh.receiveShadow = true;
+      mesh.name = `buildings-${archetype}${tier === 'far' ? '-far' : ''}`;
+      mesh.castShadow = tier === 'near' && archetype !== 'park';
+      mesh.receiveShadow = tier === 'near';
 
       const lit = new Float32Array(members.length);
       members.forEach((building, index) => {
@@ -220,6 +238,7 @@ export class CityMesh {
 
       this.records.set(mesh.uuid, members);
       this.group.add(mesh);
+      }
     }
 
     this._addGround(bx, bz, bw, bh, buildings);
@@ -316,4 +335,102 @@ export class CityMesh {
       }
     });
   }
+}
+
+/**
+ * The City Hall landmark.
+ *
+ * This is the one building in the city that is not a file: it is the repo's own
+ * report card, standing at the centre of the plan. Walk up to it and press E,
+ * or press C from anywhere.
+ */
+export function createCityHall(THREE, bounds, maxHeight) {
+  const group = new THREE.Group();
+  group.name = 'city-hall';
+  const [bx, bz, bw, bh] = bounds;
+  const cx = bx + bw / 2;
+  const cz = bz + bh / 2;
+  const scale = Math.max(1.6, Math.min(4.5, maxHeight / 34));
+
+  const stone = new THREE.MeshStandardMaterial({ color: 0xd8c9a4, roughness: 0.75, metalness: 0.05 });
+  const trim = new THREE.MeshStandardMaterial({ color: 0xb99f6b, roughness: 0.6, metalness: 0.15 });
+  const roof = new THREE.MeshStandardMaterial({ color: 0x8c6f3f, roughness: 0.5, metalness: 0.3 });
+
+  // A plaza so the landmark reads as public ground rather than a plot.
+  const plaza = new THREE.Mesh(
+    new THREE.CircleGeometry(26 * scale, 48),
+    new THREE.MeshStandardMaterial({ color: 0x3a3f4c, roughness: 1 })
+  );
+  plaza.rotation.x = -Math.PI / 2;
+  plaza.position.set(cx, 0.09, cz);
+  group.add(plaza);
+
+  // Stepped base.
+  const base = new THREE.Mesh(new THREE.BoxGeometry(30 * scale, 2.2 * scale, 20 * scale), stone);
+  base.position.set(cx, 1.1 * scale, cz);
+  base.castShadow = true;
+  base.receiveShadow = true;
+  group.add(base);
+
+  const steps = new THREE.Mesh(new THREE.BoxGeometry(24 * scale, 3.4 * scale, 16 * scale), stone);
+  steps.position.set(cx, 3.9 * scale, cz);
+  steps.castShadow = true;
+  group.add(steps);
+
+  // Colonnade front.
+  const columnGeometry = new THREE.CylinderGeometry(0.85 * scale, 0.85 * scale, 6.4 * scale, 12);
+  const columnCount = 6;
+  const columns = new THREE.InstancedMesh(columnGeometry, trim, columnCount);
+  columns.castShadow = true;
+  const matrix = new THREE.Matrix4();
+  for (let i = 0; i < columnCount; i++) {
+    const offset = (i - (columnCount - 1) / 2) * 3.4 * scale;
+    matrix.makeTranslation(cx + offset, 8.9 * scale, cz - 8 * scale);
+    columns.setMatrixAt(i, matrix);
+  }
+  columns.instanceMatrix.needsUpdate = true;
+  group.add(columns);
+
+  const pediment = new THREE.Mesh(new THREE.BoxGeometry(24 * scale, 2.2 * scale, 16 * scale), roof);
+  pediment.position.set(cx, 11.2 * scale, cz);
+  pediment.castShadow = true;
+  group.add(pediment);
+
+  // A clock tower with a dome, to be visible from across the city.
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(7 * scale, 14 * scale, 7 * scale), stone);
+  tower.position.set(cx, 19.3 * scale, cz);
+  tower.castShadow = true;
+  group.add(tower);
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(4.4 * scale, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+    roof
+  );
+  dome.position.set(cx, 26.3 * scale, cz);
+  dome.castShadow = true;
+  group.add(dome);
+
+  const beacon = new THREE.Mesh(
+    new THREE.SphereGeometry(1.3 * scale, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0xffc978, emissive: 0xffb347, emissiveIntensity: 1.1 })
+  );
+  beacon.position.set(cx, 31.4 * scale, cz);
+  group.add(beacon);
+
+  group.userData = {
+    centre: new THREE.Vector3(cx, 0, cz),
+    radius: 30 * scale,
+    // Occupies the plan so walk mode cannot stand inside it.
+    box: {
+      id: -1,
+      rel: '__city_hall__',
+      x0: cx - 15 * scale,
+      z0: cz - 10 * scale,
+      x1: cx + 15 * scale,
+      z1: cz + 10 * scale,
+      height: 33 * scale,
+      isCityHall: true,
+    },
+  };
+  return group;
 }

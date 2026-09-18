@@ -241,3 +241,96 @@ body.legend-hidden #legend { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #loading.error .spinner { display: none; }
 #loading.error #loading-text { color: #f87171; max-width: 620px; text-align: center; font-family: var(--mono); }
+
+/* ---------- City Hall ---------- */
+#cityhall {
+  grid-column: 1 / 4;
+  grid-row: 2;
+  justify-self: center;
+  align-self: start;
+  width: min(880px, 92vw);
+  max-height: 74vh;
+  overflow: auto;
+  position: relative;
+  background: rgba(8, 11, 19, 0.95);
+}
+#cityhall[hidden] { display: none; }
+#cityhall-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: 0;
+  color: var(--ink-dim);
+  font-size: 18px;
+  cursor: pointer;
+}
+#cityhall-close:hover { color: var(--ink); }
+.hall-summary { margin: 0 0 9px; line-height: 1.5; }
+.hall-note {
+  margin: 0 0 5px;
+  color: var(--accent);
+  font-size: 12px;
+}
+#cityhall-body h3 {
+  margin: 15px 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.hall-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.hall-table td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.13);
+}
+.hall-table td.num { text-align: right; font-family: var(--mono); width: 92px; }
+.hall-table td.path { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+.hall-table tr.clickable { cursor: pointer; }
+.hall-table tr.clickable:hover td { background: rgba(255, 179, 71, 0.12); }
+
+/* ---------- Tour ---------- */
+#tour {
+  grid-column: 1 / 4;
+  grid-row: 3;
+  justify-self: center;
+  align-self: end;
+  max-width: min(760px, 88vw);
+  text-align: center;
+  background: rgba(8, 11, 19, 0.9);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  padding: 12px 18px;
+  margin-bottom: 66px;
+}
+#tour[hidden] { display: none; }
+#tour-label {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 5px;
+}
+#tour-caption { margin: 0; font-size: 13.5px; line-height: 1.5; }
+
+/* ---------- Context prompt ---------- */
+#prompt {
+  position: fixed;
+  left: 50%;
+  bottom: 128px;
+  transform: translateX(-50%);
+  background: rgba(8, 11, 19, 0.92);
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  pointer-events: none;
+  z-index: 5;
+}
+#prompt[hidden] { display: none; }
+#prompt kbd { margin-right: 3px; }
+
+body.hall-open #legend,
+body.hall-open #inspector,
+body.hall-open #xray { opacity: 0.25; }

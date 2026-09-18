@@ -105,7 +105,7 @@ export class Inspector {
     }
 
     this.hint.textContent = building.source
-      ? 'Enter the building to read its source.'
+      ? 'Press E (in walk mode, standing outside) to read its source on the walls.'
       : building.isBinary
         ? 'Binary artefact — no source to show.'
         : '';
