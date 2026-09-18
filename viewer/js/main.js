@@ -21,6 +21,7 @@ import { CollisionGrid, WalkCamera } from './collision.js';
 import { Interior } from './interior.js';
 import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
+import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
 
 const canvas = document.getElementById('scene');
@@ -104,7 +105,7 @@ function renderLegend() {
     const swatch = document.createElement('span');
     swatch.className = 'swatch';
     const label = document.createElement('span');
-    label.textContent = state.source.s(entry.label);
+    label.textContent = entry.label;
     const unit = document.createElement('span');
     unit.className = 'legend-unit';
     unit.textContent = entry.enabled ? '' : 'off';
@@ -114,6 +115,13 @@ function renderLegend() {
 
   const notes = document.getElementById('legend-notes');
   notes.innerHTML = '';
+  if (state.source.locked) {
+    const p = document.createElement('p');
+    p.textContent =
+      'Repo notes are encrypted. Press U and enter the passphrase to read them.';
+    notes.append(p);
+    return;
+  }
   for (const note of manifest.stats.notes || []) {
     const p = document.createElement('p');
     p.textContent = state.source.s(note);
@@ -141,7 +149,9 @@ function renderXray() {
 function renderTitle() {
   const manifest = state.source.manifest;
   const stats = manifest.stats;
-  document.getElementById('city-name').textContent = 'Zion';
+  document.getElementById('city-name').textContent = state.source.locked
+    ? 'Zion — locked'
+    : 'Zion';
   const hidden = manifest.meta.noiseExcluded
     ? ` · ${manifest.meta.noiseExcluded} ignored files hidden`
     : '';
@@ -383,6 +393,12 @@ window.addEventListener('keydown', async (event) => {
     case 'KeyL':
       document.body.classList.toggle('legend-hidden');
       break;
+    case 'KeyU':
+      if (context.vault && context.vault.encrypted) {
+        document.getElementById('vault').hidden = false;
+        document.getElementById('vault-passphrase').focus();
+      }
+      break;
     case 'KeyE':
       await handleEnter();
       break;
@@ -423,6 +439,70 @@ async function handleEnter() {
   if (state.mode === 'fly' && context.inspector.selected?.building) {
     await enterInterior(context.inspector.selected.building);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Vault
+// ---------------------------------------------------------------------------
+
+function setupVaultPanel() {
+  const form = document.getElementById('vault-form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = document.getElementById('vault-passphrase');
+    await attemptUnlock(input.value);
+  });
+}
+
+function setVaultStatus(text) {
+  document.getElementById('vault-status').textContent = text;
+}
+
+/**
+ * Unlock and swap labels in place.
+ *
+ * Nothing is rebuilt: the instanced meshes, positions and heights are all
+ * plaintext, so the only thing that changes is the text.
+ */
+/** Re-read resident chunks so labels come from the newly unlocked table. */
+async function refreshLabelsAfterUnlock() {
+  const residentIds = new Set(context.streamer ? context.streamer.resident.keys() : []);
+  for (const id of residentIds) {
+    const buildings = await state.source.buildingsFor(id);
+    context.streamer.resident.set(id, buildings);
+  }
+  context.resident = context.streamer.buildings();
+  state.source.buildings = context.resident;
+  context.inspector.hide();
+  renderLegend();
+  renderTitle();
+}
+
+async function attemptUnlock(passphrase) {
+  if (!passphrase) {
+    setVaultStatus('Enter a passphrase.');
+    return false;
+  }
+  setVaultStatus('Deriving the key (310,000 PBKDF2 iterations)…');
+  try {
+    await context.vault.unlock(passphrase);
+    await state.source.unlockStrings();
+  } catch (error) {
+    context.vault.lock();
+    setVaultStatus(
+      `Could not unlock: ${error.message}. Check the passphrase. Geometry is unaffected.`
+    );
+    return false;
+  }
+
+  // Labels only: re-read the chunks' string indices and re-render the HUD.
+  await refreshLabelsAfterUnlock();
+  setVaultStatus(
+    `Unlocked — ${state.source.strings.length.toLocaleString()} labels restored. ` +
+      'Geometry unchanged.'
+  );
+  document.getElementById('vault').hidden = true;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,18 +663,92 @@ function reportSelfTest(results) {
     ok: passed === results.length,
     results,
   })}`;
-  const pre = document.createElement('pre');
-  pre.id = 'selftest';
+  let pre = document.getElementById('selftest');
+  if (!pre) {
+    pre = document.createElement('pre');
+    pre.id = 'selftest';
+    document.body.append(pre);
+  }
   pre.textContent = line;
-  document.body.append(pre);
   document.title = line;
+  return line;
 }
 
 let selfTestResults = [];
 
 async function runSelfTest() {
   const results = selfTestResults;
-  const check = (step, ok, detail = '') => results.push({ step, ok: Boolean(ok), detail: String(detail) });
+  // Report after every check: if a later step never settles, the DOM still
+  // carries the verdicts that did.
+  const check = (step, ok, detail = '') => {
+    results.push({ step, ok: Boolean(ok), detail: String(detail) });
+    reportSelfTest(results);
+  };
+
+  // 0. Encryption: a locked city must render the same geometry with different
+  //    labels, and unlocking must change labels only.
+  const encrypted = Boolean(state.source.vault && state.source.vault.encrypted);
+  check('vault-detected', encrypted === Boolean(state.source.manifest.meta.encrypted));
+  if (encrypted) {
+    const wasLocked = state.source.locked;
+    check('vault-locked-initial', wasLocked, wasLocked ? 'labels withheld' : 'city was not locked');
+
+    const sample = context.resident[0];
+    const addressBefore = sample ? state.source.label(sample) : '';
+    check(
+      'vault-procedural-address',
+      /^\d+ \w+ (Row|Street|Avenue|Lane|Court|Way|Terrace|Walk)$/.test(addressBefore),
+      addressBefore
+    );
+
+    // A fingerprint of the geometry itself: if unlocking moves a single
+    // building, this changes and the test fails.
+    const fingerprint = () =>
+      context.resident
+        .slice(0, 200)
+        .map((b) => `${b.x.toFixed(3)}:${b.y.toFixed(3)}:${b.height.toFixed(3)}`)
+        .join('|');
+    const geometryBefore = fingerprint();
+
+    const rawKey = params.get('rawkey');
+    const passphrase = params.get('pass');
+    if (rawKey) {
+      // Headless path: a key already derived outside the browser, so the
+      // decryption path can be verified under Chrome's virtual clock.
+      // base64url, because a query string turns "+" into a space.
+      const normalized = rawKey.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+      const bytes = Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+      await context.vault.useRawKey(bytes);
+      await state.source.unlockStrings();
+      await refreshLabelsAfterUnlock();
+      check('vault-unlock', true, 'raw key');
+      check('vault-unlocked-state', !state.source.locked);
+      check(
+        'vault-strings-restored',
+        state.source.strings && state.source.strings.length > 0,
+        `${state.source.strings ? state.source.strings.length : 0} labels`
+      );
+      const addressAfter = sample ? state.source.label(sample) : '';
+      check('vault-real-label', addressAfter !== addressBefore, addressAfter);
+      check('vault-geometry-unchanged', fingerprint() === geometryBefore);
+    } else if (passphrase) {
+      const ok = await attemptUnlock(passphrase);
+      check('vault-unlock', ok);
+      check('vault-unlocked-state', !state.source.locked);
+      check(
+        'vault-strings-restored',
+        state.source.strings && state.source.strings.length > 0,
+        `${state.source.strings ? state.source.strings.length : 0} labels`
+      );
+      const addressAfter = sample ? state.source.label(sample) : '';
+      check('vault-real-label', addressAfter !== addressBefore, addressAfter);
+      check('vault-geometry-unchanged', fingerprint() === geometryBefore);
+    } else {
+      const wrong = await attemptUnlock('definitely not the passphrase');
+      check('vault-rejects-wrong-passphrase', wrong === false && state.source.locked);
+    }
+  }
 
   const tourNode = document.getElementById('tour');
   results.push({
@@ -735,6 +889,13 @@ async function boot() {
   const manifest = state.source.manifest;
   const bounds = manifest.bounds;
 
+  context.vault = new Vault(manifest);
+  state.source.vault = context.vault;
+  if (context.vault.encrypted && state.source.locked) {
+    setupVaultPanel();
+    document.getElementById('vault').hidden = false;
+  }
+
   progress('building the sky');
   context.sky = new SkyRig(THREE, scene, bounds);
 
@@ -766,6 +927,7 @@ async function boot() {
     context.resident = context.streamer.buildings();
   }
   state.source.buildings = context.resident;
+  await state.source.assignLockedAddresses(context.resident);
   rebuildCity(context.resident);
 
   context.fly = new FlyCamera(THREE, camera, bounds);
@@ -811,20 +973,23 @@ async function boot() {
     setMode,
     enterInterior,
     teleportTo,
+    attemptUnlock,
   };
 
   if (state.selftest) {
-    setTimeout(
-      () =>
-        runSelfTest().catch((error) =>
-          reportSelfTest(
-            selfTestResults.concat([
-              { step: 'selftest', ok: false, detail: `${error && error.stack ? error.stack : error}` },
-            ])
-          )
-        ),
-      0
-    );
+    // Awaited, not deferred: WebCrypto operations (the 310,000-iteration PBKDF2
+    // unlock) never settle under Chrome's virtual clock, and only work that
+    // happens during module evaluation is guaranteed to precede the load event
+    // that --dump-dom waits for.
+    try {
+      await runSelfTest();
+    } catch (error) {
+      reportSelfTest(
+        selfTestResults.concat([
+          { step: 'selftest', ok: false, detail: `${error && error.stack ? error.stack : error}` },
+        ])
+      );
+    }
   }
 
   if (state.bench) {
@@ -838,4 +1003,6 @@ async function boot() {
   requestAnimationFrame(frame);
 }
 
-boot();
+// Top-level await: the load event must not fire until the city is up and, in
+// test mode, every check has reported. Headless verification depends on it.
+await boot();

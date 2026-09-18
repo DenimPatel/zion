@@ -93,6 +93,8 @@ class EmitResult:
     encrypted: bool = False
     encryption_seconds: float = 0.0
     source_bytes: int = 0
+    single_file_path: str | None = None
+    single_file_note: str = ""
 
 
 def _write(path: str, data: bytes) -> int:
@@ -145,7 +147,11 @@ def build_manifest(
         legend.append(
             {
                 "id": entry_id,
-                "label": strings.add(label),
+                # A literal, not a string-table index: the legend describes what
+                # the city *means*, which is public schema rather than repository
+                # data, so it stays readable in a locked city. Notes and stats,
+                # which do describe the repo, remain table indices.
+                "label": label,
                 "unit": unit,
                 "enabled": enabled,
             }
@@ -615,48 +621,191 @@ def emit_city(
             progress(f"district {district_id:04d} {key}")
 
     # ---- floor detail ----
+    #
+    # Payloads are queued rather than written immediately, so encryption can run
+    # across processes in one batch. The pure-Python cipher manages ~0.44 MB/s,
+    # and interiors carry full source, so a 12 MB corpus would otherwise cost
+    # half a minute of single-threaded work.
     import time as _time
 
-    crypto_seconds = 0.0
+    writes: list[tuple[str, bytes, bool, str]] = []
+    source_bytes = 0
+
     for record in analysis.files:
         index = building_index[record.rel]
         payload, blob = _floor_payload(record, strings)
         payload["id"] = index
-        detail_bytes = _json(payload)
-        if encryptor is not None:
-            started = _time.time()
-            detail_bytes = encryptor(detail_bytes, f"f/{index}.json")
-            crypto_seconds += _time.time() - started
-        bytes_written += _write(os.path.join(out_dir, f"f/{index}.json"), detail_bytes)
+        writes.append((f"f/{index}.json", _json(payload), True, f"f/{index}.json"))
 
         if blob and options.include_source:
             source_bytes += len(blob)
-            if encryptor is not None:
-                started = _time.time()
-                blob = encryptor(blob, f"f/{index}.src")
-                crypto_seconds += _time.time() - started
-            bytes_written += _write(os.path.join(out_dir, f"f/{index}.src"), blob)
+            writes.append((f"f/{index}.src", blob, True, f"f/{index}.src"))
         elif not blob:
             # Emit an empty source file so the viewer's fetch path is uniform.
-            empty = b"" if encryptor is None else encryptor(b"", f"f/{index}.src")
-            bytes_written += _write(os.path.join(out_dir, f"f/{index}.src"), empty)
+            writes.append((f"f/{index}.src", b"", True, f"f/{index}.src"))
 
-    # ---- rebuild manifest with the complete string table ----
-    strings_bytes = strings.to_bytes()
+    strings_plain = strings.to_bytes()
+    writes.append(("strings.bin", strings_plain, True, "strings.bin"))
+
+    crypto_seconds = 0.0
     if encryptor is not None:
         started = _time.time()
-        strings_bytes = encryptor(strings_bytes, "strings.bin")
-        crypto_seconds += _time.time() - started
-    bytes_written += _write(os.path.join(out_dir, "strings.bin"), strings_bytes)
+        jobs = [(record_id, data) for _, data, needs, record_id in writes if needs]
+        encrypted = encryptor.encrypt_many(jobs)
+        iterator = iter(encrypted)
+        writes = [
+            (path, next(iterator) if needs else data, needs, record_id)
+            for path, data, needs, record_id in writes
+        ]
+        crypto_seconds = _time.time() - started
 
+    for path, data, _needs, _record_id in writes:
+        bytes_written += _write(os.path.join(out_dir, path), data)
+
+    # ---- rebuild manifest with the complete string table ----
     manifest = build_manifest(analysis, layout, strings, options, crypto_meta)
-    manifest["stringTable"] = {"count": len(strings), "bytes": len(strings_bytes)}
+    manifest["stringTable"] = {
+        "count": len(strings),
+        "bytes": len(strings_plain),
+        "encrypted": bool(encryptor is not None),
+    }
     bytes_written += _write(os.path.join(out_dir, "city.json"), _json(manifest))
 
     bytes_written += install_viewer(out_dir)
+
+    if options.single_file:
+        single, note = build_single_file(out_dir, manifest, result)
+        result.single_file_path = single
+        result.single_file_note = note
 
     result.manifest = manifest
     result.bytes_written = bytes_written
     result.source_bytes = source_bytes
     result.encryption_seconds = crypto_seconds
     return result
+
+
+# --------------------------------------------------------------------------
+# Single-file build
+# --------------------------------------------------------------------------
+
+# Above this, inlining stops being sensible: base64 adds a third on top of the
+# payload, and the browser must parse the whole document before the first frame.
+SINGLE_FILE_MAX_BYTES = 32 * 1024 * 1024
+SINGLE_FILE_MAX_BUILDINGS = 5000
+
+
+def _rewrite_module_specifiers(source: str) -> str:
+    """Point relative viewer imports at import-map keys.
+
+    Inlined modules have no URL to resolve `./loader.js` against, so each
+    module is registered under a bare `zion/<name>` key instead.
+    """
+    import re
+
+    def replace(match: re.Match) -> str:
+        prefix, specifier, suffix = match.group(1), match.group(2), match.group(3)
+        if specifier.startswith("."):
+            name = specifier.rsplit("/", 1)[-1]
+            return f"{prefix}zion/{name[:-3]}{suffix}"
+        return match.group(0)
+
+    return re.sub(
+        r"(from\s+['\"])([^'\"]+)(['\"])",
+        replace,
+        source,
+    )
+
+
+def _data_url(source: bytes, mime: str = "text/javascript") -> str:
+    import base64
+
+    return f"data:{mime};base64," + base64.b64encode(source).decode("ascii")
+
+
+def build_single_file(out_dir: str, manifest: dict, result: "EmitResult") -> tuple[str | None, str]:
+    """Inline the viewer and the whole city into one `city.html`.
+
+    Returns (path, reason). `path` is None when the city is too large to inline,
+    because the two requirements -- opens by double-click, survives 50k files --
+    genuinely cannot both hold: streaming needs fetch(), and file:// has no
+    origin to fetch from.
+    """
+    import base64
+
+    buildings = manifest["meta"]["buildingCount"]
+    payload_paths: list[str] = ["city.json", "strings.bin"]
+    for subdir in ("d", "f"):
+        directory = os.path.join(out_dir, subdir)
+        if not os.path.isdir(directory):
+            continue
+        payload_paths.extend(
+            f"{subdir}/{name}" for name in sorted(os.listdir(directory))
+        )
+
+    total = sum(os.path.getsize(os.path.join(out_dir, p)) for p in payload_paths)
+    if buildings > SINGLE_FILE_MAX_BUILDINGS:
+        return None, (
+            f"{buildings:,} buildings exceeds the {SINGLE_FILE_MAX_BUILDINGS:,}-building "
+            "limit for a single file; a single HTML document cannot stream, and inlining "
+            "this city would mean parsing tens of megabytes before the first frame."
+        )
+    if total > SINGLE_FILE_MAX_BYTES:
+        return None, (
+            f"the city payload is {total / 1e6:.1f} MB, above the "
+            f"{SINGLE_FILE_MAX_BYTES / 1e6:.0f} MB single-file limit (base64 inflates it "
+            "by a further third)."
+        )
+
+    # Viewer modules, rewritten and registered under import-map keys.
+    modules: dict[str, str] = {}
+    js_dir = os.path.join(out_dir, "js")
+    for name in sorted(os.listdir(js_dir)):
+        if not name.endswith(".js"):
+            continue
+        source = open(os.path.join(js_dir, name), encoding="utf-8").read()
+        modules[f"zion/{name[:-3]}"] = _data_url(_rewrite_module_specifiers(source).encode("utf-8"))
+
+    three_path = os.path.join(out_dir, "vendor", "three.module.js")
+    if os.path.exists(three_path):
+        modules["three"] = _data_url(open(three_path, "rb").read())
+
+    payload = {
+        path: base64.b64encode(open(os.path.join(out_dir, path), "rb").read()).decode("ascii")
+        for path in payload_paths
+    }
+
+    html = open(os.path.join(out_dir, "index.html"), encoding="utf-8").read()
+    import json as _jsonlib
+
+    importmap = '<script type="importmap">' + _jsonlib.dumps({"imports": modules}) + "</script>"
+    # Replace the existing import map, and swap the external module for an
+    # inline import of the inlined entry point.
+    html = html.replace(
+        '<script type="importmap">',
+        "<!--ZION_IMPORTMAP-->",
+        1,
+    )
+    start = html.find("<!--ZION_IMPORTMAP-->")
+    end = html.find("</script>", start)
+    html = html[:start] + importmap + html[end + len("</script>") :]
+    html = html.replace(
+        '<script type="module" src="./js/main.js"></script>',
+        "<script>window.__ZION_PAYLOAD__ = " + _jsonlib.dumps(payload) + ";</script>\n"
+        '<script type="module">import "zion/main";</script>',
+    )
+    # The inlined build has no CSS file to fetch.
+    css_path = os.path.join(out_dir, "css", "hud.css")
+    if os.path.exists(css_path):
+        css = open(css_path, encoding="utf-8").read()
+        html = html.replace(
+            '<link rel="stylesheet" href="./css/hud.css">',
+            "<style>\n" + css + "\n</style>",
+        )
+
+    target = os.path.join(out_dir, "city.html")
+    os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    size = os.path.getsize(target)
+    return target, f"inlined {len(payload)} payload files ({total / 1e6:.1f} MB raw) into {size / 1e6:.1f} MB"

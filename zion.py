@@ -190,6 +190,12 @@ def cmd_build(args) -> int:
         print(f"  encrypted     yes ({result.encryption_seconds:.2f}s of AES-GCM)")
     else:
         print("  encrypted     no (plain city, real labels)")
+    if args.single_file:
+        if result.single_file_path:
+            print(f"  single file   {result.single_file_path}")
+            print(f"                {result.single_file_note}")
+        else:
+            print(f"  single file   not produced: {result.single_file_note}")
     return 0
 
 

@@ -55,8 +55,8 @@ export class Inspector {
     this.selected = { kind: 'building', building };
     const source = this.source;
     this.panel.hidden = false;
-    this.title.textContent = source.s(building.name) || source.s(building.path);
-    this.pathEl.textContent = source.s(building.path);
+    this.title.textContent = source.label(building) || source.s(building.path);
+    this.pathEl.textContent = source.locked ? '(locked)' : source.s(building.path);
 
     const rows = [
       ['language', source.s(building.language)],
@@ -120,7 +120,8 @@ export class Inspector {
         row.className = 'floor';
         const name = document.createElement('span');
         name.className = 'name';
-        name.textContent = '  '.repeat(Math.min(floor.depth || 0, 4)) + (source.s(floor.name) || '(anonymous)');
+        name.textContent =
+          '  '.repeat(Math.min(floor.depth || 0, 4)) + (source.s(floor.name) || '(anonymous)');
         const kind = document.createElement('span');
         kind.className = 'kind';
         kind.textContent = floor.kind;
@@ -145,8 +146,8 @@ export class Inspector {
     this.selected = { kind: 'district', district };
     const source = this.source;
     this.panel.hidden = false;
-    this.title.textContent = source.districtName(district);
-    this.pathEl.textContent = source.s(district.key);
+    this.title.textContent = source.districtLabel(district);
+    this.pathEl.textContent = source.locked ? '(locked)' : source.s(district.key);
 
     const rows = [
       ['buildings', String(district.buildings)],

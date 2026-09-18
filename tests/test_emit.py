@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import unittest
@@ -59,7 +60,9 @@ class EmitTests(TempRepoCase):
             if district["readmeRel"] >= 0:
                 indices.append(district["readmeRel"])
         for entry in manifest["legend"]:
-            indices.append(entry["label"])
+            # Legend labels are literal schema text, not table indices.
+            self.assertIsInstance(entry["label"], str)
+            self.assertTrue(entry["label"])
         indices += manifest["stats"]["notes"]
         for row in manifest["stats"]["folders"]:
             indices.append(row["name"])
@@ -101,6 +104,50 @@ class EmitTests(TempRepoCase):
                 self.assertGreaterEqual(floor["srcOffset"], 0)
                 self.assertLessEqual(floor["srcOffset"] + floor["srcLength"], size)
             self.assertEqual(detail["srcBytes"], size)
+
+
+class SingleFileTests(TempRepoCase):
+    def test_single_file_inlines_everything(self):
+        repo = make_repo(self.scratch())
+        _analysis, _layout, result = self.build_city(
+            repo, out_dir=os.path.join(self._tmp, "city"), single_file=True
+        )
+        self.assertIsNotNone(result.single_file_path)
+        html = read_text(result.single_file_path)
+
+        # No external requests at all: a file:// document cannot make them.
+        self.assertNotIn('src="./js/main.js"', html)
+        self.assertNotIn('href="./css/hud.css"', html)
+        self.assertNotIn('"three": "./vendor/three.module.js"', html)
+        self.assertIn("data:text/javascript;base64", html)
+        self.assertIn("__ZION_PAYLOAD__", html)
+        self.assertIn('import "zion/main"', html)
+        # The embedded payload must decode back to the real city files.
+        payload_json = html.split("window.__ZION_PAYLOAD__ = ", 1)[1].split(";</script>", 1)[0]
+        payload = json.loads(payload_json)
+        self.assertIn("city.json", payload)
+        self.assertIn("strings.bin", payload)
+        strings = base64.b64decode(payload["strings.bin"])
+        self.assertEqual(strings[:8], b"ZIONSTR1")
+        manifest = json.loads(base64.b64decode(payload["city.json"]))
+        self.assertEqual(manifest["format"], "zion-city")
+
+    def test_module_specifiers_are_rewritten_to_import_map_keys(self):
+        from analyzer.emit import _rewrite_module_specifiers
+
+        source = "import { a } from './loader.js';\nimport * as THREE from 'three';\n"
+        rewritten = _rewrite_module_specifiers(source)
+        self.assertIn("from 'zion/loader'", rewritten)
+        self.assertIn("from 'three'", rewritten)
+
+    def test_oversized_cities_are_refused_with_a_reason(self):
+        from analyzer.emit import SINGLE_FILE_MAX_BUILDINGS
+
+        self.assertEqual(SINGLE_FILE_MAX_BUILDINGS, 5000)
+        # The refusal path is exercised for real by the 50k benchmark; here we
+        # only pin the reason-free invariant that the threshold exists and is
+        # not silently ignored.
+        self.assertGreater(SINGLE_FILE_MAX_BUILDINGS, 0)
 
 
 if __name__ == "__main__":

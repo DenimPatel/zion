@@ -31,6 +31,19 @@ export class CityHall {
   show() {
     const source = this.source;
     const manifest = source.manifest;
+    if (source.locked) {
+      this.title.textContent = 'City Hall — locked';
+      this.body.innerHTML = '';
+      const locked = document.createElement('p');
+      locked.className = 'hall-summary';
+      locked.textContent =
+        'This city was built with --encrypt. The report is encrypted along with every ' +
+        'path, name and author. Press U, enter the passphrase, and the report appears ' +
+        'here without changing a single building.';
+      this.body.append(locked);
+      this.panel.hidden = false;
+      return;
+    }
     const stats = manifest.stats;
     const flags = manifest.flags || {};
     const s = (i) => source.s(i);

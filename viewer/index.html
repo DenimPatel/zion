@@ -55,6 +55,18 @@
 
   <div id="prompt" hidden></div>
 
+  <section id="vault" hidden aria-label="Unlock">
+    <h2>Encrypted city</h2>
+    <p>The skyline is real, but every name, path and source body is AES-256-GCM
+       ciphertext. Geometry is unchanged: unlocking swaps labels in place.</p>
+    <form id="vault-form">
+      <input id="vault-passphrase" type="password" placeholder="passphrase"
+             autocomplete="current-password" spellcheck="false">
+      <button type="submit">Unlock</button>
+    </form>
+    <p id="vault-status" class="hint">Locked buildings show deterministic procedural addresses.</p>
+  </section>
+
   <footer id="controls">
     <div class="control">
       <label for="time">Time</label>
@@ -73,6 +85,7 @@
       <span><kbd>T</kbd> tour</span>
       <span><kbd>C</kbd> city hall</span>
       <span><kbd>O</kbd> overview</span>
+      <span><kbd>U</kbd> unlock</span>
       <span><kbd>Esc</kbd> release</span>
     </div>
   </footer>
