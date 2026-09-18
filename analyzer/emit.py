@@ -789,10 +789,14 @@ def build_single_file(out_dir: str, manifest: dict, result: "EmitResult") -> tup
     start = html.find("<!--ZION_IMPORTMAP-->")
     end = html.find("</script>", start)
     html = html[:start] + importmap + html[end + len("</script>") :]
+    # The entry point is a dynamic import so that module-graph failures are
+    # reportable; the single-file build only has to repoint the specifier.
+    html = html.replace("import('./js/main.js')", "import('zion/main')")
     html = html.replace(
-        '<script type="module" src="./js/main.js"></script>',
+        "<script type=\"module\">",
         "<script>window.__ZION_PAYLOAD__ = " + _jsonlib.dumps(payload) + ";</script>\n"
-        '<script type="module">import "zion/main";</script>',
+        '<script type="module">',
+        1,
     )
     # The inlined build has no CSS file to fetch.
     css_path = os.path.join(out_dir, "css", "hud.css")

@@ -100,6 +100,50 @@
 
 <div id="loading"><div class="spinner"></div><span id="loading-text">Building the city&hellip;</span></div>
 
-<script type="module" src="./js/main.js"></script>
+<script>
+// A module that fails to load leaves the page saying "Building the city…"
+// forever, which tells the user nothing. Report it instead.
+(function () {
+  function report(kind, message) {
+    var pre = document.createElement('pre');
+    pre.id = 'boot-error';
+    pre.style.cssText =
+      'position:fixed;left:16px;right:16px;top:16px;z-index:99;background:#2a0f14;' +
+      'border:1px solid #f87171;border-radius:8px;padding:12px;color:#fecaca;' +
+      'font:12px ui-monospace,Menlo,monospace;white-space:pre-wrap';
+    pre.textContent = 'Zion failed to start (' + kind + '):\n' + message;
+    document.body.appendChild(pre);
+    var loading = document.getElementById('loading');
+    if (loading) loading.classList.add('done');
+  }
+  window.__zionBootError = function (error) {
+    report('import', (error && (error.stack || error.message)) || String(error));
+  };
+  window.addEventListener('error', function (event) {
+    if (event.target && event.target.tagName === 'SCRIPT') {
+      report('script', 'could not load ' + (event.target.src || 'a module'));
+      return;
+    }
+    report('error', (event.message || '') + '\n' + (event.filename || '') + ':' + (event.lineno || ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    report('promise', (reason && reason.stack) || String(reason));
+  });
+})();
+</script>
+<script type="module">
+// A dynamic import is used so a failure in the module graph (a missing export,
+// a bad specifier) surfaces as a catchable error with a real message -- the
+// window `error` event for a failed module script carries no detail at all.
+// It is awaited deliberately: the load event must not fire until the viewer is
+// up, because headless verification reads the DOM after load.
+try {
+  await import('./js/main.js');
+} catch (error) {
+  if (window.__zionBootError) window.__zionBootError(error);
+  else throw error;
+}
+</script>
 </body>
 </html>

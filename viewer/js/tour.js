@@ -141,17 +141,56 @@ function escapeHtml(text) {
   );
 }
 
+/**
+ * The guided tour: one continuous route, not a sequence of jumps.
+ *
+ * The first version flew to a district, stopped, and flew again. That looked
+ * broken for two compounding reasons, and the fix is shaped by both:
+ *
+ *  1. `CameraFlight` writes straight to the camera and never touches the fly
+ *     camera's own position. The moment a leg ended, the render loop fell
+ *     through to `fly.update()`, which re-applied the fly camera's stored state
+ *     and snapped the view back home. Hence "it comes to home after each tour".
+ *  2. Restarting a flight per stop meant re-deciding the camera every couple of
+ *     seconds, which reads as a series of lurches rather than a route.
+ *
+ * So the tour now owns the camera for its whole duration and follows a single
+ * closed spline through every stop, slowing into each one and accelerating out,
+ * returning to where it began and carrying on. The fly camera is kept in step
+ * every frame, so handing control back moves the camera not at all.
+ */
+
+const MIN_LEG_SECONDS = 1.8;
+const MAX_LEG_SECONDS = 5.5;
+const CRUISE_SPEED = 60; // metres per second, before normalising
+
+// A whole circuit is paced to roughly this long, so a 4-district village and a
+// 30-district city both read as a tour rather than a sprint or a crawl.
+const SECONDS_PER_STOP = 3.4;
+const MIN_CIRCUIT_SECONDS = 13;
+const MAX_CIRCUIT_SECONDS = 105;
+
+/** Zero velocity at both ends, so the camera eases into each stop. */
+function smootherStep(t) {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * x * (x * (x * 6 - 15) + 10);
+}
+
 export class Tour {
-  constructor(source, camera, flight, dom) {
+  constructor(THREE, source, camera, flight, dom) {
+    this.THREE = THREE;
     this.source = source;
     this.camera = camera;
     this.flight = flight;
-    this.dom = dom; // { container, caption, label }
-    this.stop = 0;
+    this.dom = dom; // { container, caption, label, fly }
     this.running = false;
-    this.timer = null;
+    this.stopIndex = -1;
+    this.route = null;
+    this.phase = 'lead';
+    this.elapsed = 0;
   }
 
+  /** One stop per district, carrying that district's numbers as the caption. */
   get stops() {
     const manifest = this.source.manifest;
     const s = (i) => this.source.s(i);
@@ -179,38 +218,172 @@ export class Tour {
       this.stopTour();
       return;
     }
+    const stops = this.stops;
+    if (!stops.length) return;
+    const THREE = this.THREE;
+
+    const eyePoints = stops.map((stop) => new THREE.Vector3(...stop.eye));
+    const lookPoints = stops.map((stop) => new THREE.Vector3(...stop.target));
+
+    // Where the camera is now, and the point it is currently looking toward.
+    const from = this.camera.position.clone();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const lookFrom = from.clone().addScaledVector(forward, 60);
+
+    // Phase 1: one arcing approach from wherever the camera happens to be to the
+    // first stop, so the tour never begins by teleporting.
+    const approach = from.distanceTo(eyePoints[0]);
+    this.lead = {
+      from,
+      to: eyePoints[0].clone(),
+      lookFrom,
+      lookTo: lookPoints[0].clone(),
+      // A vertical arc, so the approach lifts over the skyline rather than
+      // ploughing through it.
+      lift: Math.min(140, Math.max(18, approach * 0.22)),
+      duration: Math.min(
+        MAX_LEG_SECONDS * 1.4,
+        Math.max(MIN_LEG_SECONDS, approach / CRUISE_SPEED)
+      ),
+    };
+
+    // Phase 2: a closed loop through every stop, so the last leg genuinely
+    // returns to the starting point and continues from there.
+    this.route = {
+      eye: new THREE.CatmullRomCurve3(eyePoints, true, 'catmullrom', 0.5),
+      look: new THREE.CatmullRomCurve3(lookPoints, true, 'catmullrom', 0.5),
+      stops,
+      legTimes: [],
+      legStarts: [],
+      total: 0,
+    };
+    // Raw leg times from distance, then scaled together so the circuit lands
+    // near its target length. Scaling keeps the relative pacing -- long legs
+    // still take longer -- while stopping a wide city from being crossed at
+    // several hundred metres per second.
+    const raw = [];
+    for (let i = 0; i < stops.length; i++) {
+      const next = (i + 1) % stops.length;
+      const distance = eyePoints[i].distanceTo(eyePoints[next]);
+      raw.push(Math.min(MAX_LEG_SECONDS, Math.max(MIN_LEG_SECONDS, distance / CRUISE_SPEED)));
+    }
+    const rawTotal = raw.reduce((sum, value) => sum + value, 0);
+    const target = Math.min(
+      MAX_CIRCUIT_SECONDS,
+      Math.max(MIN_CIRCUIT_SECONDS, stops.length * SECONDS_PER_STOP)
+    );
+    const scale = rawTotal > 0 ? target / rawTotal : 1;
+
+    let accumulated = 0;
+    for (const time of raw) {
+      const scaled = time * scale;
+      this.route.legTimes.push(scaled);
+      this.route.legStarts.push(accumulated);
+      accumulated += scaled;
+    }
+    this.route.total = accumulated;
+
+    this.phase = 'lead';
+    this.elapsed = 0;
+    this.stopIndex = -1;
     this.running = true;
-    this.stop = 0;
     this.dom.container.hidden = false;
-    this._goto(0);
+    this._announce(0);
+    this.update(0);
   }
 
   stopTour() {
     this.running = false;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
     this.dom.container.hidden = true;
+    // Leave the fly camera exactly where the tour left the view, so releasing
+    // control does not move the camera at all.
+    this._syncFly();
   }
 
-  _goto(index) {
-    const stops = this.stops;
-    if (index >= stops.length) {
-      this.stopTour();
-      return;
+  get progress() {
+    if (!this.running || !this.route) return 0;
+    const legs = this.route.stops.length + 1;
+    if (this.phase === 'lead') {
+      return (this.elapsed / this.lead.duration) / legs;
     }
-    this.stop = index;
-    const entry = stops[index];
-    this.dom.label.textContent = `Tour ${index + 1} / ${stops.length}`;
-    this.dom.caption.textContent = entry.caption;
-    this.flight.start(
-      this.camera.position.clone(),
-      this.camera.quaternion.clone(),
-      new (this.camera.position.constructor)(...entry.eye),
-      new (this.camera.position.constructor)(...entry.target),
-      1.8
-    );
-    this.timer = setTimeout(() => {
-      if (this.running) this._goto(index + 1);
-    }, 2600);
+    return Math.min(1, (1 + (this.elapsed / this.route.total)) / legs);
+  }
+
+  _announce(index) {
+    if (index === this.stopIndex) return;
+    this.stopIndex = index;
+    const stop = this.route.stops[index];
+    this.dom.label.textContent = `Tour ${index + 1} / ${this.route.stops.length}`;
+    this.dom.caption.textContent = stop.caption;
+  }
+
+  /** Advance the tour. Returns true when it drove the camera this frame. */
+  update(dt) {
+    if (!this.running || !this.route) return false;
+    this.elapsed += dt;
+
+    if (this.phase === 'lead') {
+      const t = Math.min(1, this.elapsed / this.lead.duration);
+      const eased = smootherStep(t);
+      const position = this.lead.from.clone().lerp(this.lead.to, eased);
+      position.y += Math.sin(Math.PI * eased) * this.lead.lift;
+      const target = this.lead.lookFrom.clone().lerp(this.lead.lookTo, eased);
+      this._place(position, target);
+      if (t >= 1) {
+        this.phase = 'loop';
+        this.elapsed = 0;
+        this.stopIndex = -1;
+        this._announce(0);
+      }
+      this._syncFly();
+      return true;
+    }
+
+    // Phase 2: continuous loop. Wrap rather than stop, so the route never
+    // doubles back on itself.
+    if (this.elapsed >= this.route.total) {
+      this.elapsed -= this.route.total;
+      this.stopIndex = -1;
+    }
+
+    let leg = 0;
+    for (let i = this.route.legStarts.length - 1; i >= 0; i--) {
+      if (this.elapsed >= this.route.legStarts[i]) {
+        leg = i;
+        break;
+      }
+    }
+    const legElapsed = this.elapsed - this.route.legStarts[leg];
+    const local = Math.max(0, Math.min(1, legElapsed / this.route.legTimes[leg]));
+    const eased = smootherStep(local);
+    // `getPoint`, not `getPointAt`: parameterising by segment is what makes one
+    // leg correspond to exactly one stop, which is what the easing assumes.
+    const u = (leg + eased) / this.route.stops.length;
+
+    this._announce(leg);
+    this._place(this.route.eye.getPoint(u), this.route.look.getPoint(u));
+    this._syncFly();
+    return true;
+  }
+
+  _place(position, target) {
+    this.camera.position.copy(position);
+    this.camera.lookAt(target);
+  }
+
+  /**
+   * Keep the fly camera in step with the tour camera.
+   *
+   * Without this, the render loop hands control back to a fly camera still
+   * sitting wherever the tour began, and the view snaps.
+   */
+  _syncFly() {
+    const fly = this.dom.fly;
+    if (!fly) return;
+    fly.position.copy(this.camera.position);
+    const THREE = this.THREE;
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    fly.yaw = Math.atan2(-forward.x, -forward.z);
+    fly.pitch = Math.asin(Math.max(-1, Math.min(1, forward.y)));
   }
 }

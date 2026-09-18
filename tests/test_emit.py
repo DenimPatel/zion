@@ -121,7 +121,10 @@ class SingleFileTests(TempRepoCase):
         self.assertNotIn('"three": "./vendor/three.module.js"', html)
         self.assertIn("data:text/javascript;base64", html)
         self.assertIn("__ZION_PAYLOAD__", html)
-        self.assertIn('import "zion/main"', html)
+        # The entry point is a dynamic import (so module-graph failures are
+        # reportable) and the single-file build repoints it at the inlined map.
+        self.assertIn("import('zion/main')", html)
+        self.assertNotIn("import('./js/main.js')", html)
         # The embedded payload must decode back to the real city files.
         payload_json = html.split("window.__ZION_PAYLOAD__ = ", 1)[1].split(";</script>", 1)[0]
         payload = json.loads(payload_json)

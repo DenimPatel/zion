@@ -598,6 +598,7 @@ document.addEventListener('pointerlockchange', onPointerLockChange);
 // ---------------------------------------------------------------------------
 
 function setMode(mode) {
+  if (context.tour && context.tour.running) context.tour.stopTour();
   applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
   state.mode = mode;
@@ -701,6 +702,13 @@ window.addEventListener('keydown', async (event) => {
   const target = event.target;
   if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
 
+  // Any deliberate movement hands control back to the player.
+  const MOVEMENT_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space']);
+  if (context.tour && context.tour.running && MOVEMENT_KEYS.has(event.code)) {
+    context.tour.stopTour();
+    setPrompt('');
+  }
+
   switch (event.code) {
     case 'KeyV':
       setMode(state.mode === 'walk' ? 'fly' : 'walk');
@@ -710,6 +718,11 @@ window.addEventListener('keydown', async (event) => {
       break;
     case 'KeyT':
       context.tour.start();
+      setPrompt(
+        context.tour.running
+          ? '<kbd>T</kbd> or <kbd>Esc</kbd> to end the tour &nbsp;·&nbsp; any movement key takes over'
+          : ''
+      );
       break;
     case 'KeyC':
       context.cityHall.open ? context.cityHall.hide() : context.cityHall.show();
@@ -743,6 +756,7 @@ window.addEventListener('keydown', async (event) => {
         context.cityHall.hide();
         document.body.classList.remove('hall-open');
         context.tour.stopTour();
+        setPrompt('');
       }
       break;
     default:
@@ -934,7 +948,9 @@ function frame(now) {
     return;
   }
 
-  if (context.flight.active) {
+  if (context.tour.running) {
+    context.tour.update(dt);
+  } else if (context.flight.active) {
     context.flight.update(dt);
   } else if (state.mode === 'overview') {
     context.overview.update(dt);
@@ -1233,11 +1249,13 @@ async function runSelfTest() {
     );
     check('hover-pointer-cursor', canvas.style.cursor === 'pointer', canvas.style.cursor || '(unset)');
 
-    // Point at the sky and everything must retract.
-    dispatch('pointermove', 4, 4);
+    // Moving the cursor off the canvas must retract everything. This is tested
+    // by leaving rather than by pointing at a "sky" corner, because in a dense
+    // city any given corner may well contain a building.
+    dispatch('pointerleave', 0, 0);
     refreshHover(true);
     check(
-      'hover-clears-over-sky',
+      'hover-clears-when-cursor-leaves',
       !hover.target &&
         !context.hoverOutline.visible &&
         document.getElementById('tooltip').hidden &&
@@ -1343,12 +1361,95 @@ async function runSelfTest() {
   teleportTo({ kind: 'district', district: firstDistrict });
   check('teleport', true, `flew to ${state.source.s(firstDistrict.key)}`);
 
-  // 5. The tour starts and produces a caption per district.
+  // 5. The tour must be one continuous route. This is the exact complaint that
+  //    produced it: the camera used to fly to a stop, then snap home between
+  //    legs, which read as lurching rather than touring.
   context.tour.start();
-  const stops = context.tour.stops.length;
-  check('tour-start', context.tour.running && stops > 0, `${stops} stops`);
-  check('tour-caption', document.getElementById('tour-caption').textContent.length > 0);
+  const stops = context.tour.stops;
+  check('tour-start', context.tour.running && stops.length > 0, `${stops.length} stops`);
+  check(
+    'tour-caption',
+    document.getElementById('tour-caption').textContent.length > 0,
+    document.getElementById('tour-caption').textContent.slice(0, 60)
+  );
+
+  const tourTemplate = stops.map((stop) => new THREE.Vector3(...stop.eye));
+  const path = [];
+  const labels = [];
+  // Step far enough for the approach plus a full circuit.
+  const totalTime =
+    context.tour.route.total + context.tour.lead.duration;
+  for (let t = 0; t < totalTime + 2; t += 1 / 20) {
+    context.tour.update(1 / 20);
+    path.push(camera.position.clone());
+    labels.push(context.tour.stopIndex);
+  }
+
+  // (a) No teleports: every step is a small fraction of the biggest step.
+  const tourSteps = [];
+  let pathLength = 0;
+  for (let i = 1; i < path.length; i++) {
+    const step = path[i].distanceTo(path[i - 1]);
+    tourSteps.push(step);
+    pathLength += step;
+  }
+  const sortedSteps = [...tourSteps].sort((a, b) => a - b);
+  const maxStep = sortedSteps[sortedSteps.length - 1];
+  const stepSeconds = 1 / 20;
+  const maxSpeed = maxStep / stepSeconds;
+  // A snap back to the previous resting place moved the camera roughly half the
+  // city in a single frame -- thousands of metres per second. Legitimate motion
+  // on a long leg at speed tops out in the low hundreds.
+  const speedLimit = 400;
+  const shareLimit = 0.02; // no single step may dominate the route
+  check(
+    'tour-no-jumps',
+    maxSpeed <= speedLimit && maxStep <= pathLength * shareLimit,
+    `peak ${maxSpeed.toFixed(0)} m/s, largest step ${maxStep.toFixed(2)}m = ` +
+      `${((maxStep / pathLength) * 100).toFixed(2)}% of a ${pathLength.toFixed(0)}m route`
+  );
+
+  // (b) Every stop is actually visited.
+  const nearest = (point) => {
+    let best = Infinity;
+    let at = -1;
+    path.forEach((p, i) => {
+      const d = p.distanceTo(point);
+      if (d < best) {
+        best = d;
+        at = i;
+      }
+    });
+    return { best, at };
+  };
+  const visits = tourTemplate.map(nearest);
+  check(
+    'tour-visits-every-stop',
+    visits.every((v) => v.best < 6),
+    visits.map((v, i) => `stop${i + 1}:${v.best.toFixed(1)}m`).join(' ')
+  );
+
+  // (c) The route returns to where it started *after* the final stop.
+  const lastStopAt = visits[visits.length - 1].at;
+  const laterReturn = path.findIndex((p, i) => i > lastStopAt && p.distanceTo(tourTemplate[0]) < 6);
+  check(
+    'tour-returns-to-start',
+    laterReturn > lastStopAt,
+    laterReturn > lastStopAt
+      ? `returned to stop 1 at frame ${laterReturn}, after stop ${visits.length} at ${lastStopAt}`
+      : 'never returned to the start'
+  );
+
+  // (d) Handing control back must not move the camera at all.
   context.tour.stopTour();
+  const beforeHandback = camera.position.clone();
+  context.fly.update(1 / 60);
+  const handbackJump = camera.position.distanceTo(beforeHandback);
+  check(
+    'tour-handback-no-snap',
+    handbackJump < 0.5,
+    `camera moved ${handbackJump.toFixed(3)}m after the tour ended`
+  );
 
   // 6. Renderer still healthy after all of that.
   const payload = runBench(12);
@@ -1484,12 +1585,14 @@ async function boot() {
     close: document.getElementById('cityhall-close'),
   });
   context.cityHall.onTeleport = teleportTo;
-  context.tour = new Tour(state.source, camera, context.flight, {
+  context.tour = new Tour(THREE, state.source, camera, context.flight, {
     // The container is shown and hidden; the caption paragraph receives text.
     // Writing the caption into the container would erase the paragraph itself.
     container: document.getElementById('tour'),
     caption: document.getElementById('tour-caption'),
     label: document.getElementById('tour-label'),
+    // The tour keeps this in step so handing control back never moves the view.
+    fly: context.fly,
   });
 
   context.fly.setFromManifest(manifest.camera);
