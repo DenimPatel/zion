@@ -1,5 +1,6 @@
 # Zion
 
+![Zion-city-shot](<sample-zion.png>)
 **Turn any repository into an explorable 3D city.**
 
 Folders are districts. Files are buildings. A file's insides are its floors. You
