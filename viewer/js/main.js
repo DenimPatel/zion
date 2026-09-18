@@ -12,6 +12,7 @@ import {
   CityMesh,
   createCityHall,
   createImpostors,
+  createHoverOutline,
   ARCHETYPE_COLORS,
   archetypeLabel,
 } from './city.js';
@@ -209,6 +210,8 @@ function rebuildCity(buildings) {
     disposeGroup(previous.group);
   }
   context.city = mesh;
+  hover.target = null;
+  if (context.hoverOutline) context.hoverOutline.visible = false;
 
   context.grid = new CollisionGrid(buildings);
   if (context.hall) context.grid.addBox(context.hall.userData.box);
@@ -235,46 +238,367 @@ async function refreshResident(force = false) {
 // Picking
 // ---------------------------------------------------------------------------
 
-function toNdc(event) {
-  pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-  pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
-}
-
-function pick(event) {
-  if (!context.city) return;
-  toNdc(event);
+/**
+ * What is under a screen position.
+ *
+ * One raycast serves both hover and click, so the thing that lights up is
+ * exactly the thing a click will act on -- the highlight can never disagree
+ * with the action.
+ */
+function raycastAt(ndcX, ndcY) {
+  if (!context.city) return null;
+  // Raycaster does not refresh world matrices, and hover runs *before* the
+  // renderer does. On the first frame every mesh is still at the origin, which
+  // silently turns the City Hall into a box sitting in the middle of the ray.
+  scene.updateMatrixWorld();
+  pointer.x = ndcX;
+  pointer.y = ndcY;
   raycaster.setFromCamera(pointer, camera);
+
+  // The landmark is checked first: it stands in the middle of the plan and can
+  // hide behind towers.
+  if (context.hall) {
+    const hallHits = raycaster.intersectObject(context.hall, true);
+    if (hallHits.length) return { kind: 'city_hall', point: hallHits[0].point };
+  }
+
   const targets = context.city.group.children.filter((child) =>
     child.name.startsWith('buildings-')
   );
   const hits = raycaster.intersectObjects(targets, false);
-  if (hits.length) {
-    const hit = hits[0];
-    const records = context.city.records.get(hit.object.uuid);
-    const building = records && records[hit.instanceId];
-    if (building) {
-      context.inspector.showBuilding(building);
+  if (!hits.length) return null;
+  const hit = hits[0];
+  const records = context.city.records.get(hit.object.uuid);
+  const building = records && records[hit.instanceId];
+  if (!building) return null;
+  return {
+    kind: 'building',
+    building,
+    mesh: hit.object,
+    instanceId: hit.instanceId,
+    point: hit.point,
+  };
+}
+
+function sameTarget(a, b) {
+  if (!a || !b) return a === b;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'city_hall') return true;
+  return a.building === b.building;
+}
+
+// ---------------------------------------------------------------------------
+// Hover: what is clickable, shown before you click
+// ---------------------------------------------------------------------------
+
+const hover = {
+  active: false,
+  target: null,
+  x: 0,
+  y: 0,
+  lastRun: 0,
+};
+
+function hallBox() {
+  if (!context.hall) return null;
+  const { box } = context.hall.userData;
+  return box;
+}
+
+function showOutlineFor(target) {
+  const outline = context.hoverOutline;
+  if (!outline) return;
+  if (!target) {
+    outline.visible = false;
+    return;
+  }
+  if (target.kind === 'city_hall') {
+    const box = hallBox();
+    if (!box) {
+      outline.visible = false;
       return;
     }
+    outline.position.set(
+      (box.x0 + box.x1) / 2,
+      0,
+      (box.z0 + box.z1) / 2
+    );
+    outline.scale.set(
+      (box.x1 - box.x0) * 1.05,
+      box.height * 1.02,
+      (box.z1 - box.z0) * 1.05
+    );
+    outline.visible = true;
+    return;
   }
-  context.inspector.hide();
+
+  const building = target.building;
+  outline.position.set(
+    (building.x || 0) + (building.width || 4) / 2,
+    0,
+    (building.y || 0) + (building.depth || 4) / 2
+  );
+  outline.scale.set(
+    (building.width || 4) * 1.12,
+    (building.height || 4) * 1.03,
+    (building.depth || 4) * 1.12
+  );
+  outline.visible = true;
+}
+
+function tooltipFor(target) {
+  const source = state.source;
+  if (!target) return null;
+  if (target.kind === 'city_hall') {
+    return {
+      title: 'City Hall',
+      meta: 'the repository report card',
+      hint: 'click, or press C, to open',
+    };
+  }
+  const building = target.building;
+  const parts = [archetypeLabel(building.archetype), source.s(building.language)];
+  if (building.rows !== null && building.rows !== undefined) {
+    parts.push(`${building.rows.toLocaleString()} rows`);
+  } else {
+    parts.push(`${building.loc.toLocaleString()} logical lines`);
+    if (building.floors) {
+      parts.push(`${building.floors} ${building.floors === 1 ? 'floor' : 'floors'}`);
+    }
+  }
+  return {
+    title: source.label(building),
+    meta: parts.filter(Boolean).join(' · '),
+    hint:
+      state.mode === 'walk' && building.source
+        ? 'click to inspect · E to enter'
+        : 'click to inspect',
+  };
+}
+
+function applyHover(target, clientX, clientY) {
+  if (sameTarget(hover.target, target)) {
+    hover.x = clientX;
+    hover.y = clientY;
+    if (target) positionTooltip();
+    return;
+  }
+  hover.target = target;
+  hover.x = clientX;
+  hover.y = clientY;
+
+  if (context.city) {
+    if (target && target.kind === 'building') {
+      context.city.setHighlight(target.mesh, target.instanceId);
+    } else {
+      context.city.clearHighlight();
+    }
+  }
+  showOutlineFor(target);
+
+  const tooltip = document.getElementById('tooltip');
+  const info = tooltipFor(target);
+  if (!info) {
+    tooltip.hidden = true;
+  } else {
+    document.getElementById('tooltip-title').textContent = info.title;
+    document.getElementById('tooltip-meta').textContent = info.meta;
+    document.getElementById('tooltip-hint').textContent = info.hint;
+    tooltip.hidden = false;
+    positionTooltip();
+  }
+  canvas.style.cursor = target && !pointerLocked() ? 'pointer' : '';
+}
+
+function positionTooltip() {
+  const tooltip = document.getElementById('tooltip');
+  if (tooltip.hidden) return;
+  const pad = 16;
+  const rect = tooltip.getBoundingClientRect();
+  let x = pointerLocked()
+    ? window.innerWidth / 2 + 22
+    : hover.x + pad;
+  let y = pointerLocked()
+    ? window.innerHeight / 2 + 18
+    : hover.y + pad;
+  if (x + rect.width > window.innerWidth - 8) x = hover.x - rect.width - pad;
+  if (y + rect.height > window.innerHeight - 8) y = hover.y - rect.height - pad;
+  tooltip.style.left = `${Math.max(8, x)}px`;
+  tooltip.style.top = `${Math.max(8, y)}px`;
+}
+
+/**
+ * Refresh the hover target, rate-limited.
+ *
+ * Raycasting an InstancedMesh tests every instance, so at 20,000 resident
+ * buildings this must not run on every mouse event.
+ */
+function refreshHover(force = false) {
+  if (state.mode === 'interior') {
+    applyHover(null, 0, 0);
+    return;
+  }
+  const now = performance.now();
+  const interval = context.resident.length > 3000 ? 140 : 55;
+  if (!force && now - hover.lastRun < interval) return;
+  hover.lastRun = now;
+
+  let target = null;
+  if (pointerLocked()) {
+    target = raycastAt(0, 0);
+  } else if (hover.active) {
+    const nx = (hover.x / window.innerWidth) * 2 - 1;
+    const ny = -(hover.y / window.innerHeight) * 2 + 1;
+    target = raycastAt(nx, ny);
+  }
+  applyHover(target, hover.x, hover.y);
+}
+
+// ---------------------------------------------------------------------------
+// Pointer input
+//
+// Three separate gestures, deliberately not conflated:
+//   drag       -> look around, cursor stays visible
+//   click      -> inspect whatever is under the cursor
+//   capture    -> opt-in only (F, or the HUD button), for continuous flight
+// ---------------------------------------------------------------------------
+
+const DRAG_THRESHOLD = 4; // pixels; below this a drag is a click
+const pointerState = {
+  dragging: false,
+  moved: 0,
+  x: 0,
+  y: 0,
+  button: -1,
+};
+
+function pointerLocked() {
+  return document.pointerLockElement === canvas;
+}
+
+function lookDelta(dx, dy) {
+  if (state.mode === 'interior') {
+    // The interior camera rides on the walk camera's orientation.
+    context.walk.lookDelta(dx, dy);
+  } else if (state.mode === 'walk') {
+    context.walk.lookDelta(dx, dy);
+  } else if (state.mode === 'fly' || state.mode === 'overview') {
+    context.fly.lookDelta(dx, dy);
+    if (state.mode === 'overview') setMode('fly');
+  }
 }
 
 canvas.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0 || state.mode === 'interior') return;
-  if (document.pointerLockElement === canvas) return;
-  pick(event);
+  if (event.button !== 0 && event.button !== 2) return;
+  pointerState.dragging = true;
+  pointerState.moved = 0;
+  pointerState.x = event.clientX;
+  pointerState.y = event.clientY;
+  pointerState.button = event.button;
+  try {
+    canvas.setPointerCapture?.(event.pointerId);
+  } catch {
+    // Synthetic pointer events from the self-test have no live pointer to
+    // capture; dragging still works, it just will not follow outside the canvas.
+  }
 });
 
-canvas.addEventListener('click', () => {
-  if (state.mode === 'fly' || state.mode === 'walk') canvas.requestPointerLock?.();
+canvas.addEventListener('pointermove', (event) => {
+  hover.active = true;
+  hover.x = event.clientX;
+  hover.y = event.clientY;
+  if (!pointerState.dragging || pointerLocked()) return;
+  const dx = event.clientX - pointerState.x;
+  const dy = event.clientY - pointerState.y;
+  pointerState.x = event.clientX;
+  pointerState.y = event.clientY;
+  pointerState.moved += Math.abs(dx) + Math.abs(dy);
+  if (pointerState.moved > DRAG_THRESHOLD) lookDelta(dx, dy);
 });
+
+canvas.addEventListener('pointerup', (event) => {
+  const wasDragging = pointerState.dragging;
+  const moved = pointerState.moved;
+  pointerState.dragging = false;
+  try {
+    canvas.releasePointerCapture?.(event.pointerId);
+  } catch {
+    /* nothing to release */
+  }
+  // A press that did not move is a click. It acts on the highlighted target, so
+  // what you saw lit up is exactly what responds.
+  if (wasDragging && moved <= DRAG_THRESHOLD && event.button === 0 && state.mode !== 'interior') {
+    const target = hover.target;
+    if (target && target.kind === 'city_hall') {
+      context.cityHall.show();
+      document.body.classList.add('hall-open');
+    } else {
+      activate(target || raycastAtFromEvent(event));
+    }
+  }
+});
+
+function raycastAtFromEvent(event) {
+  if (pointerLocked()) return raycastAt(0, 0);
+  return raycastAt(
+    (event.clientX / window.innerWidth) * 2 - 1,
+    -(event.clientY / window.innerHeight) * 2 + 1
+  );
+}
+
+function activate(target) {
+  if (!target) {
+    context.inspector.hide();
+    return;
+  }
+  context.inspector.showBuilding(target.building);
+}
+
+canvas.addEventListener('pointercancel', () => {
+  pointerState.dragging = false;
+});
+
+canvas.addEventListener('pointerleave', () => {
+  hover.active = false;
+  applyHover(null, 0, 0);
+});
+
+// Right-drag is a look gesture, not a context menu.
+canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+// While captured, the cursor is hidden and parked, so look deltas come from
+// movementX/Y and a click inspects whatever the crosshair is over.
+document.addEventListener('mousemove', (event) => {
+  if (!pointerLocked()) return;
+  if (state.mode === 'overview') return;
+  lookDelta(event.movementX || 0, event.movementY || 0);
+});
+
+function setCapture(on) {
+  if (on) {
+    canvas.requestPointerLock?.();
+  } else {
+    document.exitPointerLock?.();
+  }
+}
+
+function onPointerLockChange() {
+  const locked = pointerLocked();
+  document.body.classList.toggle('mouse-captured', locked);
+  setPrompt(
+    locked
+      ? '<kbd>F</kbd> or <kbd>Esc</kbd> to release the mouse &nbsp;·&nbsp; click to inspect the crosshair'
+      : ''
+  );
+}
+document.addEventListener('pointerlockchange', onPointerLockChange);
 
 // ---------------------------------------------------------------------------
 // Modes
 // ---------------------------------------------------------------------------
 
 function setMode(mode) {
+  applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
   state.mode = mode;
   context.fly.enabled = mode === 'fly';
@@ -293,6 +617,11 @@ function setMode(mode) {
 }
 
 async function enterInterior(building) {
+  // Carry the current view direction into the room, so entering does not snap.
+  if (state.mode === 'fly') {
+    context.walk.yaw = context.fly.yaw;
+    context.walk.pitch = context.fly.pitch;
+  }
   await context.interior.enter(building, context.walk);
   state.mode = 'interior';
   context.fly.enabled = false;
@@ -372,10 +701,6 @@ window.addEventListener('keydown', async (event) => {
   const target = event.target;
   if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
 
-  if ((state.mode === 'fly' || state.mode === 'walk') && event.code === 'KeyW') {
-    canvas.requestPointerLock?.();
-  }
-
   switch (event.code) {
     case 'KeyV':
       setMode(state.mode === 'walk' ? 'fly' : 'walk');
@@ -392,6 +717,9 @@ window.addEventListener('keydown', async (event) => {
       break;
     case 'KeyL':
       document.body.classList.toggle('legend-hidden');
+      break;
+    case 'KeyF':
+      setCapture(!pointerLocked());
       break;
     case 'KeyU':
       if (context.vault && context.vault.encrypted) {
@@ -430,6 +758,10 @@ async function handleEnter() {
   if (state.mode === 'walk' && hallNear) {
     context.cityHall.show();
     document.body.classList.add('hall-open');
+    return;
+  }
+  if (state.mode === 'walk' && hover.target && hover.target.kind === 'building') {
+    await enterInterior(hover.target.building);
     return;
   }
   if (state.mode === 'walk' && context.walk.target) {
@@ -547,6 +879,13 @@ function runBench(frames = 60) {
     if (i >= 5) times.push(performance.now() - started);
   }
 
+  // Hover raycasting tests every instance in every visible archetype mesh, so
+  // its cost is the one interactive number that grows with city size.
+  let hoverInstances = 0;
+  for (const child of context.city ? context.city.group.children : []) {
+    if (child.name.startsWith('buildings-')) hoverInstances += child.count;
+  }
+
   const info = renderer.info.render;
   const measurable = times.some((value) => value > 0.0001);
   const payload = {
@@ -561,6 +900,11 @@ function runBench(frames = 60) {
     frameP50: measurable ? Number(percentile(times, 0.5).toFixed(2)) : null,
     frameP95: measurable ? Number(percentile(times, 0.95).toFixed(2)) : null,
     frames: times.length,
+    // Hover tests every instance, so its cost is the one interactive number
+    // that grows with city size. The clock is frozen under virtual time, so the
+    // deterministic measure is how much work a pass does, not how long it took.
+    hoverInstancesTested: hoverInstances,
+    hoverRaycastMs: null, // frame-clock measurement; unavailable under virtual time
     glVersion: renderer.getContext().getParameter(renderer.getContext().VERSION),
     webgl: Boolean(renderer.getContext()),
   };
@@ -602,6 +946,7 @@ function frame(now) {
   }
 
   refreshResident();
+  refreshHover();
   renderer.render(scene, camera);
 }
 
@@ -620,6 +965,7 @@ function driveInterior(dt) {
 }
 
 function updateWalkPrompt() {
+  if (pointerLocked()) return;
   const hall = context.hall;
   if (hall) {
     const centre = hall.userData.centre;
@@ -636,7 +982,7 @@ function updateWalkPrompt() {
   if (context.walk.target) {
     const building = context.resident.find((b) => b.rel === context.walk.target.rel);
     if (building) {
-      setPrompt(`<kbd>E</kbd> enter ${escapeHtml(state.source.s(building.name))}`);
+      setPrompt(`<kbd>E</kbd> enter ${escapeHtml(state.source.label(building))}`);
       return;
     }
   }
@@ -748,6 +1094,158 @@ async function runSelfTest() {
       const wrong = await attemptUnlock('definitely not the passphrase');
       check('vault-rejects-wrong-passphrase', wrong === false && state.source.locked);
     }
+  }
+
+  // 0b. Pointer behaviour, which is where a viewer most easily becomes
+  //     unusable: dragging must look, a click must inspect, and neither may
+  //     capture the cursor as a side effect.
+  setMode('fly');
+  const dispatch = (type, x, y, button = 0) =>
+    canvas.dispatchEvent(
+      new PointerEvent(type, {
+        clientX: x,
+        clientY: y,
+        button,
+        buttons: type === 'pointerup' ? 0 : 1,
+        pointerId: 1,
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+
+  // Render once so the scene matches what a user would be looking at.
+  renderer.render(scene, camera);
+
+  const yawBefore = context.fly.yaw;
+  dispatch('pointerdown', 600, 400);
+  dispatch('pointermove', 700, 400);
+  dispatch('pointermove', 800, 400);
+  dispatch('pointerup', 800, 400);
+  check('look-drag-rotates', Math.abs(context.fly.yaw - yawBefore) > 0.01,
+        `yaw ${yawBefore.toFixed(3)} -> ${context.fly.yaw.toFixed(3)}`);
+  check('drag-does-not-capture', !pointerLocked());
+  check('drag-does-not-inspect', context.inspector.panel.hidden);
+
+  // A click on a building's projected position must open the inspector.
+  const target = context.resident.find((b) => {
+    if (!context.hall) return true;
+    const c = context.hall.userData.centre;
+    const bx = (b.x || 0) + (b.width || 4) / 2;
+    const bz = (b.y || 0) + (b.depth || 4) / 2;
+    return Math.hypot(bx - c.x, bz - c.z) > 70;
+  });
+  if (target) {
+    const world = new THREE.Vector3(
+      (target.x || 0) + (target.width || 4) / 2,
+      (target.height || 4) * 0.5,
+      (target.y || 0) + (target.depth || 4) / 2
+    );
+    // Look straight at it so the projection lands on screen.
+    context.fly.position.set(world.x, world.y + 6, world.z + 40);
+    context.fly.yaw = 0;
+    context.fly.pitch = 0;
+    context.fly.apply();
+    camera.updateMatrixWorld(true);
+    const projected = world.clone().project(camera);
+    const sx = ((projected.x + 1) / 2) * window.innerWidth;
+    const sy = ((-projected.y + 1) / 2) * window.innerHeight;
+
+    context.inspector.hide();
+    // Follow real usage: the cursor is over the building (hover fires), then the
+    // user clicks. That is the order that makes "highlighted == acted on" a
+    // meaningful claim rather than an accident.
+    dispatch('pointermove', sx, sy);
+    refreshHover(true);
+    const hoveredBefore = hover.target && hover.target.kind === 'building'
+      ? hover.target.building
+      : null;
+    dispatch('pointerdown', sx, sy);
+    dispatch('pointerup', sx, sy);
+    const selected =
+      context.inspector.selected && context.inspector.selected.building
+        ? context.inspector.selected.building
+        : null;
+    check(
+      'click-inspects-building',
+      !context.inspector.panel.hidden && Boolean(selected),
+      selected ? `selected ${state.source.label(selected)}` : 'nothing selected'
+    );
+    // Hover and click must agree: whatever was lit up is what responded.
+    check(
+      'hover-matches-click',
+      Boolean(selected) && hoveredBefore === selected,
+      selected
+        ? `hovered ${state.source.label(hoveredBefore || selected)} -> clicked ${
+            hoveredBefore === selected ? 'same building' : 'a different building'
+          }`
+        : 'nothing selected'
+    );
+    context.inspector.hide();
+  } else {
+    check('click-inspects-building', false, 'no resident buildings');
+  }
+
+  // 0c. Hover feedback: something clickable under the cursor must announce
+  //     itself, and must stop announcing itself when the cursor leaves.
+  const hallCentre = context.hall ? context.hall.userData.centre : null;
+  const farFromHall = (b) => {
+    if (!hallCentre) return true;
+    const bx = (b.x || 0) + (b.width || 4) / 2;
+    const bz = (b.y || 0) + (b.depth || 4) / 2;
+    return Math.hypot(bx - hallCentre.x, bz - hallCentre.z) > 70;
+  };
+  const hoverTargetBuilding = context.resident.find((b) => b.height > 2 && farFromHall(b));
+  if (hoverTargetBuilding) {
+    const world = new THREE.Vector3(
+      (hoverTargetBuilding.x || 0) + (hoverTargetBuilding.width || 4) / 2,
+      (hoverTargetBuilding.height || 4) * 0.5,
+      (hoverTargetBuilding.y || 0) + (hoverTargetBuilding.depth || 4) / 2
+    );
+    context.fly.position.set(world.x, world.y + 5, world.z + 45);
+    context.fly.yaw = 0;
+    context.fly.pitch = 0;
+    context.fly.apply();
+    camera.updateMatrixWorld(true);
+
+    const projected = world.clone().project(camera);
+    const hx = ((projected.x + 1) / 2) * window.innerWidth;
+    const hy = ((-projected.y + 1) / 2) * window.innerHeight;
+
+    dispatch('pointermove', hx, hy);
+    refreshHover(true);
+    check(
+      'hover-detects-building',
+      Boolean(hover.target) && hover.target.kind === 'building',
+      hover.target && hover.target.kind === 'building'
+        ? `hovering ${state.source.label(hover.target.building)}`
+        : `kind=${hover.target ? hover.target.kind : 'none'}`
+    );
+    check(
+      'hover-shows-outline',
+      Boolean(context.hoverOutline && context.hoverOutline.visible),
+      context.hoverOutline ? `outline visible=${context.hoverOutline.visible}` : 'no outline'
+    );
+    check(
+      'hover-shows-tooltip',
+      !document.getElementById('tooltip').hidden &&
+        document.getElementById('tooltip-title').textContent.length > 0,
+      document.getElementById('tooltip-title').textContent
+    );
+    check('hover-pointer-cursor', canvas.style.cursor === 'pointer', canvas.style.cursor || '(unset)');
+
+    // Point at the sky and everything must retract.
+    dispatch('pointermove', 4, 4);
+    refreshHover(true);
+    check(
+      'hover-clears-over-sky',
+      !hover.target &&
+        !context.hoverOutline.visible &&
+        document.getElementById('tooltip').hidden &&
+        canvas.style.cursor === '',
+      hover.target ? 'still hovering' : 'cleared'
+    );
+  } else {
+    check('hover-detects-building', false, 'no buildings to hover');
   }
 
   const tourNode = document.getElementById('tour');
@@ -869,6 +1367,25 @@ async function runSelfTest() {
     document.body.classList.add('hall-open');
   } else if (hold === 'tour') {
     context.tour.start();
+  } else if (hold === 'hover') {
+    const target = context.resident.find((b) => b.height > 6) || context.resident[0];
+    if (target) {
+      const world = new THREE.Vector3(
+        (target.x || 0) + (target.width || 4) / 2,
+        (target.height || 4) * 0.5,
+        (target.y || 0) + (target.depth || 4) / 2
+      );
+      context.fly.position.set(world.x + 6, world.y + 7, world.z + 52);
+      context.fly.yaw = 0.06;
+      context.fly.pitch = -0.05;
+      context.fly.apply();
+      renderer.render(scene, camera);
+      const projected = world.clone().project(camera);
+      hover.active = true;
+      hover.x = ((projected.x + 1) / 2) * window.innerWidth;
+      hover.y = ((-projected.y + 1) / 2) * window.innerHeight;
+      refreshHover(true);
+    }
   } else if (hold === 'walk') {
     setMode('walk');
     const solid = context.resident.find((b) => b.archetype !== 'park');
@@ -922,6 +1439,10 @@ async function boot() {
   progress('raising the landmark');
   context.hall = createCityHall(THREE, bounds, maxHeightOf(manifest));
   scene.add(context.hall);
+
+  // One reusable outline marks whatever the cursor is over.
+  context.hoverOutline = createHoverOutline(THREE);
+  scene.add(context.hoverOutline);
 
   const span = Math.max(bounds[2], bounds[3]);
   // A span-proportional radius would cover an entire 6.7 km city at once, so the

@@ -32,14 +32,22 @@ export class FlyCamera {
     window.addEventListener('keydown', this._onKeyDown);
     window.addEventListener('keyup', this._onKeyUp);
 
-    this._onMouseMove = (event) => {
-      if (!this.enabled) return;
-      this.yaw -= event.movementX * this.lookSpeed;
-      this.pitch -= event.movementY * this.lookSpeed;
-      const limit = Math.PI / 2 - 0.02;
-      this.pitch = Math.max(-limit, Math.min(limit, this.pitch));
-    };
-    document.addEventListener('mousemove', this._onMouseMove);
+  }
+
+  /**
+   * Apply a look delta in pixels.
+   *
+   * The viewer owns the pointer events and calls this, rather than the camera
+   * listening to the document: looking must only happen while the user is
+   * deliberately dragging or has explicitly captured the mouse, never as a side
+   * effect of moving the cursor across the page.
+   */
+  lookDelta(dx, dy) {
+    if (!this.enabled) return;
+    this.yaw -= dx * this.lookSpeed;
+    this.pitch -= dy * this.lookSpeed;
+    const limit = Math.PI / 2 - 0.02;
+    this.pitch = Math.max(-limit, Math.min(limit, this.pitch));
   }
 
   setFromManifest(cameraSpec) {
@@ -112,7 +120,6 @@ export class FlyCamera {
   dispose() {
     window.removeEventListener('keydown', this._onKeyDown);
     window.removeEventListener('keyup', this._onKeyUp);
-    document.removeEventListener('mousemove', this._onMouseMove);
   }
 }
 

@@ -161,13 +161,14 @@ export class WalkCamera {
 
     window.addEventListener('keydown', (event) => this.keys.add(event.code));
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
-    document.addEventListener('mousemove', (event) => {
-      if (!this.enabled) return;
-      this.yaw -= event.movementX * this.lookSpeed;
-      this.pitch -= event.movementY * this.lookSpeed;
-      const limit = Math.PI / 2 - 0.02;
-      this.pitch = Math.max(-limit, Math.min(limit, this.pitch));
-    });
+  }
+
+  /** Look delta in pixels; see FlyCamera.lookDelta for why this is pushed in. */
+  lookDelta(dx, dy) {
+    this.yaw -= dx * this.lookSpeed;
+    this.pitch -= dy * this.lookSpeed;
+    const limit = Math.PI / 2 - 0.02;
+    this.pitch = Math.max(-limit, Math.min(limit, this.pitch));
   }
 
   spawnAt(x, z) {

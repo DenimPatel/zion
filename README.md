@@ -109,7 +109,17 @@ that one is the repository root in each case.
 | `T` | guided tour: one cinematic stop per district with a caption |
 | `C` | City Hall |
 | `L` | hide the legend |
-| click | inspect a building |
+| drag | look around (the cursor stays visible) |
+| click | inspect the building you are pointing at |
+| `F` | capture the mouse for continuous flying (crosshair appears); `Esc` releases |
+
+**Hover tells you what is clickable.** Point at a building and it brightens, a
+wireframe outline snaps to its footprint, the cursor becomes a pointer, and a
+tooltip names it with its form, language and size. Hover and click share one
+raycast, so the building that lights up is exactly the building that opens —
+asserted in the self-test rather than assumed. At scale the raycast is
+rate-limited (about 7 passes a second at 20,000 resident buildings), because
+testing every instance is the one interactive cost that grows with city size.
 
 **City Hall** is the one building that is not a file: it is the repository's own
 report card, standing at the centre of the plan. It carries the language
@@ -319,11 +329,14 @@ because "it renders" is not the same as "it works":
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-which returns `ZION_SELFTEST {…}` containing 26 checks: walk gravity, a collision
-test that drives the player into a building and asserts they stop outside it,
-interior floors and source, an interior wall texture that is confirmed to contain
-rendered text, City Hall's clickable rows, teleport, the tour and its caption,
-and the draw-call budget.
+which returns `ZION_SELFTEST {…}` containing 29 checks: walk gravity (simulated
+until the player actually comes to rest on a surface), a collision test that
+drives the player into a building and asserts they stop outside it, drag-to-look
+rotating the camera without capturing the pointer or opening the inspector, a
+click on a building's projected position opening it, hover reporting the same
+building that the click then acts on, interior floors and source, an interior
+wall texture confirmed to contain rendered text, City Hall's clickable rows,
+teleport, the tour and its caption, and the draw-call budget.
 
 `--enable-unsafe-swiftshader` is required. Without it, headless Chrome reports
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.

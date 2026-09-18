@@ -235,6 +235,12 @@ export class CityMesh {
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
       mesh.geometry.setAttribute('aLit', new THREE.InstancedBufferAttribute(lit, 1));
+      // Keep the untouched colours so a hover highlight can be reverted exactly.
+      if (mesh.instanceColor) {
+        mesh.userData.baseColors = Float32Array.from(mesh.instanceColor.array);
+      }
+      mesh.userData.baseLit = Float32Array.from(lit);
+      mesh.userData.baseEmissive = material.emissiveIntensity;
 
       this.records.set(mesh.uuid, members);
       this.group.add(mesh);
@@ -323,6 +329,67 @@ export class CityMesh {
   }
 
   /**
+   * Highlight one instance, and only one.
+   *
+   * Two channels change together: the instance colour brightens toward the
+   * accent, and its lit-window scalar jumps, so the hovered building reads as
+   * interactive by day and glows brighter at dusk -- without touching any other
+   * building, and without a second draw call.
+   */
+  setHighlight(mesh, instanceId) {
+    if (this._hover && (this._hover.mesh !== mesh || this._hover.instanceId !== instanceId)) {
+      this.clearHighlight();
+    }
+    if (!mesh || instanceId === undefined || instanceId === null) return;
+    if (!mesh.userData.baseColors) return;
+
+    const THREE = this.THREE;
+    const base = mesh.userData.baseColors;
+    const accent = new THREE.Color(0xffc978);
+    const colour = new THREE.Color(
+      base[instanceId * 3],
+      base[instanceId * 3 + 1],
+      base[instanceId * 3 + 2]
+    );
+    colour.lerp(accent, 0.62);
+    mesh.setColorAt(instanceId, colour);
+    mesh.instanceColor.needsUpdate = true;
+
+    const litAttribute = mesh.geometry.getAttribute('aLit');
+    if (litAttribute) {
+      const boosted = Math.min(1, Math.max(0.75, mesh.userData.baseLit[instanceId] + 0.55));
+      litAttribute.setX(instanceId, boosted);
+      litAttribute.needsUpdate = true;
+    }
+
+    this._hover = { mesh, instanceId, baseLit: mesh.userData.baseLit[instanceId] };
+  }
+
+  clearHighlight() {
+    const hover = this._hover;
+    if (!hover) return;
+    this._hover = null;
+    const { mesh, instanceId } = hover;
+    const base = mesh.userData.baseColors;
+    if (base && mesh.instanceColor) {
+      mesh.setColorAt(
+        instanceId,
+        new this.THREE.Color(
+          base[instanceId * 3],
+          base[instanceId * 3 + 1],
+          base[instanceId * 3 + 2]
+        )
+      );
+      mesh.instanceColor.needsUpdate = true;
+    }
+    const litAttribute = mesh.geometry.getAttribute('aLit');
+    if (litAttribute) {
+      litAttribute.setX(instanceId, hover.baseLit);
+      litAttribute.needsUpdate = true;
+    }
+  }
+
+  /**
    * Set the emissive strength for every building at once.
    *
    * Per-building differences are baked into the `aLit` instanced attribute;
@@ -344,6 +411,29 @@ export class CityMesh {
  * report card, standing at the centre of the plan. Walk up to it and press E,
  * or press C from anywhere.
  */
+/**
+ * A wireframe outline that snaps onto whatever is under the cursor.
+ *
+ * One reusable object rather than per-building geometry, so hovering stays
+ * O(1) no matter how many buildings the city has.
+ */
+export function createHoverOutline(THREE) {
+  const geometry = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1));
+  geometry.translate(0, 0.5, 0);
+  const material = new THREE.LineBasicMaterial({
+    color: 0xffc978,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+  });
+  const outline = new THREE.LineSegments(geometry, material);
+  outline.name = 'hover-outline';
+  outline.renderOrder = 999;
+  outline.visible = false;
+  outline.frustumCulled = false;
+  return outline;
+}
+
 export function createCityHall(THREE, bounds, maxHeight) {
   const group = new THREE.Group();
   group.name = 'city-hall';
@@ -363,6 +453,9 @@ export function createCityHall(THREE, bounds, maxHeight) {
   );
   plaza.rotation.x = -Math.PI / 2;
   plaza.position.set(cx, 0.09, cz);
+  // The plaza is ground, not a target. Leaving it raycastable made a wide disc
+  // at the centre of the plan swallow every hover and click near it.
+  plaza.raycast = () => {};
   group.add(plaza);
 
   // Stepped base.
