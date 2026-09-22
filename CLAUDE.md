@@ -17,7 +17,7 @@ python3 zion.py serve  /path/to/repo        # build if needed, serve, open a bro
 python3 bench/generate_repo.py bench/tmp/repo-50000 --files 50000 --commits 40   # synthetic repo for scale testing
 ```
 
-Tests (74 tests, stdlib only, no test runner dependency):
+Tests (62 tests, stdlib only, no test runner dependency):
 
 ```
 python3 -m unittest discover -s tests -p 'test_*.py'

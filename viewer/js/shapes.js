@@ -270,3 +270,19 @@ export function roofPropGeometry(THREE) {
     box(THREE, { w: 0.22, d: 0.18, x: 0.26, z: 0.24, y0: 0, y1: 0.3, part: PART_PODIUM }),
   ]);
 }
+
+/**
+ * A construction crane: a mast rising past the roofline with a long boom and a
+ * short counter-jib. Marks the top decile of churn -- the file is being
+ * actively worked, the way a crane on a roof means the building isn't
+ * finished. Unit space, scaled and positioned per instance like the roof
+ * clutter above; one draw call for every crane in the city.
+ */
+export function craneGeometry(THREE) {
+  return mergeParts(THREE, [
+    cylinder(THREE, { rTop: 0.045, rBottom: 0.06, x: 0, z: 0, y0: 0, y1: 1.35, segments: 6, part: PART_BODY }),
+    box(THREE, { w: 0.9, d: 0.05, x: 0.42, z: 0, y0: 1.28, y1: 1.36, part: PART_SETBACK }),
+    box(THREE, { w: 0.22, d: 0.05, x: -0.14, z: 0, y0: 1.28, y1: 1.4, part: PART_CROWN }),
+    box(THREE, { w: 0.08, d: 0.08, x: -0.14, z: 0, y0: 1.15, y1: 1.28, part: PART_PODIUM }),
+  ]);
+}

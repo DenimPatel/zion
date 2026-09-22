@@ -114,6 +114,16 @@ export class CitySource {
     return this.manifest;
   }
 
+  /** Co-change pairs, `[[buildingIdA, buildingIdB, count], ...]`. Geometry, not
+   *  text, so it is fetched the same whether the city is locked or not -- only
+   *  present at all when the manifest's `bridges` pointer is set. */
+  async bridges() {
+    if (this._bridges) return this._bridges;
+    if (!this.manifest || !this.manifest.bridges) return [];
+    this._bridges = await getJSON(this.base, this.manifest.bridges);
+    return this._bridges;
+  }
+
   async loadStrings() {
     const buffer = await getBuffer(this.base, 'strings.bin');
     if (this.manifest && this.manifest.meta && this.manifest.meta.encrypted) {

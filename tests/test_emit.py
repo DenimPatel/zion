@@ -9,6 +9,7 @@ import unittest
 
 from support import (
     TempRepoCase,
+    git_commit,
     load_manifest,
     make_repo,
     read_json,
@@ -106,6 +107,58 @@ class EmitTests(TempRepoCase):
                 self.assertGreaterEqual(floor["srcOffset"], 0)
                 self.assertLessEqual(floor["srcOffset"] + floor["srcLength"], size)
             self.assertEqual(detail["srcBytes"], size)
+
+    def test_bridges_emitted_only_when_coupling_is_eligible(self):
+        # A single bulk commit: coupling is disabled, no bridges.json.
+        analysis, _layout, result = self._build()
+        manifest = result.manifest
+        self.assertFalse(manifest["flags"]["coupling"])
+        self.assertIsNone(manifest["bridges"])
+        self.assertFalse(os.path.exists(os.path.join(result.out_dir, "bridges.json")))
+
+    def test_bridges_match_coupling_when_eligible(self):
+        repo = self.scratch()
+        make_repo(repo, commit=False)
+        git_commit(repo, "one", date="2024-01-01T10:00:00+00:00")
+        with open(os.path.join(repo, "alpha", "main.py"), "a", encoding="utf-8") as fh:
+            fh.write("\n# tweak one\n")
+        with open(os.path.join(repo, "README.md"), "a", encoding="utf-8") as fh:
+            fh.write("\ntweak\n")
+        git_commit(repo, "two", date="2024-02-01T10:00:00+00:00")
+        with open(os.path.join(repo, "alpha", "main.py"), "a", encoding="utf-8") as fh:
+            fh.write("# tweak two\n")
+        with open(os.path.join(repo, "README.md"), "a", encoding="utf-8") as fh:
+            fh.write("tweak again\n")
+        git_commit(repo, "three", date="2024-03-01T10:00:00+00:00")
+
+        analysis, _layout, result = self.build_city(repo)
+        manifest = result.manifest
+        self.assertTrue(manifest["flags"]["coupling"])
+        self.assertEqual(manifest["bridges"], "bridges.json")
+        bridges = read_json(os.path.join(result.out_dir, "bridges.json"))
+        self.assertTrue(bridges)
+        # Resolve building ids back to paths via the string table and district
+        # chunks, and confirm the coupled pair from gitmeta is represented.
+        id_to_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                id_to_path[building["id"]] = building["path"]
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        found = {
+            frozenset((strings[id_to_path[a]], strings[id_to_path[b]]))
+            for a, b, _count in bridges
+        }
+        self.assertIn(frozenset(("README.md", "alpha/main.py")), found)
+
+    def test_top_churn_only_set_when_churn_is_eligible(self):
+        analysis, _layout, result = self._build()
+        # The tiny fixture is one bulk commit: too little history for churn.
+        self.assertFalse(result.manifest["flags"]["churn"])
+        for district in result.manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                self.assertFalse(building["topChurn"])
 
 
 class SingleFileTests(TempRepoCase):

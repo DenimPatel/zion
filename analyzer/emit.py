@@ -301,6 +301,9 @@ def build_manifest(
         "camera": _camera(layout.bounds.w, layout.bounds.h, max_height),
         "districts": districts,
         "stats": stats,
+        # Only a pointer: the file itself is empty/absent whenever coupling is
+        # disabled, so the viewer's "should I fetch this" check is one flag read.
+        "bridges": "bridges.json" if flags.coupling else None,
     }
     return manifest
 
@@ -360,12 +363,27 @@ def install_viewer(out_dir: str) -> int:
 # --------------------------------------------------------------------------
 
 
+def _top_decile_churn(files: list[FileMetrics]) -> set[str]:
+    """Paths in the top decile of churn -- the interim "hot" set cranes are drawn from.
+
+    Kept as its own function so it can be replaced by the exponential-decay
+    ``heat`` percentile (activity-weighted, not lifetime-total) once that lands,
+    without touching call sites.
+    """
+    churny = sorted((f for f in files if f.churn > 0), key=lambda f: -f.churn)
+    if not churny:
+        return set()
+    cutoff = max(1, len(churny) // 10)
+    return {f.rel for f in churny[:cutoff]}
+
+
 def _building_record(
     index: int,
     record: FileMetrics,
     strings: StringTable,
     district_id: int,
     placed=None,
+    top_churn: frozenset[str] = frozenset(),
 ) -> dict:
     placement = {
         "x": round(placed.x, 3) if placed else 0.0,
@@ -396,6 +414,7 @@ def _building_record(
         "parseConfidence": record.parse_confidence,
         "commits": record.commits,
         "churn": record.churn,
+        "topChurn": record.rel in top_churn,
         "recencyDays": round(record.recency_days, 1),
         "author": strings.add(record.primary_author) if record.primary_author else -1,
         "ownership": round(record.ownership_share, 3),
@@ -609,11 +628,13 @@ def emit_city(
     bytes_written = 0
     source_bytes = 0
 
+    top_churn = _top_decile_churn(analysis.files) if analysis.flags.churn else frozenset()
+
     for key, members in by_district.items():
         district_id = district_order.get(key, 0)
         records = [
             _building_record(
-                building_index[m.rel], m, strings, district_id, placement.get(m.rel)
+                building_index[m.rel], m, strings, district_id, placement.get(m.rel), top_churn
             )
             for m in sorted(members, key=lambda f: f.rel)
         ]
@@ -621,6 +642,28 @@ def emit_city(
         bytes_written += _write(os.path.join(out_dir, f"d/{district_id:04d}.json"), payload)
         if progress:
             progress(f"district {district_id:04d} {key}")
+
+    # ---- co-change skybridges ----
+    #
+    # Coupling pairs are computed once, over every commit (gitmeta.py), regardless
+    # of the bulk-commit exclusion rule's effect on any single file. Only emit
+    # them when the degeneration rule says they mean something, and only for
+    # pairs where both ends survived into the city (a coupled file that was
+    # walked out by .gitignore or noise-exclusion has no building to draw a
+    # bridge to).
+    MAX_BRIDGES = 2000
+    if analysis.flags.coupling and analysis.git is not None:
+        pairs = sorted(analysis.git.coupling.items(), key=lambda kv: -kv[1])
+        bridges = []
+        for (path_a, path_b), count in pairs:
+            id_a = building_index.get(path_a)
+            id_b = building_index.get(path_b)
+            if id_a is None or id_b is None:
+                continue
+            bridges.append([id_a, id_b, count])
+            if len(bridges) >= MAX_BRIDGES:
+                break
+        bytes_written += _write(os.path.join(out_dir, "bridges.json"), _json(bridges))
 
     # ---- floor detail ----
     #

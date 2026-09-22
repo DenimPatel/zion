@@ -15,7 +15,7 @@
  * than sampled from one shared bitmap). Neither costs a draw call.
  */
 
-import { farGeometry, nearGeometry, roofPropGeometry } from './shapes.js';
+import { craneGeometry, farGeometry, nearGeometry, roofPropGeometry } from './shapes.js';
 import {
   makeMassingDepthMaterial,
   patchFacade,
@@ -51,6 +51,7 @@ const MAX_DETAILED = 6000;
 
 /** Rooftop clutter, tallest buildings first, in one extra draw call. */
 const MAX_ROOF_PROPS = 3000;
+const MAX_CRANES = 1500;
 
 /**
  * The eight massing geometries, built once for the life of the page.
@@ -217,6 +218,8 @@ export class CityMesh {
     const matrix = new THREE.Matrix4();
     const colour = new THREE.Color();
     const roofCandidates = [];
+    const craneCandidates = [];
+    const churnEligible = Boolean(manifest.flags && manifest.flags.churn);
 
     for (const [archetype, tiers] of byArchetype) {
       for (const tier of ['near', 'far']) {
@@ -291,6 +294,13 @@ export class CityMesh {
         if (detailed && deck !== undefined && height > 9) {
           roofCandidates.push({ x, z, width, depth, height, deck, seed });
         }
+
+        // Cranes mark the top decile of churn -- "this file is under active
+        // construction" -- and only when the repo has enough commit history
+        // for churn to mean anything (the same rule the legend already states).
+        if (detailed && churnEligible && building.topChurn) {
+          craneCandidates.push({ x, z, width, depth, height, seed });
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
@@ -313,6 +323,7 @@ export class CityMesh {
     far.dispose();
 
     this._addRoofProps(roofCandidates);
+    this._addCranes(craneCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
@@ -375,6 +386,117 @@ export class CityMesh {
     mesh.instanceMatrix.needsUpdate = true;
     mesh.geometry.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seeds, 1));
     this.group.add(mesh);
+  }
+
+  /**
+   * Construction cranes over the top decile of churn -- "this file is under
+   * active construction", the same instanced-cluster technique as the roof
+   * props above so churn at scale still costs one draw call.
+   */
+  _addCranes(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    if (candidates.length > MAX_CRANES) {
+      candidates.sort((a, b) => b.height - a.height);
+      candidates.length = MAX_CRANES;
+    }
+
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xd9a531,
+      roughness: 0.55,
+      metalness: 0.4,
+    });
+
+    const mesh = new THREE.InstancedMesh(craneGeometry(THREE), material, candidates.length);
+    mesh.name = 'cranes';
+    mesh.castShadow = true;
+    mesh.customDepthMaterial = makeMassingDepthMaterial(THREE);
+    // Scenery, not a target -- the click belongs to the building underneath.
+    mesh.raycast = () => {};
+
+    const matrix = new THREE.Matrix4();
+    candidates.forEach((crane, index) => {
+      const spread = Math.min(crane.width, crane.depth) * 0.6;
+      const rotation = new THREE.Matrix4().makeRotationY(seedOffset(crane.seed) * Math.PI * 2);
+      matrix.makeScale(spread, spread * 2.2, spread);
+      matrix.premultiply(rotation);
+      matrix.setPosition(
+        crane.x + (crane.seed - 0.5) * crane.width * 0.5,
+        crane.height,
+        crane.z + (seedOffset(crane.seed) - 0.5) * crane.depth * 0.5
+      );
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Skybridges: an arc between two buildings changed together in a commit.
+   *
+   * Called separately from `build()` because it needs *placed* buildings by
+   * id -- the manifest-wide id space, not just this call's resident set -- so
+   * it is re-run whenever the resident set changes rather than baked into the
+   * per-archetype loop above. Only pairs whose both ends are currently
+   * resident are drawn; a bridge to an unloaded district would have nowhere
+   * to land.
+   */
+  buildBridges(pairs, buildingsById) {
+    this.clearBridges();
+    if (!pairs || !pairs.length || !buildingsById) return;
+    const THREE = this.THREE;
+    const usable = [];
+    for (const [idA, idB] of pairs) {
+      const a = buildingsById.get(idA);
+      const b = buildingsById.get(idB);
+      if (a && b && a !== b) usable.push([a, b]);
+    }
+    if (!usable.length) return;
+
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x8fd6ff,
+      roughness: 0.35,
+      metalness: 0.1,
+      transparent: true,
+      opacity: 0.8,
+    });
+    // A unit cylinder standing on its own base (not centred), so scaling its
+    // Y axis stretches it from the start point toward the end point.
+    const geometry = new THREE.CylinderGeometry(0.3, 0.3, 1, 6, 1, true);
+    geometry.translate(0, 0.5, 0);
+    const mesh = new THREE.InstancedMesh(geometry, material, usable.length);
+    mesh.name = 'skybridges';
+    // Scenery: the buildings it connects are the click targets, not the arc.
+    mesh.raycast = () => {};
+
+    const matrix = new THREE.Matrix4();
+    const up = new THREE.Vector3(0, 1, 0);
+    const start = new THREE.Vector3();
+    const end = new THREE.Vector3();
+    const dir = new THREE.Vector3();
+    const scale = new THREE.Vector3();
+    usable.forEach(([a, b], index) => {
+      start.set((a.x || 0) + (a.width || 4) / 2, a.height || 3, (a.y || 0) + (a.depth || 4) / 2);
+      end.set((b.x || 0) + (b.width || 4) / 2, b.height || 3, (b.y || 0) + (b.depth || 4) / 2);
+      dir.subVectors(end, start);
+      const length = Math.max(0.01, dir.length());
+      dir.normalize();
+      const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
+      scale.set(1, length, 1);
+      matrix.compose(start, quat, scale);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this._bridgeMesh = mesh;
+    this.group.add(mesh);
+  }
+
+  clearBridges() {
+    if (!this._bridgeMesh) return;
+    this.group.remove(this._bridgeMesh);
+    this._bridgeMesh.geometry.dispose();
+    this._bridgeMesh.material.dispose();
+    this._bridgeMesh = null;
   }
 
   _addGround(bx, bz, bw, bh, buildings) {
