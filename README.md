@@ -65,6 +65,9 @@ Line counts give 0 or 1 for both. Row counts give a tall silo and a shorter one,
 which is the truth. Data files are therefore streamed and measured by logical
 rows, and never fully loaded into memory.
 
+See [docs/VISUALIZATION_ROADMAP.md](docs/VISUALIZATION_ROADMAP.md) for planned visualizations —
+new-vs-old, hot-vs-stable, a "downtown", nested folders, slicing/filtering, and detail windows.
+
 ---
 
 ## Degenerate data must not look broken
