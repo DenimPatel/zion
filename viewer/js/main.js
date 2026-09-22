@@ -26,6 +26,8 @@ import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
+import { buildFacets, parseQuery, runQuery } from './facets.js';
+import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
 const loading = document.getElementById('loading');
@@ -47,6 +49,7 @@ const state = {
   // benchmark can shrink either without changing the code paths under test.
   maxResident: Number(params.get('maxres')) || null,
   shadows: params.get('shadows') !== '0',
+  filterText: '',
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -227,6 +230,116 @@ function rebuildCity(buildings) {
   if (state.source.manifest.flags && state.source.manifest.flags.coupling && context.bridges) {
     const byId = new Map(buildings.map((b) => [b.id, b]));
     mesh.buildBridges(context.bridges, byId);
+  }
+  applyActiveFilter();
+}
+
+// ---------------------------------------------------------------------------
+// Filtering, colour lens and facet chips (S15/S16/S17/S18)
+// ---------------------------------------------------------------------------
+
+function resolveExt(idx) {
+  return (context.extTable && context.extTable[idx]) || '';
+}
+
+/** Re-run the current filter text against the resident set. Called after any
+ *  streaming rebuild, since a fresh CityMesh has no ghosting of its own. */
+function applyActiveFilter() {
+  if (!context.city || !context.facetIndex) return;
+  const text = state.filterText || '';
+  const predicate = parseQuery(
+    text,
+    state.source.manifest.indexColumns,
+    (idx) => state.source.s(idx),
+    resolveExt
+  );
+  const summary = document.getElementById('filter-summary');
+  if (!predicate) {
+    context.city.clearFilter();
+    if (summary) summary.textContent = 'every building shown';
+    return;
+  }
+  const result = runQuery(context.facetIndex, predicate, state.source.manifest.indexColumns);
+  context.city.applyFilter(result.ids);
+  if (summary) {
+    summary.textContent =
+      `${result.count.toLocaleString()} files · ${result.loc.toLocaleString()} lines ` +
+      `· in ${result.districts} district${result.districts === 1 ? '' : 's'}`;
+  }
+}
+
+function renderChips() {
+  const container = document.getElementById('filter-chips');
+  if (!container || !context.facetIndex) return;
+  const facets = buildFacets(
+    context.facetIndex,
+    state.source.manifest.indexColumns,
+    (idx) => state.source.s(idx),
+    resolveExt
+  );
+  container.innerHTML = '';
+  const top = [...facets.specials, ...facets.archetypes.slice(0, 4), ...facets.languages.slice(0, 4)];
+  for (const chip of top) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip-btn';
+    button.textContent = `${chip.label} (${chip.count})`;
+    button.addEventListener('click', () => {
+      const input = document.getElementById('filter-input');
+      input.value = chip.query;
+      state.filterText = chip.query;
+      applyActiveFilter();
+    });
+    container.append(button);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detail overlay (S19): reuses the already-loaded main-window CitySource, so
+// opening a building's details costs no extra fetch of the manifest/strings
+// it already has resident.
+// ---------------------------------------------------------------------------
+
+function setupDetailOverlay() {
+  const overlay = document.getElementById('detail-overlay');
+  const close = document.getElementById('detail-overlay-close');
+  if (close) close.addEventListener('click', () => { overlay.hidden = true; });
+  if (context.inspector) {
+    context.inspector.onOpenDetail = (kind, id) => {
+      if (!overlay) return;
+      resetDetailPanel();
+      overlay.hidden = false;
+      const render = kind === 'building' ? renderBuilding : renderDistrict;
+      render(state.source, id).catch((error) => {
+        document.getElementById('detail-title').textContent = `Could not load: ${error.message}`;
+      });
+    };
+  }
+  // A file clicked inside the overlay posts here instead of navigating.
+  if ('BroadcastChannel' in window) {
+    const channel = new BroadcastChannel('zion');
+    channel.addEventListener('message', (event) => {
+      const id = event.data && event.data.fly;
+      if (id === undefined || id === null) return;
+      const target = context.resident && context.resident.find((b) => b.id === id);
+      if (target) teleportTo({ kind: 'building', building: target });
+    });
+  }
+}
+
+function setupFilterAndLens() {
+  const input = document.getElementById('filter-input');
+  if (input) {
+    input.addEventListener('input', (event) => {
+      state.filterText = event.target.value;
+      applyActiveFilter();
+    });
+  }
+  const lens = document.getElementById('lens-select');
+  if (lens) {
+    lens.addEventListener('change', (event) => {
+      if (context.city) context.city.recolour(event.target.value);
+    });
   }
 }
 
@@ -1033,6 +1146,8 @@ async function refreshLabelsAfterUnlock() {
   context.inspector.hide();
   renderLegend();
   renderTitle();
+  renderChips();
+  applyActiveFilter();
 }
 
 async function attemptUnlock(passphrase) {
@@ -1973,6 +2088,10 @@ async function boot() {
   state.source.buildings = context.resident;
   await state.source.assignLockedAddresses(context.resident);
   context.bridges = manifest.flags && manifest.flags.coupling ? await state.source.bridges() : [];
+  context.facetIndex = await state.source.index();
+  context.extTable = await state.source.extTable();
+  setupFilterAndLens();
+  renderChips();
   rebuildCity(context.resident);
 
   context.fly = new FlyCamera(THREE, camera, bounds);
@@ -1981,6 +2100,7 @@ async function boot() {
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
   context.inspector = new Inspector(state.source);
+  setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
     panel: document.getElementById('cityhall'),
     body: document.getElementById('cityhall-body'),

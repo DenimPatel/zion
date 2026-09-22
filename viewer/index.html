@@ -26,6 +26,16 @@
     <h2>Legend</h2>
     <ul id="legend-list"></ul>
     <div id="legend-notes"></div>
+    <div id="filter" aria-label="Filter">
+      <input id="filter-input" type="text" placeholder="ext:py name:README.md is:test loc&gt;500">
+      <p id="filter-summary" class="hint">every building shown</p>
+      <div id="filter-chips"></div>
+      <select id="lens-select" title="colour by">
+        <option value="archetype">colour: archetype</option>
+        <option value="language">colour: language</option>
+        <option value="author">colour: author</option>
+      </select>
+    </div>
   </section>
 
   <section id="inspector" hidden aria-label="Inspector">
@@ -35,6 +45,7 @@
     <dl id="inspector-metrics"></dl>
     <div id="inspector-floors"></div>
     <p id="inspector-source-hint" class="hint"></p>
+    <button id="inspector-open-detail" hidden>Open details &#8599;</button>
   </section>
 
   <section id="xray" aria-label="Legend key">
@@ -46,6 +57,22 @@
     <button id="cityhall-close" title="Close">&times;</button>
     <h2 id="cityhall-title">City Hall</h2>
     <div id="cityhall-body"></div>
+  </section>
+
+  <!-- The detail window, as an overlay: a --single-file build has no second
+       document to open a real detail.html in, so this reuses the same
+       detail.js render functions in place. See main.js's setupDetailOverlay
+       and inspector.js's onOpenDetail wiring. -->
+  <section id="detail-overlay" hidden aria-label="Details">
+    <button id="detail-overlay-close" title="Close">&times;</button>
+    <h1 id="detail-title">&mdash;</h1>
+    <form id="detail-vault" hidden>
+      <label for="detail-passphrase">This city is locked. Passphrase:</label>
+      <input id="detail-passphrase" name="passphrase" type="password">
+      <button type="submit">Unlock</button>
+      <p class="hint"></p>
+    </form>
+    <div id="detail-body"></div>
   </section>
 
   <div id="tour" hidden>

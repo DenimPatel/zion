@@ -491,6 +491,107 @@ export class CityMesh {
     this.group.add(mesh);
   }
 
+  /**
+   * Re-tint every building by a different lens: archetype (the default,
+   * matching how `build()` colours things), language, or author. The legend
+   * panel is expected to switch its key to match (see main.js::renderLegend).
+   *
+   * Rewrites `baseColors` itself, not just the live instance colour, so a
+   * hover highlight or an active filter reverts to the *new* lens rather than
+   * snapping back to archetype colours.
+   */
+  recolour(lens) {
+    const THREE = this.THREE;
+    const manifest = this.source.manifest;
+    const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
+    const colour = new THREE.Color();
+
+    for (const [uuid, members] of this.records) {
+      const mesh = this.meshes.get(uuid);
+      if (!mesh || !mesh.userData.baseColors) continue;
+      const archetype = mesh.name.replace(/^buildings-/, '').replace(/-far$/, '');
+      const base = mesh.userData.baseColors;
+      members.forEach((building, index) => {
+        if (lens === 'language') {
+          const lang = this.source.s(building.language);
+          colour.copy(lang ? new THREE.Color().setHSL(hueFor(lang), 0.5, 0.55) : new THREE.Color(0x777777));
+        } else if (lens === 'author') {
+          const author = authorTint ? this.source.s(building.author) : '';
+          colour.copy(author ? new THREE.Color().setHSL(hueFor(author), 0.45, 0.55) : new THREE.Color(0x777777));
+        } else {
+          const author = authorTint ? this.source.s(building.author) : '';
+          colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+        }
+        base[index * 3] = colour.r;
+        base[index * 3 + 1] = colour.g;
+        base[index * 3 + 2] = colour.b;
+        mesh.setColorAt(index, colour);
+      });
+      mesh.instanceColor.needsUpdate = true;
+    }
+    // A filter's ghosting is relative to baseColors; redraw it against the
+    // lens that just changed underneath it, rather than losing it.
+    if (this._filtered) this.applyFilter(this._filtered.matchingIds);
+  }
+
+  /**
+   * Ghost every building that does not match a filter, so "every README.md"
+   * or "every .py file" reads at a glance without waiting for a rebuild.
+   *
+   * Same revertible-colour technique as `highlightDistrict`, run in the
+   * opposite direction: matches keep their real colour, everything else is
+   * lerped toward a dim, desaturated grey. `matchingIds` is a Set of building
+   * ids (resident buildings only -- the id space is global, but a building
+   * not currently loaded has no instance to dim).
+   */
+  applyFilter(matchingIds) {
+    this.clearFilter();
+    if (!matchingIds) return;
+    const THREE = this.THREE;
+    const ghost = new THREE.Color(0x2a2c31);
+    const touched = [];
+
+    for (const [uuid, members] of this.records) {
+      const mesh = this.meshes.get(uuid);
+      if (!mesh || !mesh.userData.baseColors) continue;
+      const base = mesh.userData.baseColors;
+      let any = false;
+      members.forEach((building, index) => {
+        if (matchingIds.has(building.id)) return;
+        mesh.setColorAt(
+          index,
+          new THREE.Color(base[index * 3], base[index * 3 + 1], base[index * 3 + 2]).lerp(ghost, 0.82)
+        );
+        touched.push({ mesh, index });
+        any = true;
+      });
+      if (any) mesh.instanceColor.needsUpdate = true;
+    }
+    this._filtered = { matchingIds, touched };
+  }
+
+  clearFilter() {
+    const previous = this._filtered;
+    if (!previous) return;
+    this._filtered = null;
+    const byMesh = new Map();
+    for (const { mesh, index } of previous.touched) {
+      if (!byMesh.has(mesh)) byMesh.set(mesh, []);
+      byMesh.get(mesh).push(index);
+    }
+    for (const [mesh, indices] of byMesh) {
+      const base = mesh.userData.baseColors;
+      if (!base) continue;
+      for (const index of indices) {
+        mesh.setColorAt(
+          index,
+          new this.THREE.Color(base[index * 3], base[index * 3 + 1], base[index * 3 + 2])
+        );
+      }
+      mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
   clearBridges() {
     if (!this._bridgeMesh) return;
     this.group.remove(this._bridgeMesh);

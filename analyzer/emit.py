@@ -304,6 +304,9 @@ def build_manifest(
         # Only a pointer: the file itself is empty/absent whenever coupling is
         # disabled, so the viewer's "should I fetch this" check is one flag read.
         "bridges": "bridges.json" if flags.coupling else None,
+        "index": "index.json",
+        "indexColumns": INDEX_COLUMNS,
+        "extTable": "ext.bin",
     }
     return manifest
 
@@ -337,7 +340,7 @@ def install_viewer(out_dir: str) -> int:
     os.makedirs(os.path.join(out_dir, "css"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "vendor"), exist_ok=True)
 
-    for rel in ("index.html", os.path.join("css", "hud.css")):
+    for rel in ("index.html", "detail.html", os.path.join("css", "hud.css")):
         destination = os.path.join(out_dir, rel)
         shutil.copyfile(os.path.join(viewer, rel), destination)
         written += os.path.getsize(destination)
@@ -361,6 +364,29 @@ def install_viewer(out_dir: str) -> int:
 # --------------------------------------------------------------------------
 # Chunks and floor detail
 # --------------------------------------------------------------------------
+
+
+# Bits of index.json's flagsBitmask column. Append-only: a new bit is added
+# by a later phase (isNew, isDowntown) when that data exists, never
+# renumbered, so an older cached index.json's bits keep meaning the same thing.
+FLAG_IS_TEST = 1 << 0
+FLAG_IS_DOC = 1 << 1
+FLAG_IS_BINARY = 1 << 2
+FLAG_IS_RUIN = 1 << 3
+FLAG_IS_DATA = 1 << 4
+FLAG_TOP_CHURN = 1 << 5
+FLAG_IS_NEW = 1 << 6
+FLAG_IS_DOWNTOWN = 1 << 7
+
+# index.json's row shape, in column order. Kept as a manifest field so the
+# viewer never hardcodes positions -- a later phase appends a column here and
+# the viewer reads it by name, not by index literal.
+INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc"]
+
+
+def _ext_for(rel: str) -> str:
+    _, ext = os.path.splitext(rel)
+    return ext.lower() if ext else "(none)"
 
 
 def _top_decile_churn(files: list[FileMetrics]) -> set[str]:
@@ -425,6 +451,58 @@ def _building_record(
         "detail": f"f/{index}.json",
         "source": f"f/{index}.src" if _includes_source(record) else "",
     }
+
+
+def _build_index(
+    analysis: RepoAnalysis,
+    building_index: dict[str, int],
+    district_order: dict[str, int],
+    strings: StringTable,
+    ext_strings: StringTable,
+    top_churn: frozenset[str],
+) -> list[list]:
+    """Build ``index.json``: one compact row per building, for whole-repo
+    filtering/counting without fetching every district chunk (the viewer only
+    keeps camera-resident chunks loaded; see ``DistrictStreamer``).
+
+    Name and language go through the encrypted string table, same as building
+    records -- a locked city withholds them until unlock. Extension goes
+    through its own always-plaintext table, deliberately separate, so
+    ``ext:py`` style filtering works even while locked: an extension is not a
+    filename and does not leak one.
+    """
+    rows = []
+    for record in analysis.files:
+        index = building_index.get(record.rel)
+        if index is None:
+            continue
+        flags = 0
+        if record.is_test:
+            flags |= FLAG_IS_TEST
+        if record.is_doc:
+            flags |= FLAG_IS_DOC
+        if record.is_binary:
+            flags |= FLAG_IS_BINARY
+        if record.is_ruin:
+            flags |= FLAG_IS_RUIN
+        if record.rows is not None:
+            flags |= FLAG_IS_DATA
+        if record.rel in top_churn:
+            flags |= FLAG_TOP_CHURN
+        rows.append(
+            [
+                index,
+                district_order.get(record.district, 0),
+                record.archetype,
+                strings.add(record.language),
+                ext_strings.add(_ext_for(record.rel)),
+                strings.add(record.name),
+                flags,
+                record.logical_loc,
+            ]
+        )
+    rows.sort(key=lambda row: row[0])
+    return rows
 
 
 def _includes_source(record: FileMetrics) -> bool:
@@ -665,6 +743,15 @@ def emit_city(
                 break
         bytes_written += _write(os.path.join(out_dir, "bridges.json"), _json(bridges))
 
+    # ---- whole-repo facet index ----
+    ext_strings = StringTable()
+    index_rows = _build_index(analysis, building_index, district_order, strings, ext_strings, top_churn)
+    bytes_written += _write(os.path.join(out_dir, "index.json"), _json(index_rows))
+    # Always plaintext, regardless of --encrypt: an extension is not a
+    # filename, so withholding it behind the vault would disable ext: filters
+    # in a locked city for no privacy gained.
+    bytes_written += _write(os.path.join(out_dir, "ext.bin"), ext_strings.to_bytes())
+
     # ---- floor detail ----
     #
     # Payloads are queued rather than written immediately, so encryption can run
@@ -780,6 +867,9 @@ def build_single_file(out_dir: str, manifest: dict, result: "EmitResult") -> tup
 
     buildings = manifest["meta"]["buildingCount"]
     payload_paths: list[str] = ["city.json", "strings.bin"]
+    for extra in ("index.json", "ext.bin", "bridges.json"):
+        if os.path.exists(os.path.join(out_dir, extra)):
+            payload_paths.append(extra)
     for subdir in ("d", "f"):
         directory = os.path.join(out_dir, subdir)
         if not os.path.isdir(directory):

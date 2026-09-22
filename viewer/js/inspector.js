@@ -50,8 +50,12 @@ export class Inspector {
     this.metrics = document.getElementById('inspector-metrics');
     this.floorsEl = document.getElementById('inspector-floors');
     this.hint = document.getElementById('inspector-source-hint');
+    this.openDetail = document.getElementById('inspector-open-detail');
     this.selected = null;
     document.getElementById('inspector-close').addEventListener('click', () => this.hide());
+    if (this.openDetail) {
+      this.openDetail.addEventListener('click', () => this._openDetailWindow());
+    }
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') this.hide();
     });
@@ -62,12 +66,33 @@ export class Inspector {
     this.selected = null;
   }
 
+  /**
+   * Open the detail window for whatever is currently selected.
+   *
+   * `onOpenDetail`, when set by main.js, takes precedence: a single-file
+   * build has no second HTML document to link to (`file://` cannot navigate
+   * between two local documents reliably either), so main.js wires this to
+   * the same in-page overlay `detail.js` renders for the multi-file case.
+   * Otherwise this falls back to a real new-tab navigation to detail.html.
+   */
+  _openDetailWindow() {
+    if (!this.selected) return;
+    const id = this.selected.kind === 'building' ? this.selected.building.id : this.selected.district.id;
+    if (typeof this.onOpenDetail === 'function') {
+      this.onOpenDetail(this.selected.kind, id);
+      return;
+    }
+    const query = this.selected.kind === 'building' ? `?b=${id}` : `?d=${id}`;
+    window.open(`detail.html${query}`, '_blank');
+  }
+
   showBuilding(building) {
     this.selected = { kind: 'building', building };
     const source = this.source;
     this.panel.hidden = false;
     this.title.textContent = source.label(building) || source.s(building.path);
     this.pathEl.textContent = source.locked ? '(locked)' : source.s(building.path);
+    if (this.openDetail) this.openDetail.hidden = false;
 
     const rows = [
       ['language', source.s(building.language)],
@@ -159,6 +184,7 @@ export class Inspector {
     this.panel.hidden = false;
     this.title.textContent = source.districtLabel(district);
     this.pathEl.textContent = source.locked ? '(locked)' : source.s(district.key);
+    if (this.openDetail) this.openDetail.hidden = false;
 
     const rows = [
       ['buildings', String(district.buildings)],

@@ -162,6 +162,19 @@ data reads as geometry. At dusk the only windows glowing are the documented
 buildings, so *lit = documented* is legible in one glance. There is a slider for
 both.
 
+**The filter bar is a zoning map.** Type `ext:py`, `name:CLAUDE.md`, `is:test`,
+`loc>500`, or `-is:doc` into the filter box under the legend, and every
+non-matching building fades to ghost grey while the count, total lines and
+district spread of the match are reported live. The chips underneath fill it
+for you from the repo's own top languages, archetypes and special files
+(READMEs, `CLAUDE.md`, license, `Dockerfile`, CI configs). A colour-by dropdown
+next to it re-tints the whole city by archetype, language or author.
+
+**"Open details"** on any building or district's inspector panel opens a report
+window (a new tab, or an in-page overlay in a `--single-file` build) with the
+full metric set, its floors, its co-changed files, and — for a district — its
+largest files, each one click away from flying the main view to it.
+
 ---
 
 ## Encryption (opt-in)

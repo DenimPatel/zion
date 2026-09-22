@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zion — details</title>
+<link rel="stylesheet" href="./css/hud.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js"
+  }
+}
+</script>
+</head>
+<body class="detail-page">
+<main id="detail-page">
+  <a href="./index.html" class="chip-btn">&larr; back to the city</a>
+  <h1 id="detail-title">loading&hellip;</h1>
+
+  <form id="detail-vault" hidden>
+    <label for="detail-passphrase">This city is locked. Passphrase:</label>
+    <input id="detail-passphrase" name="passphrase" type="password">
+    <button type="submit">Unlock</button>
+    <p class="hint"></p>
+  </form>
+
+  <div id="detail-body"></div>
+</main>
+<script type="module" src="./js/detail.js"></script>
+</body>
+</html>

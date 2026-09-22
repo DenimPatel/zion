@@ -124,6 +124,28 @@ export class CitySource {
     return this._bridges;
   }
 
+  /**
+   * The whole-repo facet index: one row per building, columns named by
+   * `manifest.indexColumns`. Loaded once, up front -- unlike district chunks,
+   * which only cover the camera-resident working set (see stream.js) -- so a
+   * filter can answer "how many .py files?" without walking every chunk.
+   */
+  async index() {
+    if (this._index) return this._index;
+    if (!this.manifest || !this.manifest.index) return [];
+    this._index = await getJSON(this.base, this.manifest.index);
+    return this._index;
+  }
+
+  /** The always-plaintext extension table: `ext:py` must work even locked. */
+  async extTable() {
+    if (this._extTable) return this._extTable;
+    if (!this.manifest || !this.manifest.extTable) return [];
+    const buffer = await getBuffer(this.base, this.manifest.extTable);
+    this._extTable = decodeStrings(buffer);
+    return this._extTable;
+  }
+
   async loadStrings() {
     const buffer = await getBuffer(this.base, 'strings.bin');
     if (this.manifest && this.manifest.meta && this.manifest.meta.encrypted) {

@@ -160,6 +160,59 @@ class EmitTests(TempRepoCase):
             for building in chunk["buildings"]:
                 self.assertFalse(building["topChurn"])
 
+    def test_index_covers_every_building_with_matching_flags(self):
+        _analysis, _layout, result = self._build()
+        manifest = result.manifest
+        self.assertEqual(manifest["index"], "index.json")
+        self.assertEqual(manifest["extTable"], "ext.bin")
+        cols = {name: i for i, name in enumerate(manifest["indexColumns"])}
+        index_rows = read_json(os.path.join(result.out_dir, "index.json"))
+        self.assertEqual(len(index_rows), manifest["stats"]["fileCount"])
+
+        by_id = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_id[building["id"]] = building
+
+        self.assertEqual(set(by_id), {row[cols["id"]] for row in index_rows})
+        for row in index_rows:
+            building = by_id[row[cols["id"]]]
+            self.assertEqual(row[cols["district"]], building["district"])
+            self.assertEqual(row[cols["archetype"]], building["archetype"])
+            self.assertEqual(row[cols["loc"]], building["loc"])
+            flags = row[cols["flags"]]
+            self.assertEqual(bool(flags & (1 << 0)), building["isTest"])
+            self.assertEqual(bool(flags & (1 << 1)), building["isDoc"])
+            self.assertEqual(bool(flags & (1 << 2)), building["isBinary"])
+            self.assertEqual(bool(flags & (1 << 3)), building["isRuin"])
+            self.assertEqual(bool(flags & (1 << 4)), building["rows"] is not None)
+            self.assertEqual(bool(flags & (1 << 5)), building["topChurn"])
+
+    def test_extension_table_is_plaintext_even_when_encrypted(self):
+        repo = make_repo(self.scratch())
+        _analysis, _layout, result = self.build_city(
+            repo,
+            out_dir=os.path.join(self._tmp, "locked"),
+            encrypt=True,
+            passphrase="correct horse battery staple",
+        )
+        # A plain ZIONSTR1 table, not a ZIONENC1 frame -- extension filtering
+        # must work before unlock, since an extension is not a filename.
+        with open(os.path.join(result.out_dir, "ext.bin"), "rb") as fh:
+            self.assertEqual(fh.read(8), b"ZIONSTR1")
+        ext_table = read_string_table(os.path.join(result.out_dir, "ext.bin"))
+        self.assertIn(".py", ext_table)
+
+    def test_single_file_build_installs_detail_page_and_index(self):
+        repo = make_repo(self.scratch())
+        _analysis, _layout, result = self.build_city(
+            repo, out_dir=os.path.join(self._tmp, "multi"), single_file=False
+        )
+        self.assertTrue(os.path.exists(os.path.join(result.out_dir, "detail.html")))
+        self.assertTrue(os.path.exists(os.path.join(result.out_dir, "js", "facets.js")))
+        self.assertTrue(os.path.exists(os.path.join(result.out_dir, "js", "detail.js")))
+
 
 class SingleFileTests(TempRepoCase):
     def test_single_file_inlines_everything(self):
@@ -189,6 +242,12 @@ class SingleFileTests(TempRepoCase):
         self.assertEqual(strings[:8], b"ZIONSTR1")
         manifest = json.loads(base64.b64decode(payload["city.json"]))
         self.assertEqual(manifest["format"], "zion-city")
+        # The facet index and its plaintext extension table travel with the
+        # single-file bundle too, or the filter bar would 404 under file://.
+        self.assertIn("index.json", payload)
+        self.assertIn("ext.bin", payload)
+        self.assertIn("zion/facets", html)
+        self.assertIn("zion/detail", html)
 
     def test_module_specifiers_are_rewritten_to_import_map_keys(self):
         from analyzer.emit import _rewrite_module_specifiers
