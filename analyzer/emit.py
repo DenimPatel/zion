@@ -40,6 +40,8 @@ LEGEND_SPEC = [
     ("silos", "Data files -> silos (height = rows)", "rows"),
     ("monuments", "Binary artefacts -> monuments", "bool"),
     ("skybridges", "Files changed in one commit -> skybridges", "pairs"),
+    ("new_construction", "First commit within the newest activity window -> scaffolding", "days"),
+    ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile"),
 ]
 
 
@@ -141,6 +143,8 @@ def build_manifest(
         "churn": flags.churn,
         "weathering": flags.recency,
         "skybridges": flags.coupling,
+        "new_construction": flags.age,
+        "heat": flags.churn,
     }
     for entry_id, label, unit in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -191,6 +195,11 @@ def build_manifest(
                 "documented": district.documented,
                 "testFiles": district.test_files,
                 "dataFiles": district.data_files,
+                # Mean heat over the district's own files, not a city-wide
+                # average -- "this neighbourhood is under active development"
+                # relative to the district's own population.
+                "heat": round(sum(f.heat for f in members) / len(members), 4) if members and flags.churn else 0.0,
+                "newFiles": sum(1 for f in members if f.is_new) if flags.age else 0,
                 "skyline": {
                     "maxHeight": round(max(heights), 2),
                     "avgHeight": round(sum(heights) / len(heights), 2),
@@ -381,7 +390,7 @@ FLAG_IS_DOWNTOWN = 1 << 7
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
 # the viewer reads it by name, not by index literal.
-INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc"]
+INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat"]
 
 
 def _ext_for(rel: str) -> str:
@@ -390,12 +399,20 @@ def _ext_for(rel: str) -> str:
 
 
 def _top_decile_churn(files: list[FileMetrics]) -> set[str]:
-    """Paths in the top decile of churn -- the interim "hot" set cranes are drawn from.
+    """Paths in the top decile of *recent* activity (``heat``) -- the set
+    cranes are drawn from.
 
-    Kept as its own function so it can be replaced by the exponential-decay
-    ``heat`` percentile (activity-weighted, not lifetime-total) once that lands,
-    without touching call sites.
+    ``heat`` is an exponentially-decayed, percentile-ranked score (see
+    ``metrics._finalize_time_signals``): a file with a burst of commits last
+    week outranks one with the same lifetime churn spread evenly across
+    years. Falls back to lifetime churn only for files metrics.py never
+    reached (heat left at its 0.0 default), so a repo built before this field
+    existed still degrades to the old behaviour rather than losing cranes.
     """
+    with_heat = [f for f in files if f.heat > 0]
+    if with_heat:
+        cutoff_rank = 0.9
+        return {f.rel for f in with_heat if f.heat >= cutoff_rank}
     churny = sorted((f for f in files if f.churn > 0), key=lambda f: -f.churn)
     if not churny:
         return set()
@@ -442,6 +459,11 @@ def _building_record(
         "churn": record.churn,
         "topChurn": record.rel in top_churn,
         "recencyDays": round(record.recency_days, 1),
+        "ageDays": round(record.age_days, 1),
+        "isNew": record.is_new,
+        "era": record.era,
+        "activity": list(record.activity),
+        "heat": round(record.heat, 4),
         "author": strings.add(record.primary_author) if record.primary_author else -1,
         "ownership": round(record.ownership_share, 3),
         "lastMessage": strings.add(record.last_message) if record.last_message else -1,
@@ -489,6 +511,8 @@ def _build_index(
             flags |= FLAG_IS_DATA
         if record.rel in top_churn:
             flags |= FLAG_TOP_CHURN
+        if record.is_new:
+            flags |= FLAG_IS_NEW
         rows.append(
             [
                 index,
@@ -499,6 +523,8 @@ def _build_index(
                 strings.add(record.name),
                 flags,
                 record.logical_loc,
+                round(record.age_days, 1),
+                round(record.heat, 4),
             ]
         )
     rows.sort(key=lambda row: row[0])

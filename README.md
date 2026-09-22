@@ -35,7 +35,7 @@ Everything in the city is one of these, and nothing is decoration.
 | top-level functions / classes / headings / notebook cells | floors |
 | folder content weight | district area (treemap) |
 | dominant author by lines owned | building tint, district Mayor |
-| commits touching the file | window traffic; crane on top-decile churn |
+| commits touching the file | window traffic; crane on top-decile recent activity (heat) |
 | days since last commit | weathering: clean → grimy → derelict |
 | docstring + comment ratio | **fraction of lit windows** |
 | README in the folder | Town Hall landmark |
@@ -43,6 +43,8 @@ Everything in the city is one of these, and nothing is decoration.
 | data files | silos (height = row count) |
 | binary artefacts | monuments |
 | files changed together in one commit | skybridges |
+| first commit within the newest activity window | scaffolding |
+| recent, decay-weighted churn (percentile) | rooftop beacons feeding cranes; district ground heat |
 
 ### Why height is never bytes on disk
 
@@ -169,6 +171,14 @@ district spread of the match are reported live. The chips underneath fill it
 for you from the repo's own top languages, archetypes and special files
 (READMEs, `CLAUDE.md`, license, `Dockerfile`, CI configs). A colour-by dropdown
 next to it re-tints the whole city by archetype, language or author.
+
+**New buildings wear scaffolding.** A file born in the newest slice of the
+repo's own history (at least 30 days, or the newest 10% of its lifetime,
+whichever is longer) is wrapped in a lattice, so recent additions are visible
+without opening a diff. The colour lens also has an "age (era)" option
+(brick → concrete → glass, oldest to newest) and a "recent activity (heat)"
+option (grey → amber → red), both computed relative to the repo's own history,
+never wall-clock time.
 
 **"Open details"** on any building or district's inspector panel opens a report
 window (a new tab, or an in-page overlay in a `--single-file` build) with the

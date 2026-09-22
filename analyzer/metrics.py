@@ -279,6 +279,17 @@ class FileMetrics:
     # a record built without them still lays out, as a square, off `footprint`.
     footprint_w: float = 0.0
     footprint_d: float = 0.0
+    # Time signals (S1/S4 in docs/VISUALIZATION_ROADMAP.md). `age_days` is
+    # relative to the repo's own newest commit, never wall-clock time -- an
+    # old clone still shows its own newest files as new, and the number does
+    # not change between two test runs on two different days.
+    first_ts: float = 0.0
+    age_days: float = 0.0
+    is_new: bool = False
+    era: str = "mid"  # old | mid | new, a tertile of age_days across the repo
+    activity: list[int] = field(default_factory=list)
+    recent_churn: float = 0.0
+    heat: float = 0.0  # percentile rank of recent_churn across the repo, 0..1
 
     @property
     def weight(self) -> float:
@@ -298,6 +309,7 @@ class RepoFlags:
     recency: bool = False
     churn: bool = False
     coupling: bool = False
+    age: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -306,6 +318,7 @@ class RepoFlags:
             "recency": self.recency,
             "churn": self.churn,
             "coupling": self.coupling,
+            "age": self.age,
             "notes": list(self.notes),
         }
 
@@ -342,6 +355,10 @@ def compute_flags(git: GitIndex) -> RepoFlags:
     flags.recency = git.active_dates >= 3
     flags.churn = git.commit_count >= 5 and git.max_eligible_commit_files >= 2
     flags.coupling = git.eligible_commits >= 2 and len(git.coupling) > 0
+    # At least two distinct birth days among tracked files: a repo where every
+    # file was added in the same commit has nothing for "new" to mean.
+    birth_days = {int(f.first_ts // 86400) for f in git.files.values() if f.first_ts}
+    flags.age = len(birth_days) >= 2
 
     if not flags.authorship:
         flags.notes.append("Single author - mayor system disabled.")
@@ -349,6 +366,8 @@ def compute_flags(git: GitIndex) -> RepoFlags:
         flags.notes.append("Fewer than three active commit dates - weathering is uniform.")
     if not flags.churn:
         flags.notes.append("Too little churn history - cranes disabled.")
+    if not flags.age:
+        flags.notes.append("All tracked files share one birth date - new-construction scaffolding disabled.")
     if not flags.coupling:
         if git.bulk_commits:
             flags.notes.append(
@@ -438,6 +457,9 @@ def analyze(
             record.primary_author = file_git.primary_author
             record.ownership_share = file_git.ownership_share()
             record.authors = dict(file_git.authors)
+            record.first_ts = file_git.first_ts
+            record.activity = list(file_git.activity)
+            record.recent_churn = file_git.recent_churn
         else:
             record.confidence["authorship"] = "unknown"
 
@@ -450,4 +472,54 @@ def analyze(
     if git.available:
         for record in analysis.files:
             record.recency_days = days_since(record.last_ts, now) if record.last_ts else 0.0
+        _finalize_time_signals(analysis, git)
     return analysis
+
+
+# New-construction window: the newest slice of the repo's own lifetime, floored
+# at 30 days so a young repo does not call everything new. See S2 in
+# docs/VISUALIZATION_ROADMAP.md.
+NEW_WINDOW_FRACTION = 0.10
+NEW_WINDOW_MIN_DAYS = 30.0
+
+
+def _finalize_time_signals(analysis: "RepoAnalysis", git: GitIndex) -> None:
+    """Age tertiles, the new-construction window, and the heat percentile.
+
+    All three are computed once, over every file, so each is relative to
+    *this* repo rather than an arbitrary fixed threshold -- the same
+    philosophy `choose_depth` already applies to district count. Age (birth
+    date spread) and heat (recent churn) are independent signals with
+    independent degeneration rules, so each is gated on its own flag.
+    """
+    if analysis.flags.age:
+        repo_lifetime_days = max(0.0, (git.last_ts - git.first_ts) / 86400.0)
+        window = max(NEW_WINDOW_MIN_DAYS, repo_lifetime_days * NEW_WINDOW_FRACTION)
+
+        dated = [f for f in analysis.files if f.first_ts]
+        for record in dated:
+            record.age_days = max(0.0, (git.last_ts - record.first_ts) / 86400.0)
+            record.is_new = record.age_days <= window
+
+        # Era tertiles: oldest third / middle third / newest third by age, not
+        # a fixed day count, so the split means something in a two-week-old
+        # repo and a ten-year-old one alike.
+        by_age = sorted(dated, key=lambda f: f.age_days)
+        third = max(1, len(by_age) // 3)
+        for index, record in enumerate(by_age):
+            if index < third:
+                record.era = "new"
+            elif index < 2 * third:
+                record.era = "mid"
+            else:
+                record.era = "old"
+
+    # Heat: percentile rank of recent_churn, gated on the same degeneration
+    # rule cranes already use -- not on `flags.age`, since a repo can have
+    # meaningful churn history with every file born on the same day (a single
+    # initial commit, then years of edits).
+    if analysis.flags.churn:
+        churny = sorted((f for f in analysis.files if f.recent_churn > 0), key=lambda f: f.recent_churn)
+        total = len(churny)
+        for rank, record in enumerate(churny):
+            record.heat = (rank + 1) / total if total else 0.0

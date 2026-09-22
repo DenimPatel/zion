@@ -272,6 +272,36 @@ export function roofPropGeometry(THREE) {
 }
 
 /**
+ * Scaffolding: a lattice of corner poles and horizontal rings wrapping a
+ * building's own footprint and height. Unlike the roof props and crane above,
+ * this is scaled by the *building's* own instance transform (width, height,
+ * depth), not a separate small-prop scale, so it always wraps the building it
+ * belongs to exactly -- new construction on a new file, at the file's own
+ * size. Marks a file born in the newest slice of the repo's history (S2 in
+ * docs/VISUALIZATION_ROADMAP.md).
+ */
+export function scaffoldingGeometry(THREE) {
+  const corners = [
+    [-0.49, -0.49],
+    [0.49, -0.49],
+    [-0.49, 0.49],
+    [0.49, 0.49],
+  ];
+  const parts = corners.map(([x, z]) =>
+    cylinder(THREE, { rTop: 0.02, rBottom: 0.02, x, z, y0: 0, y1: 1, segments: 5, part: PART_FIXED })
+  );
+  for (const y of [0.25, 0.5, 0.75]) {
+    parts.push(
+      box(THREE, { w: 1.0, d: 0.03, x: 0, z: -0.49, y0: y, y1: y + 0.018, part: PART_FIXED }),
+      box(THREE, { w: 1.0, d: 0.03, x: 0, z: 0.49, y0: y, y1: y + 0.018, part: PART_FIXED }),
+      box(THREE, { w: 0.03, d: 1.0, x: -0.49, z: 0, y0: y, y1: y + 0.018, part: PART_FIXED }),
+      box(THREE, { w: 0.03, d: 1.0, x: 0.49, z: 0, y0: y, y1: y + 0.018, part: PART_FIXED })
+    );
+  }
+  return mergeParts(THREE, parts);
+}
+
+/**
  * A construction crane: a mast rising past the roofline with a long boom and a
  * short counter-jib. Marks the top decile of churn -- the file is being
  * actively worked, the way a crane on a roof means the building isn't

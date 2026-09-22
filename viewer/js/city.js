@@ -15,7 +15,7 @@
  * than sampled from one shared bitmap). Neither costs a draw call.
  */
 
-import { craneGeometry, farGeometry, nearGeometry, roofPropGeometry } from './shapes.js';
+import { craneGeometry, farGeometry, nearGeometry, roofPropGeometry, scaffoldingGeometry } from './shapes.js';
 import {
   makeMassingDepthMaterial,
   patchFacade,
@@ -219,7 +219,9 @@ export class CityMesh {
     const colour = new THREE.Color();
     const roofCandidates = [];
     const craneCandidates = [];
+    const scaffoldCandidates = [];
     const churnEligible = Boolean(manifest.flags && manifest.flags.churn);
+    const ageEligible = Boolean(manifest.flags && manifest.flags.age);
 
     for (const [archetype, tiers] of byArchetype) {
       for (const tier of ['near', 'far']) {
@@ -301,6 +303,13 @@ export class CityMesh {
         if (detailed && churnEligible && building.topChurn) {
           craneCandidates.push({ x, z, width, depth, height, seed });
         }
+
+        // Scaffolding wraps the building's own exact footprint and height, so
+        // it is built from the same matrix as the building itself rather than
+        // a separately-scaled prop.
+        if (detailed && ageEligible && building.isNew) {
+          scaffoldCandidates.push(matrix.clone());
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
@@ -324,6 +333,7 @@ export class CityMesh {
 
     this._addRoofProps(roofCandidates);
     this._addCranes(craneCandidates);
+    this._addScaffolding(scaffoldCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
@@ -518,6 +528,16 @@ export class CityMesh {
         } else if (lens === 'author') {
           const author = authorTint ? this.source.s(building.author) : '';
           colour.copy(author ? new THREE.Color().setHSL(hueFor(author), 0.45, 0.55) : new THREE.Color(0x777777));
+        } else if (lens === 'era') {
+          // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
+          // building's own age relative to the rest of the repo (S3).
+          const ERA_COLOURS = { old: 0x8a5a44, mid: 0x8f97a3, new: 0xbfe3ef };
+          colour.copy(new THREE.Color(ERA_COLOURS[building.era] || ERA_COLOURS.mid));
+        } else if (lens === 'heat') {
+          // Cool grey (stable) through amber to red (hottest): recent,
+          // decay-weighted churn, not lifetime totals (S4).
+          const value = Math.max(0, Math.min(1, building.heat || 0));
+          colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
         } else {
           const author = authorTint ? this.source.s(building.author) : '';
           colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
@@ -600,6 +620,31 @@ export class CityMesh {
     this._bridgeMesh = null;
   }
 
+  /**
+   * Scaffolding on every building born in the newest slice of the repo's
+   * history -- "new buildings still have scaffolding up" (S2). One instanced
+   * mesh, matrices copied straight from the buildings themselves, so it
+   * wraps each one exactly with no extra per-building draw call.
+   */
+  _addScaffolding(matrices) {
+    if (!matrices.length) return;
+    const THREE = this.THREE;
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xe8b04b,
+      roughness: 0.6,
+      metalness: 0.5,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const mesh = new THREE.InstancedMesh(scaffoldingGeometry(THREE), material, matrices.length);
+    mesh.name = 'scaffolding';
+    // Scenery around the building, not a separate click target.
+    mesh.raycast = () => {};
+    matrices.forEach((matrix, index) => mesh.setMatrixAt(index, matrix));
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
   _addGround(bx, bz, bw, bh, buildings) {
     const THREE = this.THREE;
     const pad = Math.max(40, Math.max(bw, bh) * 0.18);
@@ -655,12 +700,24 @@ export class CityMesh {
     mesh.receiveShadow = true;
     const matrix = new THREE.Matrix4();
     const white = new THREE.Color(0xffffff);
+    // Ground heat (S5): a district's pavement warms in proportion to its own
+    // share of recent activity, only when churn itself means anything --
+    // "this neighbourhood is under active development", relative to its own
+    // buildings, not the whole city. The instance colour multiplies the
+    // plate's base tint, so heat 0 stays exactly today's plain grey plate.
+    const churnEligible = Boolean(this.source.manifest.flags && this.source.manifest.flags.churn);
+    const heatColour = new THREE.Color(0xff9046);
+    const colour = new THREE.Color();
     districts.forEach((district, index) => {
       const [x, z, w, h] = district.rect;
       matrix.makeScale(w, 1, h);
       matrix.setPosition(x + w / 2, 0.03, z + h / 2);
       mesh.setMatrixAt(index, matrix);
-      mesh.setColorAt(index, white);
+      colour.copy(white);
+      if (churnEligible && district.heat) {
+        colour.lerp(heatColour, Math.min(1, district.heat) * 0.7);
+      }
+      mesh.setColorAt(index, colour);
     });
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;

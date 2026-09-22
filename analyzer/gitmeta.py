@@ -31,6 +31,17 @@ BULK_FRACTION = 0.2
 BULK_ABSOLUTE_CAP = 200
 MAX_COUPLING_PAIRS = 200_000
 
+# Activity buckets are calendar months, counted back from the repo's own
+# newest commit -- never wall-clock "now" -- so an old clone still shows its
+# newest files as new, and the test suite stays deterministic regardless of
+# when it runs.
+ACTIVITY_BUCKETS = 24
+BUCKET_DAYS = 30.0
+# Half-life for the "hot vs. stable" score: a commit from a month ago counts
+# for half as much as one from today, so lifetime churn (which cranes already
+# used before this) and *recent* churn tell different stories.
+HEAT_HALF_LIFE_DAYS = 30.0
+
 
 @dataclass
 class FileGit:
@@ -38,10 +49,20 @@ class FileGit:
     commits: int = 0
     added: int = 0
     deleted: int = 0
+    first_ts: float = 0.0
     last_ts: float = 0.0
     last_author: str = ""
     last_message: str = ""
     hashes: list[str] = field(default_factory=list)
+    # (timestamp, added+deleted) for every commit touching this file. Kept
+    # only long enough to derive `activity`/`recent_churn` below -- it is not
+    # itself exposed past gitmeta.py.
+    commit_log: list[tuple[float, int]] = field(default_factory=list)
+    # Filled by `_finalize_activity` once the repo's newest commit is known:
+    # monthly commit counts, most recent first, and an exponentially
+    # decayed churn score (half-life `HEAT_HALF_LIFE_DAYS`).
+    activity: list[int] = field(default_factory=lambda: [0] * ACTIVITY_BUCKETS)
+    recent_churn: float = 0.0
 
     @property
     def primary_author(self) -> str:
@@ -203,6 +224,9 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
             record.added += added
             record.deleted += deleted
             record.hashes.append(commit_hash)
+            if ts:
+                record.first_ts = ts if not record.first_ts else min(record.first_ts, ts)
+                record.commit_log.append((ts, added + deleted))
             if ts >= record.last_ts:
                 record.last_ts = ts
                 record.last_author = author
@@ -213,7 +237,28 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
     index.available = index.commit_count > 0
     if not index.available:
         index.reason = "no commit history"
+        return index
+
+    _finalize_activity(index)
     return index
+
+
+def _finalize_activity(index: "GitIndex") -> None:
+    """Turn each file's raw commit log into monthly buckets and a heat score.
+
+    Both are relative to the *repo's* newest commit (``index.last_ts``), never
+    wall-clock time: an old clone should show its own newest files as new, and
+    the buckets must not shift every time the test suite runs.
+    """
+    now = index.last_ts
+    for record in index.files.values():
+        for ts, churn in record.commit_log:
+            days_ago = max(0.0, (now - ts) / 86400.0)
+            bucket = min(ACTIVITY_BUCKETS - 1, int(days_ago // BUCKET_DAYS))
+            record.activity[bucket] += 1
+            record.recent_churn += churn * (0.5 ** (days_ago / HEAT_HALF_LIFE_DAYS))
+        # The raw log is only a scratch pad for the two derived fields above.
+        record.commit_log = []
 
 
 def _iso_to_ts(iso: str) -> float:

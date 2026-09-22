@@ -55,6 +55,18 @@ function metricList(rows) {
   return dl;
 }
 
+function sparkline(activity) {
+  if (!activity || !activity.length || !activity.some((v) => v > 0)) return null;
+  const max = Math.max(1, ...activity);
+  // activity[0] is the most recent month; lay the bars oldest-to-newest,
+  // left to right, the way a calendar reads.
+  const bars = activity
+    .slice()
+    .reverse()
+    .map((value) => el('span', { className: 'spark-bar', style: `height:${Math.max(2, Math.round((value / max) * 28))}px` }));
+  return el('div', { className: 'sparkline' }, bars);
+}
+
 export async function renderBuilding(source, id) {
   const index = await source.index();
   const cols = columnIndex(source.manifest.indexColumns);
@@ -86,11 +98,21 @@ export async function renderBuilding(source, id) {
     rows.push(['under active construction', building.topChurn ? 'yes (top decile of churn)' : 'no']);
   }
   if (flags.recency) rows.push(['recency', `${Math.round(building.recencyDays || 0)} days since last commit`]);
+  if (flags.age) {
+    rows.push(['age', `${Math.round(building.ageDays || 0)} days old (${building.era})`]);
+    rows.push(['new construction', building.isNew ? 'yes' : 'no']);
+  }
+  if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((building.heat || 0) * 100)}th percentile`]);
   if (flags.authorship && building.author >= 0) {
     rows.push(['author', source.s(building.author)]);
     rows.push(['ownership', `${Math.round((building.ownership || 0) * 100)}% of lines`]);
   }
   root.append(metricList(rows));
+
+  if (flags.churn && building.activity) {
+    const spark = sparkline(building.activity);
+    if (spark) root.append(el('h2', { textContent: 'Commits per month (last 24 months)' }), spark);
+  }
 
   const flyButton = el('button', { className: 'chip-btn', textContent: 'Fly here in the main window →' });
   flyButton.addEventListener('click', () => flyTo(id));
@@ -159,6 +181,8 @@ export async function renderDistrict(source, id) {
     ['README', district.hasReadme ? (source.locked ? '(locked)' : source.s(district.readmeRel)) : 'none'],
   ];
   if (flags.authorship) rows.push(['mayor', source.locked ? '(locked)' : source.s(district.mayor) || 'unknown']);
+  if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((district.heat || 0) * 100)}% of scale`]);
+  if (flags.age) rows.push(['new files', `${district.newFiles || 0} of ${district.buildings}`]);
   root.append(metricList(rows));
 
   const index = await source.index();
