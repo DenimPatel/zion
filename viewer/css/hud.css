@@ -322,7 +322,7 @@ h2 {
 }
 .health-item:hover { border-color: var(--accent-dim); color: var(--accent); }
 .health-item .meta { color: var(--ink-dim); float: right; margin-left: 6px; }
-.health-cycle { border-left: 3px solid; padding-left: 6px; margin: 4px 0 6px; }
+.health-cycle, .health-pair { border-left: 3px solid; padding-left: 6px; margin: 4px 0 6px; }
 .health-empty { color: #7c8799; font-size: 11px; font-style: italic; }
 #lens-key { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 #lens-key span { display: inline-flex; align-items: center; gap: 4px; }

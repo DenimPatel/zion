@@ -23,6 +23,8 @@ import {
   LENS_BANDS,
   lensBand,
   lensColour,
+  MAIN_SEQUENCE_BANDS,
+  mainSequenceBand,
   healthSignal,
   plinthTop,
 } from './city.js';
@@ -197,6 +199,14 @@ const LEGEND_KEYS = {
   experts: { kind: null, short: 'Who to ask', colour: 0xb28ad6, reason: 'listed in the inspector, not drawn' },
   delta: { kind: 'mesh', target: 'survey-stakes', short: 'Survey stakes — changed', colour: DELTA_COLOURS.added, query: 'is:added OR is:grown OR is:shrunk' },
   timeline: { kind: null, short: 'History', colour: 0xe8b04b, reason: 'the History slider replays it' },
+  defects: { kind: 'mesh', target: 'defect-lamps', short: 'Warning lamps — defect-prone', colour: HEALTH_COLOURS.defect, query: 'is:defect' },
+  hubs: { kind: 'mesh', target: 'hub-collars', short: 'Steel collars — hubs', colour: HEALTH_COLOURS.hub, query: 'is:hub' },
+  debt: { kind: 'mesh', target: 'debt-tags', short: 'Yellow tags — TODO / FIXME', colour: 0xffd23f, query: 'is:debt' },
+  trend: { kind: null, short: 'Trend', colour: 0xff8a3d, reason: 'a colour lens: Filter tab → trend', query: 'is:warming' },
+  hidden_coupling: { kind: 'overlay', target: 'hidden-arcs', short: 'Dashed arcs — hidden coupling', colour: LINK_COLOURS.hidden, query: 'is:hiddencoupling' },
+  clones: { kind: 'overlay', target: 'clone-links', short: 'Twin links — copied code', colour: LINK_COLOURS.clone, query: 'is:clone' },
+  abstractness: { kind: null, short: 'Main sequence', colour: 0x2f9e6e, reason: 'City Hall charts it; Filter tab → main sequence' },
+  teams: { kind: null, short: 'Coordination cost', colour: 0xb28ad6, reason: 'listed in the folder inspector, not drawn' },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
@@ -325,7 +335,7 @@ function disabledReason(id) {
     weathering: /weather|commit dates/i, new_construction: /birth/i, skybridges: /coupling/i,
     downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
     untested: /test/i, imports: /import/i, instability: /import/i, district_coupling: /coupling/i,
-    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i,
+    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i, defects: /fix/i,
   }[id];
   const note = words ? notes.find((n) => words.test(n)) : null;
   if (note) return note;
@@ -335,6 +345,13 @@ function disabledReason(id) {
   if (id === 'codeowners') return 'No CODEOWNERS file in the repository.';
   if (id === 'district_coupling') return 'No two folders keep changing together.';
   if (id === 'delta') return 'No baseline yet: build again after the repository changes, or build with --compare REV.';
+  if (id === 'hubs') return 'No file is both widely imported and a heavy importer.';
+  if (id === 'debt') return 'No TODO, FIXME, HACK or XXX comments in this repository\'s own code.';
+  if (id === 'clones') return 'No two files share a long copied block.';
+  if (id === 'hiddenCoupling' || id === 'hidden_coupling') return 'Every pair that changes together across folders also imports one way or the other.';
+  if (id === 'trend' || id === 'rising') return 'Needs 10+ commits over at least five months to tell rising from cooling.';
+  if (id === 'abstractness') return 'No folder has enough type definitions and resolved imports to place on the main sequence.';
+  if (id === 'teams') return 'Needs more than one author.';
   return 'Not drawn: the repository history is too thin for this signal to mean anything.';
 }
 
@@ -557,6 +574,30 @@ const HEALTH_SECTIONS = [
     id: 'drift', title: 'CODEOWNERS drift', colour: 0x8c5ce6, flag: 'codeowners',
     text: 'The people CODEOWNERS names for these files wrote almost none of them.',
   },
+  {
+    id: 'rising', title: 'Rising hotspots', colour: 0xff2d55, flag: 'trend',
+    text: 'Hotspots that got busier this quarter than the one before: the refactor that gets dearer every week.',
+  },
+  {
+    id: 'defects', title: 'Defect-prone files', colour: HEALTH_COLOURS.defect, flag: 'defects',
+    text: 'An unusually large share of their commits are fixes. Bugs cluster: the next one is likely here.',
+  },
+  {
+    id: 'hubs', title: 'Hubs', colour: HEALTH_COLOURS.hub, flag: 'hubs',
+    text: 'Imported by many and importing many: a change ripples both ways. Split along the callers.',
+  },
+  {
+    id: 'clones', title: 'Copied code', colour: LINK_COLOURS.clone, flag: 'clones', pairs: true,
+    text: 'Pairs of files sharing a long near-identical block. Fix one, and the other keeps the bug.',
+  },
+  {
+    id: 'hiddenCoupling', title: 'Hidden coupling', colour: LINK_COLOURS.hidden, flag: 'hiddenCoupling', pairs: true,
+    text: 'Pairs in different folders that change together with no import between them. Name the contract.',
+  },
+  {
+    id: 'debt', title: 'Written-down debt', colour: 0xffd23f, flag: 'debt',
+    text: 'Files with the most TODO / FIXME / HACK comments. The report lists each marker by line.',
+  },
 ];
 
 // Extra Health cards that are not one ranked list of files.
@@ -632,6 +673,15 @@ function renderHealth() {
           for (const id of members) li.append(healthItem(id));
           list.append(li);
         });
+      } else if (section.pairs) {
+        for (const pair of review[section.id] || []) {
+          if (pair.length < 2) continue;
+          const li = document.createElement('li');
+          li.className = 'health-pair';
+          li.style.borderColor = hexColour(section.colour);
+          li.append(healthItem(pair[0]), document.createTextNode(' ↔ '), healthItem(pair[1]));
+          list.append(li);
+        }
       } else {
         for (const id of review[section.id] || []) {
           const li = document.createElement('li');
@@ -893,7 +943,7 @@ function renderLensKey() {
   // you are looking at falls in each band, not a legend in the abstract.
   const resident = context.resident || [];
   if (lens.value === 'health') {
-    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+    const names = { hotspot: 'hotspot', defect: 'defect-prone', cycle: 'import cycle', violation: 'layering violation', hub: 'hub', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
     const flags = state.source.manifest.flags || {};
     const counts = {};
     for (const b of resident) {
@@ -908,6 +958,13 @@ function renderLensKey() {
       counts.set(band, (counts.get(band) || 0) + 1);
     }
     for (const band of LENS_BANDS[lens.value]) item(band.colour, band.label, counts.get(band) || 0);
+  } else if (lens.value === 'mainsequence') {
+    const counts = new Map();
+    for (const b of resident) {
+      const band = mainSequenceBand(state.source.manifest.districts[b.district]);
+      counts.set(band, (counts.get(band) || 0) + 1);
+    }
+    for (const band of MAIN_SEQUENCE_BANDS) item(band.colour, band.label, counts.get(band) || 0);
   } else if (lens.value === 'heat') {
     item('linear-gradient(90deg,#4b5563,#ff4d2e)', 'stable → hottest, by recent decay-weighted churn');
   } else if (lens.value === 'downtown') {
@@ -1421,7 +1478,13 @@ async function updateSelection(selection) {
         partners = [];
       }
     }
-    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, positionOf });
+    if (overlay) {
+      overlay.showBuilding(b, {
+        outgoing, incoming, partners, positionOf,
+        hidden: b.hiddenCoupling || [],
+        clones: b.cloneOf || [],
+      });
+    }
   } else if (selection.kind === 'district') {
     const d = selection.district;
     const deps = manifest.dependencies;
@@ -3691,6 +3754,9 @@ async function runSelfTest() {
       ['survey-stakes', flags.delta, (x) => Boolean(x.delta)],
       ['owner-notices', flags.codeowners, (x) => x.ownerDrift],
       ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
+      ['defect-lamps', flags.defects, (x) => x.isDefect],
+      ['hub-collars', flags.hubs, (x) => x.isHub && (x.height || 0) > 6],
+      ['debt-tags', flags.debt, (x) => x.debt && x.debt.length > 0],
     ];
     // Props stand only on the detailed (near) tier, so only a building drawn
     // there can be expected to carry one -- whichever files happen to sit near
@@ -3776,6 +3842,62 @@ async function runSelfTest() {
     context.fly.apply();
   }
 
+  // 5a. The deeper signals: filter words agree with the analyzer's totals, and
+  //     a selected building draws its hidden-coupling and clone partners.
+  {
+    const manifest = state.source.manifest;
+    const review = manifest.review || {};
+    const totals = review.totals || {};
+    const counts = {
+      defect: countFor('is:defect'), rising: countFor('is:rising'), hub: countFor('is:hub'),
+      hiddencoupling: countFor('is:hiddencoupling'), clone: countFor('is:clone'), debt: countFor('is:debt'),
+    };
+    const debtFiles = (manifest.districts || []).reduce((sum, d) => sum + (d.debt ? 1 : 0), 0);
+    check('filter-deeper-words',
+      (counts.defect || 0) === (totals.defects || 0) && (counts.rising || 0) === (totals.rising || 0) &&
+        (counts.hub || 0) === (totals.hubs || 0) && (totals.debt ? (counts.debt || 0) > 0 && debtFiles > 0 : !counts.debt),
+      JSON.stringify(counts));
+
+    const overlay = context.overlay;
+    const withHidden = context.resident.find((b) => b.hiddenCoupling && b.hiddenCoupling.length);
+    if (overlay && withHidden) {
+      context.inspector.showBuilding(withHidden);
+      await updateSelection({ kind: 'building', building: withHidden });
+      const arcs = overlay.group.children.filter((c) => c.name === 'hidden-arcs');
+      check('overlay-hidden-coupling', arcs.length === 1, `${arcs.length} dashed arc meshes for ${withHidden.hiddenCoupling.length} partners`);
+      const text = context.inspector.metrics.textContent;
+      check('inspector-hidden-coupling', /Hidden coupling/.test(text), 'the Structure section names the partners');
+      context.inspector.hide();
+      await updateSelection(null);
+    } else {
+      check('overlay-hidden-coupling', true, 'no hidden coupling in this city');
+      check('inspector-hidden-coupling', true, 'no hidden coupling in this city');
+    }
+    const withClone = context.resident.find((b) => b.cloneOf && b.cloneOf.length);
+    if (overlay && withClone) {
+      await updateSelection({ kind: 'building', building: withClone });
+      const links = overlay.group.children.filter((c) => c.name === 'clone-links');
+      check('overlay-clones', links.length === 1, `${links.length} twin link meshes`);
+      await updateSelection(null);
+    } else {
+      check('overlay-clones', true, 'no clone twins in this city');
+    }
+
+    // Every new lens paints something, and its key counts every resident building.
+    const lensSelect = document.getElementById('lens-select');
+    const before = lensSelect.value;
+    const failed = [];
+    for (const lens of ['trend', 'defects', 'debt', 'depth', 'coupling', 'mainsequence']) {
+      applyLens(lens);
+      const keyTotal = [...document.querySelectorAll('#lens-key > span')]
+        .map((span) => Number((span.textContent.split('·').pop() || '').replace(/[^\d]/g, '')) || 0)
+        .reduce((a, v) => a + v, 0);
+      if (keyTotal !== context.resident.length) failed.push(`${lens}: key ${keyTotal} of ${context.resident.length}`);
+    }
+    applyLens(before);
+    check('deeper-lenses-keyed', failed.length === 0, failed.join('; ') || 'six lenses, every building counted');
+  }
+
   // 5b. Plan view and minimap.
   {
     const startPosition = context.fly.position.clone();
@@ -3787,10 +3909,15 @@ async function runSelfTest() {
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     check('plan-view-overhead', state.mode === 'top' && forward.y < -0.99,
       `mode ${state.mode}, forward.y ${forward.y.toFixed(4)}`);
+    // Out, then back in: whichever end of the range the plan opened at, one of
+    // the two moves is free, and both must be answered.
     const heightBefore = context.top.height;
+    canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, clientX: 400, clientY: 300, bubbles: true, cancelable: true }));
+    const heightOut = context.top.height;
     canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 300, bubbles: true, cancelable: true }));
-    check('plan-view-zoom', context.top.height < heightBefore,
-      `${heightBefore.toFixed(0)}m -> ${context.top.height.toFixed(0)}m`);
+    const heightIn = context.top.height;
+    check('plan-view-zoom', heightOut > heightBefore - 1e-6 && heightIn < heightOut && (heightOut > heightBefore || heightIn < heightBefore),
+      `${heightBefore.toFixed(0)}m -> out ${heightOut.toFixed(0)}m -> in ${heightIn.toFixed(0)}m`);
     const planView = viewFromHash(viewToHash(currentView()));
     check('plan-view-link', Boolean(planView) && planView.mode === 'top', planView ? planView.mode : 'unreadable');
     const planPosition = camera.position.clone();

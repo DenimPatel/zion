@@ -38,6 +38,9 @@ import {
   ownerNoticeGeometry,
   surveyStakeGeometry,
   trafficConeGeometry,
+  defectLampGeometry,
+  hubCollarGeometry,
+  debtTagGeometry,
 } from './parts/structure.js';
 import {
   makeMassingDepthMaterial,
@@ -114,6 +117,8 @@ export const HEALTH_COLOURS = {
   knowledge: 0xffd23f,
   orphan: 0x8a8f99,
   violation: 0xe0245e,
+  defect: 0xff2d55,
+  hub: 0x3aa0ff,
   healthy: 0x56657a,
 };
 
@@ -144,6 +149,35 @@ export const LENS_BANDS = {
     { label: 'shrunk', colour: DELTA_COLOURS.shrunk, test: (b) => b.delta === 'shrunk' },
     { label: 'unchanged', colour: DELTA_COLOURS.unchanged, test: () => true },
   ],
+  trend: [
+    { label: 'rising hotspot', colour: 0xff2d55, test: (b) => b.risingHotspot },
+    { label: 'rising: busier this quarter', colour: 0xff8a3d, test: (b) => b.trend > 0 },
+    { label: 'cooling: quieter this quarter', colour: 0x4d8dff, test: (b) => b.trend < 0 },
+    { label: 'steady', colour: 0x4b5563, test: () => true },
+  ],
+  defects: [
+    { label: 'defect-prone (top decile of fixes)', colour: 0xff2d55, test: (b) => b.isDefect },
+    { label: 'half or more commits are fixes', colour: 0xff8a3d, test: (b) => (b.fixRatio || 0) >= 0.5 && (b.fixCommits || 0) >= 2 },
+    { label: 'some fixes', colour: 0xd9c24a, test: (b) => (b.fixCommits || 0) > 0 },
+    { label: 'no fix commits', colour: 0x3e4a44, test: () => true },
+  ],
+  debt: [
+    { label: '5+ TODO / FIXME markers', colour: 0xffb000, test: (b) => (b.debt || []).length >= 5 },
+    { label: '2–4', colour: 0xe0c050, test: (b) => (b.debt || []).length >= 2 },
+    { label: '1', colour: 0xa89a5a, test: (b) => (b.debt || []).length === 1 },
+    { label: 'none', colour: 0x3a3e46, test: () => true },
+  ],
+  depth: [
+    { label: 'hub: many in, many out', colour: HEALTH_COLOURS.hub, test: (b) => b.isHub },
+    { label: 'import chain 6+ deep', colour: 0xb36bff, test: (b) => (b.importDepth || 0) >= 6 },
+    { label: '3–5 deep', colour: 0x7b83d9, test: (b) => (b.importDepth || 0) >= 3 },
+    { label: '0–2 deep', colour: 0x3e4658, test: () => true },
+  ],
+  coupling: [
+    { label: 'copied code (clone twin)', colour: 0x2fd4e0, test: (b) => (b.cloneOf || []).length > 0 },
+    { label: 'hidden coupling (co-change, no import)', colour: 0xb07cff, test: (b) => (b.hiddenCoupling || []).length > 0 },
+    { label: 'neither', colour: 0x3a3e46, test: () => true },
+  ],
   complexity: [
     { label: '30+ decision points in one function', colour: 0xe0245e, test: (b) => (b.braceComplexity || 0) >= 30 },
     { label: '15–29', colour: 0xff9a2e, test: (b) => (b.braceComplexity || 0) >= 15 },
@@ -151,6 +185,22 @@ export const LENS_BANDS = {
     { label: 'under 8', colour: 0x4a6a5a, test: () => true },
   ],
 };
+
+/**
+ * The main-sequence lens is a property of the folder, not the file: every
+ * building takes its district's distance from the main sequence (Martin's D).
+ */
+export const MAIN_SEQUENCE_BANDS = [
+  { label: 'zone of pain: stable and concrete', colour: 0xe0245e, test: (d) => d && d.zone === 'pain' },
+  { label: 'zone of uselessness: abstract, unused', colour: 0xb36bff, test: (d) => d && d.zone === 'uselessness' },
+  { label: 'far from the main sequence (D > 0.5)', colour: 0xff9a2e, test: (d) => d && d.distance > 0.5 },
+  { label: 'near the main sequence', colour: 0x2f9e6e, test: (d) => d && d.distance >= 0 },
+  { label: 'too few types to say', colour: 0x3a3e46, test: () => true },
+];
+
+export function mainSequenceBand(district) {
+  return MAIN_SEQUENCE_BANDS.find((band) => band.test(district)) || MAIN_SEQUENCE_BANDS[MAIN_SEQUENCE_BANDS.length - 1];
+}
 
 /** The first band a building falls in, for a banded lens. */
 export function lensBand(lens, building) {
@@ -165,12 +215,14 @@ export function lensBand(lens, building) {
 const PROP_PREFIXES = [
   'roof-props', 'cranes', 'heat-beacons', 'scaffolding', 'antennas', 'sole-tenant-markers', 'knowledge-flags',
   'hazard-barriers', 'raking-shores', 'vacant-boards', 'cycle-pennants', 'no-entry-signs', 'traffic-cones',
-  'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins',
+  'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins', 'defect-lamps', 'hub-collars', 'debt-tags',
 ];
 export function healthSignal(building, flags = {}) {
   if (flags.hotspots && building.isHotspot) return 'hotspot';
+  if (flags.defects && building.isDefect) return 'defect';
   if (flags.imports && building.cycle) return 'cycle';
   if (flags.layering && building.violations) return 'violation';
+  if (flags.hubs && building.isHub) return 'hub';
   if (building.oversized) return 'oversized';
   if (flags.knowledge && building.knowledgeRisk) return 'knowledge';
   if (flags.imports && building.orphan) return 'orphan';
@@ -335,6 +387,7 @@ export function lensColour(THREE, source, lens, building, archetype, territoryAu
     return out.set(0x4b5563).lerp(new THREE.Color(0xff4d2e), value);
   }
   if (lens === 'health') return out.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
+  if (lens === 'mainsequence') return out.set(mainSequenceBand(manifest.districts && manifest.districts[building.district]).colour);
   if (LENS_BANDS[lens]) return out.set(lensBand(lens, building).colour);
   if (lens === 'territory') {
     // One author's territory: brightness is their share of the file's
@@ -445,7 +498,13 @@ export class CityMesh {
     const stakeCandidates = [];
     const noticeCandidates = [];
     const pinCandidates = [];
+    const lampCandidates = [];
+    const collarCandidates = [];
+    const tagCandidates = [];
     const notes = options.notes || null;
+    const defectEligible = option('defects', flag('defects'));
+    const hubEligible = option('hubs', flag('hubs'));
+    const debtEligible = option('debt', flag('debt'));
     const violationEligible = option('violations', flag('layering'));
     const untestedEligible = option('untested', flag('tests'));
     const complexityEligible = option('complexity', flag('complexity'));
@@ -621,6 +680,15 @@ export class CityMesh {
         if (detailed && codeownersEligible && building.ownerDrift) {
           noticeCandidates.push({ x, z, width, depth, base });
         }
+        if (detailed && defectEligible && building.isDefect) {
+          lampCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && hubEligible && building.isHub && height > 6) {
+          collarCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && debtEligible && building.debt && building.debt.length) {
+          tagCandidates.push({ x, z, width, depth, height, base, count: Math.min(5, building.debt.length) });
+        }
         // A note is the reader's own, so it is drawn at any tier: a pin you
         // placed should not vanish because you flew away from it.
         if (notes && notes.has(building.id)) {
@@ -666,6 +734,9 @@ export class CityMesh {
     this._addBracing(braceCandidates);
     this._addSurveyStakes(stakeCandidates);
     this._addNotePins(pinCandidates);
+    this._addDefectLamps(lampCandidates);
+    this._addHubCollars(collarCandidates);
+    this._addDebtTags(tagCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addRegions(manifest.regions || []);
     this._addPlinthShadows(manifest.regions || []);
@@ -1209,6 +1280,83 @@ export class CityMesh {
       matrix.setPosition(x, plot.base || 0, z);
       mesh.setMatrixAt(index, matrix);
     });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A red warning lamp on the roof of a defect-prone file, lit so it reads at dusk. */
+  _addDefectLamps(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.4,
+      emissive: new THREE.Color(0x5a0a10),
+    });
+    const mesh = new THREE.InstancedMesh(defectLampGeometry(THREE), material, list.length);
+    mesh.name = 'defect-lamps';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((roof, index) => {
+      const size = Math.min(7, Math.max(2.4, Math.min(roof.width, roof.depth) * 0.4));
+      matrix.makeScale(size, size, size);
+      // The opposite corner from the cycle pennant, so a file with both shows both.
+      matrix.setPosition(roof.x + roof.width * 0.22, roof.height, roof.z + roof.depth * 0.22);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A steel collar around a hub's shaft, at two-thirds of its drawn height. */
+  _addHubCollars(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      color: HEALTH_COLOURS.hub,
+      roughness: 0.35,
+      metalness: 0.6,
+      emissive: new THREE.Color(0x0a2a55),
+    });
+    const mesh = new THREE.InstancedMesh(hubCollarGeometry(THREE), material, list.length);
+    mesh.name = 'hub-collars';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      const band = Math.min(3.2, Math.max(1.2, plot.height * 0.04));
+      matrix.makeScale(plot.width, band, plot.depth);
+      matrix.setPosition(plot.x, plot.height * 0.66, plot.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** One yellow tag per debt marker (up to five), hung across the south facade. */
+  _addDebtTags(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const total = candidates.reduce((sum, c) => sum + c.count, 0);
+    const count = Math.min(MAX_HEALTH_PROPS, total);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
+    const mesh = new THREE.InstancedMesh(debtTagGeometry(THREE), material, count);
+    mesh.name = 'debt-tags';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    let index = 0;
+    for (const plot of candidates) {
+      const size = Math.min(2.4, Math.max(1.1, plot.width * 0.16));
+      const row = Math.min(plot.height * 0.5, 6 + size);
+      for (let i = 0; i < plot.count && index < count; i++) {
+        const along = plot.count === 1 ? 0 : (i / (plot.count - 1) - 0.5) * plot.width * 0.7;
+        matrix.makeScale(size, size, size);
+        matrix.setPosition(plot.x + along, Math.max(plot.base + 1.5, row - (i % 2) * size * 0.4), plot.z + plot.depth / 2 + 0.06);
+        mesh.setMatrixAt(index++, matrix);
+      }
+    }
+    mesh.count = index;
     mesh.instanceMatrix.needsUpdate = true;
     this.group.add(mesh);
   }

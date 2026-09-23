@@ -434,7 +434,7 @@ export class TopCamera {
     this.bounds = bounds;
     const span = Math.max(bounds[2], bounds[3]);
     // Never low enough for the tallest tower to reach the lens.
-    this.minHeight = Math.max(30, span * 0.08, (this.skyline || 0) * 1.5);
+    this.minHeight = Math.max(30, span * 0.08, (this.skyline || 0) * 1.15 + 20);
     // High enough that the whole plan fits a 60 degree frustum with margin.
     this.maxHeight = Math.max(this.minHeight * 2, span * 3.4);
   }

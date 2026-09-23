@@ -85,6 +85,24 @@ class ParserSignalTests(unittest.TestCase):
         self.assertFalse(set(a) & set(c))
 
 
+class ContractTests(unittest.TestCase):
+    def test_viewer_flag_bits_mirror_emit(self):
+        """`facets.js::FLAG_BITS` is kept by hand; it must match emit.py's FLAG_* exactly."""
+        import re
+
+        from analyzer import emit
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", "viewer", "js", "facets.js"), encoding="utf-8") as fh:
+            text = fh.read()
+        block = text[text.index("const FLAG_BITS = {") : text.index("};", text.index("const FLAG_BITS = {"))]
+        viewer = {int(bit) for bit in re.findall(r"1 << (\d+)", block)}
+        python = {
+            value.bit_length() - 1 for name, value in vars(emit).items() if name.startswith("FLAG_") and isinstance(value, int)
+        }
+        self.assertEqual(viewer, python)
+
+
 class DeeperSignalTests(TempRepoCase):
     def _history_repo(self) -> str:
         """Six months of history: a fix-prone file, a rising one, a cooling one."""

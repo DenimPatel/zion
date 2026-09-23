@@ -63,6 +63,9 @@
           <p><code>is:hotspot</code> <code>is:cycle</code> <code>is:violation</code> <code>is:untested</code>
             <code>is:untestedrisk</code> <code>is:braced</code> <code>is:drift</code> <code>is:unowned</code>
             <code>is:added</code> <code>is:grown</code> <code>is:new</code> <code>is:orphan</code> <code>is:knowledge</code></p>
+          <p><code>is:defect</code> <code>is:rising</code> <code>is:warming</code> <code>is:cooling</code> <code>is:hub</code>
+            <code>is:clone</code> <code>is:hiddencoupling</code> <code>is:debt</code> <code>is:deep</code>
+            <code>fixes&gt;3</code> <code>todo&gt;2</code> <code>depth&gt;=5</code></p>
           <p>Words are ANDed; <code>-</code> negates; <code>OR</code> joins alternatives.</p>
         </details>
         <p id="filter-summary" class="hint">every building shown</p>
@@ -80,6 +83,12 @@
           <option value="complexity">colour: branchiest function</option>
           <option value="delta">colour: changed since baseline</option>
           <option value="territory">colour: one author’s territory</option>
+          <option value="trend">colour: trend (rising vs cooling)</option>
+          <option value="defects">colour: fix commits (defect-prone)</option>
+          <option value="debt">colour: TODO / FIXME debt</option>
+          <option value="depth">colour: import depth and hubs</option>
+          <option value="coupling">colour: copied code and hidden coupling</option>
+          <option value="mainsequence">colour: folder on the main sequence</option>
         </select>
         <select id="lens-author" title="whose territory" hidden></select>
         <div id="lens-key" class="hint"></div>
