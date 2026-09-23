@@ -188,7 +188,13 @@ const BUILDERS = {
   monument: (THREE) => mergeParts(THREE, [
     box(THREE, { w: 1.0, d: 1.0, y0: 0, y1: 0.08, part: PART_PODIUM }),
     box(THREE, { w: 0.74, d: 0.74, y0: 0.07, y1: 0.16, part: PART_FIXED }),
-    obelisk(THREE, { rTop: 0.2, rBottom: 0.36, y0: 0.15, y1: 0.88, part: PART_BODY }),
+    // A second, narrower step -- one plinth reads as a base; two read as
+    // something deliberately built up to, the way real monuments are.
+    box(THREE, { w: 0.56, d: 0.56, y0: 0.15, y1: 0.23, part: PART_FIXED }),
+    obelisk(THREE, { rTop: 0.2, rBottom: 0.32, y0: 0.22, y1: 0.86, part: PART_BODY }),
+    // A cornice collar at the shaft/pyramidion transition, the detail line
+    // real obelisks carry at that same seam.
+    obelisk(THREE, { rTop: 0.23, rBottom: 0.23, y0: 0.85, y1: 0.885, part: PART_FIXED }),
     obelisk(THREE, { rTop: 0.001, rBottom: 0.2, y0: 0.87, y1: 1.0, part: PART_CROWN }),
   ]),
 
@@ -203,14 +209,24 @@ const BUILDERS = {
     dome(THREE, { radius: 0.2, y0: 0.87, height: 0.13, part: PART_CROWN }),
   ]),
 
-  // A park: a grassed mound and three canopies. Height is small by
-  // construction, so this is mostly read from above.
+  // A park: a grassed mound, five canopies, a path and a bench. Height is
+  // small by construction, so this is mostly read from above -- the path and
+  // bench are there for the street-level pass, so a park does not read as an
+  // empty green tile up close.
   park: (THREE) => mergeParts(THREE, [
     box(THREE, { w: 1.0, d: 1.0, y0: 0, y1: 0.12, part: PART_FIXED }),
+    // A paved path, corner to corner, so the green reads as a place people
+    // walk through rather than a lawn nobody enters.
+    box(THREE, { w: 0.1, d: 1.06, x: 0, z: 0, y0: 0.1, y1: 0.13, part: PART_FIXED }),
+    // A bench beside the path.
+    box(THREE, { w: 0.16, d: 0.05, x: 0.14, z: -0.2, y0: 0.13, y1: 0.2, part: PART_FIXED }),
+    box(THREE, { w: 0.16, d: 0.02, x: 0.14, z: -0.24, y0: 0.2, y1: 0.28, part: PART_FIXED }),
     ...[
-      [-0.2, -0.18, 0.3, 0.55],
-      [0.24, 0.06, 0.24, 0.42],
-      [-0.06, 0.26, 0.2, 0.34],
+      [-0.24, -0.3, 0.28, 0.52],
+      [0.28, 0.1, 0.22, 0.4],
+      [-0.1, 0.3, 0.2, 0.32],
+      [-0.32, 0.18, 0.16, 0.28],
+      [0.2, -0.32, 0.18, 0.36],
     ].flatMap(([x, z, spread, top]) => [
       box(THREE, { w: 0.05, d: 0.05, x, z, y0: 0.1, y1: top * 0.55, part: PART_FIXED }),
       tag(
@@ -272,6 +288,23 @@ export function roofPropGeometry(THREE) {
 }
 
 /**
+ * A rooftop beacon: a short mast topped with a glowing orb, planted near a
+ * corner of the roof so it doesn't fight the crown for space. Its colour
+ * tier (dim, amber, red) is decided by which of three instanced meshes a
+ * building's beacon goes into -- see `CityMesh._addHeatBeacons` -- so this
+ * geometry itself carries no colour, just the shape every tier shares.
+ * Reads at a glance the way a real rooftop warning light does: distinct from
+ * the crane (a construction machine on top of the roof) and the antenna (a
+ * mast that keeps rising well past the roofline) both defined below.
+ */
+export function beaconGeometry(THREE) {
+  return mergeParts(THREE, [
+    cylinder(THREE, { rTop: 0.03, rBottom: 0.045, x: 0, z: 0, y0: 0, y1: 0.55, segments: 6, part: PART_PODIUM }),
+    tag(new THREE.SphereGeometry(0.11, 10, 8).translate(0, 0.66, 0), PART_CROWN, 0.55, 0.77),
+  ]);
+}
+
+/**
  * Scaffolding: a lattice of corner poles and horizontal rings wrapping a
  * building's own footprint and height. Unlike the roof props and crane above,
  * this is scaled by the *building's* own instance transform (width, height,
@@ -307,10 +340,36 @@ export function scaffoldingGeometry(THREE) {
  * leaves (S12). Ground-level, unlike the roof props above, since ownership is
  * a property of the whole file rather than something happening on the roof.
  */
+/**
+ * A small triangular pennant, tapering away from the pole -- built by hand
+ * (like `gable()` above) rather than a plane, so it reads as cloth rather
+ * than as a signboard. Double-sided: a flag seen from behind should still
+ * look like a flag, not vanish.
+ */
+function _pennant(THREE, { poleX = 0, y0, y1, length = 0.25, part = PART_CROWN }) {
+  const top = [poleX, y1, 0];
+  const bottom = [poleX, y0, 0];
+  const tip = [poleX + length, (y0 + y1) / 2, 0];
+  const positions = [];
+  const normals = [];
+  const push = (a, b, c, ny) => {
+    for (const point of [a, b, c]) {
+      positions.push(point[0], point[1], point[2]);
+      normals.push(0, 0, ny);
+    }
+  };
+  push(top, bottom, tip, 1); // front face
+  push(tip, bottom, top, -1); // back face, opposite winding and normal
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  return tag(geometry, part, y0, y1);
+}
+
 export function soleTenantMarkerGeometry(THREE) {
   return mergeParts(THREE, [
     cylinder(THREE, { rTop: 0.02, rBottom: 0.02, x: 0, z: 0, y0: 0, y1: 0.6, segments: 5, part: PART_FIXED }),
-    box(THREE, { w: 0.22, d: 0.02, x: 0.11, z: 0, y0: 0.45, y1: 0.6, part: PART_CROWN }),
+    _pennant(THREE, { poleX: 0, y0: 0.42, y1: 0.6, length: 0.28, part: PART_CROWN }),
   ]);
 }
 
@@ -324,6 +383,9 @@ export function antennaGeometry(THREE) {
   return mergeParts(THREE, [
     cylinder(THREE, { rTop: 0.05, rBottom: 0.09, x: 0, z: 0, y0: 0, y1: 0.35, segments: 6, part: PART_PODIUM }),
     cylinder(THREE, { rTop: 0.008, rBottom: 0.03, x: 0, z: 0, y0: 0.3, y1: 1.5, segments: 6, part: PART_CROWN }),
+    // An aircraft warning light at the very tip -- the detail that makes a
+    // real skyline's tallest spires legible as landmarks rather than masts.
+    tag(new THREE.SphereGeometry(0.045, 8, 6).translate(0, 1.5, 0), PART_CROWN, 1.46, 1.55),
   ]);
 }
 
@@ -340,5 +402,13 @@ export function craneGeometry(THREE) {
     box(THREE, { w: 0.9, d: 0.05, x: 0.42, z: 0, y0: 1.28, y1: 1.36, part: PART_SETBACK }),
     box(THREE, { w: 0.22, d: 0.05, x: -0.14, z: 0, y0: 1.28, y1: 1.4, part: PART_CROWN }),
     box(THREE, { w: 0.08, d: 0.08, x: -0.14, z: 0, y0: 1.15, y1: 1.28, part: PART_PODIUM }),
+    // A hook, hanging from the boom's working end -- without it the mast and
+    // boom alone read as an antenna with a crossbar. Stopped short of the
+    // roof so it never appears to skewer the building it stands on.
+    box(THREE, { w: 0.02, d: 0.02, x: 0.82, z: 0, y0: 0.85, y1: 1.28, part: PART_FIXED }),
+    box(THREE, { w: 0.08, d: 0.08, x: 0.82, z: 0, y0: 0.78, y1: 0.86, part: PART_FIXED }),
+    // A warning-light housing at the very top of the mast, the real-world
+    // detail that makes a tower crane legible against a night sky.
+    cylinder(THREE, { rTop: 0.001, rBottom: 0.05, x: 0, z: 0, y0: 1.36, y1: 1.46, segments: 6, part: PART_CROWN }),
   ]);
 }

@@ -39,7 +39,7 @@ LEGEND_SPEC = [
     ("parks", "Test files -> parks", "bool"),
     ("silos", "Data files -> silos (height = rows)", "rows"),
     ("monuments", "Binary artefacts -> monuments", "bool"),
-    ("skybridges", "Files changed in one commit -> skybridges", "pairs"),
+    ("skybridges", "Files changed in one commit -> listed under “Changes together with” in the detail report", "pairs"),
     ("new_construction", "First commit within the newest activity window -> scaffolding", "days"),
     ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile"),
     ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile"),
@@ -810,14 +810,21 @@ def emit_city(
         if progress:
             progress(f"district {district_id:04d} {key}")
 
-    # ---- co-change skybridges ----
+    # ---- co-change pairs ----
     #
     # Coupling pairs are computed once, over every commit (gitmeta.py), regardless
     # of the bulk-commit exclusion rule's effect on any single file. Only emit
     # them when the degeneration rule says they mean something, and only for
     # pairs where both ends survived into the city (a coupled file that was
-    # walked out by .gitignore or noise-exclusion has no building to draw a
-    # bridge to).
+    # walked out by .gitignore or noise-exclusion has no building to name here).
+    #
+    # This used to also draw an arc between every pair directly on the map
+    # ("skybridges"). At any real resident-building count that read as an
+    # unlabelled tangle with no way to tell one pair from another -- exactly
+    # the kind of decoration the legend rule says nothing here may be. It was
+    # removed; the data stays, surfaced instead as a named, clickable list
+    # ("Changes together with") in a building's detail report
+    # (viewer/js/detail.js), where a specific pair can actually be read.
     MAX_BRIDGES = 2000
     if analysis.flags.coupling and analysis.git is not None:
         pairs = sorted(analysis.git.coupling.items(), key=lambda kv: -kv[1])

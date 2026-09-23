@@ -226,11 +226,6 @@ function rebuildCity(buildings) {
   if (context.hall) context.grid.addBox(context.hall.userData.box);
   if (context.walk) context.walk.grid = context.grid;
   applyTime();
-
-  if (state.source.manifest.flags && state.source.manifest.flags.coupling && context.bridges) {
-    const byId = new Map(buildings.map((b) => [b.id, b]));
-    mesh.buildBridges(context.bridges, byId);
-  }
   applyActiveFilter();
 }
 
@@ -2087,7 +2082,6 @@ async function boot() {
   }
   state.source.buildings = context.resident;
   await state.source.assignLockedAddresses(context.resident);
-  context.bridges = manifest.flags && manifest.flags.coupling ? await state.source.bridges() : [];
   context.facetIndex = await state.source.index();
   context.extTable = await state.source.extTable();
   setupFilterAndLens();

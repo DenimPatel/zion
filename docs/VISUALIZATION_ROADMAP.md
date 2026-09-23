@@ -8,7 +8,9 @@ plain status per item; the rest of this document is the original plan and is kep
 
 | Item | Status |
 |---|---|
-| S1 age, S2 scaffolding, S3 era, S4 heat, S5 district heat, S6 skybridges | **Shipped** |
+| S1 age, S2 scaffolding, S3 era, S4 heat, S5 district heat | **Shipped** |
+| S6 co-change pairs | **Shipped, revised**: originally drawn as an arc ("skybridge") between every resident pair, which at any real building count read as an unlabelled tangle with no way to tell one pair from another and was removed on user feedback. The data (`bridges.json`) and degeneration rule are unchanged; it now surfaces only as a named, clickable "Changes together with" list in a building's detail report (`viewer/js/detail.js`) |
+| rooftop beacon (part of S4) | **Shipped** (was missing entirely before this revision — the legend promised it, nothing drew it; now a 3-tier graded beacon, separate from the crane which still marks only the top decile) |
 | S8 downtown/centrality | **Shipped** (import resolution is best-effort: exact-ish for Python via `ast`, a relative-path regex for JS/TS) |
 | S9 floors that mean something | **Partly shipped**: entrypoint marker and complexity are computed and shown in the detail report; floor-band tinting inside the 3D interior itself is not done |
 | S10 complexity bracing | **Data only**: `Floor.complexity` is computed and shown in the detail report; the 3D cross-bracing geometry on the facade is not built |

@@ -17,6 +17,7 @@
 
 import {
   antennaGeometry,
+  beaconGeometry,
   craneGeometry,
   farGeometry,
   nearGeometry,
@@ -227,6 +228,7 @@ export class CityMesh {
     const colour = new THREE.Color();
     const roofCandidates = [];
     const craneCandidates = [];
+    const beaconCandidates = [];
     const scaffoldCandidates = [];
     const antennaCandidates = [];
     const soleTenantCandidates = [];
@@ -242,8 +244,8 @@ export class CityMesh {
       const detailed = tier === 'near';
       const material = new THREE.MeshStandardMaterial({
         color: 0xffffff,
-        roughness: archetype === 'park' ? 0.95 : 0.72,
-        metalness: archetype === 'monument' ? 0.35 : 0.08,
+        roughness: archetype === 'park' ? 0.95 : archetype === 'monument' ? 0.32 : 0.72,
+        metalness: archetype === 'monument' ? 0.5 : 0.08,
         emissive: new THREE.Color(0xffffff),
         emissiveIntensity: 0,
       });
@@ -318,6 +320,11 @@ export class CityMesh {
         // for churn to mean anything (the same rule the legend already states).
         if (detailed && churnEligible && building.topChurn) {
           craneCandidates.push({ x, z, width, depth, height, seed });
+        } else if (detailed && churnEligible && building.heat > 0) {
+          // Below the crane's top-decile cutoff: a graded rooftop beacon
+          // instead, so "somewhat active" is still visible and distinct from
+          // "quiet". Bucketed by tier rather than a continuous shader.
+          beaconCandidates.push({ x, z, width, depth, height, heat: building.heat });
         }
 
         // Scaffolding wraps the building's own exact footprint and height, so
@@ -357,6 +364,7 @@ export class CityMesh {
 
     this._addRoofProps(roofCandidates);
     this._addCranes(craneCandidates);
+    this._addHeatBeacons(beaconCandidates);
     this._addScaffolding(scaffoldCandidates);
     this._addAntennas(antennaCandidates);
     this._addSoleTenantMarkers(soleTenantCandidates);
@@ -468,63 +476,53 @@ export class CityMesh {
   }
 
   /**
-   * Skybridges: an arc between two buildings changed together in a commit.
-   *
-   * Called separately from `build()` because it needs *placed* buildings by
-   * id -- the manifest-wide id space, not just this call's resident set -- so
-   * it is re-run whenever the resident set changes rather than baked into the
-   * per-archetype loop above. Only pairs whose both ends are currently
-   * resident are drawn; a bridge to an unloaded district would have nowhere
-   * to land.
+   * Rooftop beacons: a graded signal for "how active is this file lately",
+   * distinct from cranes (which mark only the top decile, "under active
+   * construction right now"). Bucketed into three tiers rather than one
+   * continuous shader -- three ordinary materials, three small instanced
+   * meshes, the same technique `_addCranes`/`_addRoofProps` already use.
    */
-  buildBridges(pairs, buildingsById) {
-    this.clearBridges();
-    if (!pairs || !pairs.length || !buildingsById) return;
+  _addHeatBeacons(candidates) {
+    if (!candidates.length) return;
     const THREE = this.THREE;
-    const usable = [];
-    for (const [idA, idB] of pairs) {
-      const a = buildingsById.get(idA);
-      const b = buildingsById.get(idB);
-      if (a && b && a !== b) usable.push([a, b]);
+    const TIERS = [
+      { max: 0.65, color: 0x6b7686, emissive: 0x3a4552, intensity: 0.5 },
+      { max: 0.85, color: 0xe0a63a, emissive: 0xe0a63a, intensity: 1.1 },
+      { max: Infinity, color: 0xe0503a, emissive: 0xff5533, intensity: 1.6 },
+    ];
+    const buckets = TIERS.map(() => []);
+    for (const candidate of candidates) {
+      const tier = TIERS.findIndex((t) => candidate.heat <= t.max);
+      buckets[Math.max(0, tier)].push(candidate);
     }
-    if (!usable.length) return;
 
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x8fd6ff,
-      roughness: 0.35,
-      metalness: 0.1,
-      transparent: true,
-      opacity: 0.8,
+    buckets.forEach((bucket, tierIndex) => {
+      if (!bucket.length) return;
+      const limited =
+        bucket.length > MAX_ROOF_PROPS
+          ? bucket.sort((a, b) => b.heat - a.heat).slice(0, MAX_ROOF_PROPS)
+          : bucket;
+      const tier = TIERS[tierIndex];
+      const material = new THREE.MeshStandardMaterial({
+        color: tier.color,
+        roughness: 0.4,
+        metalness: 0.2,
+        emissive: new THREE.Color(tier.emissive),
+        emissiveIntensity: tier.intensity,
+      });
+      const mesh = new THREE.InstancedMesh(beaconGeometry(THREE), material, limited.length);
+      mesh.name = `heat-beacons-${tierIndex}`;
+      mesh.raycast = () => {};
+      const matrix = new THREE.Matrix4();
+      limited.forEach((beacon, index) => {
+        const spread = Math.min(2.2, Math.max(0.7, Math.min(beacon.width, beacon.depth) * 0.35));
+        matrix.makeScale(spread, spread, spread);
+        matrix.setPosition(beacon.x + beacon.width * 0.18, beacon.height, beacon.z + beacon.depth * 0.18);
+        mesh.setMatrixAt(index, matrix);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      this.group.add(mesh);
     });
-    // A unit cylinder standing on its own base (not centred), so scaling its
-    // Y axis stretches it from the start point toward the end point.
-    const geometry = new THREE.CylinderGeometry(0.3, 0.3, 1, 6, 1, true);
-    geometry.translate(0, 0.5, 0);
-    const mesh = new THREE.InstancedMesh(geometry, material, usable.length);
-    mesh.name = 'skybridges';
-    // Scenery: the buildings it connects are the click targets, not the arc.
-    mesh.raycast = () => {};
-
-    const matrix = new THREE.Matrix4();
-    const up = new THREE.Vector3(0, 1, 0);
-    const start = new THREE.Vector3();
-    const end = new THREE.Vector3();
-    const dir = new THREE.Vector3();
-    const scale = new THREE.Vector3();
-    usable.forEach(([a, b], index) => {
-      start.set((a.x || 0) + (a.width || 4) / 2, a.height || 3, (a.y || 0) + (a.depth || 4) / 2);
-      end.set((b.x || 0) + (b.width || 4) / 2, b.height || 3, (b.y || 0) + (b.depth || 4) / 2);
-      dir.subVectors(end, start);
-      const length = Math.max(0.01, dir.length());
-      dir.normalize();
-      const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
-      scale.set(1, length, 1);
-      matrix.compose(start, quat, scale);
-      mesh.setMatrixAt(index, matrix);
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    this._bridgeMesh = mesh;
-    this.group.add(mesh);
   }
 
   /**
@@ -643,14 +641,6 @@ export class CityMesh {
     }
   }
 
-  clearBridges() {
-    if (!this._bridgeMesh) return;
-    this.group.remove(this._bridgeMesh);
-    this._bridgeMesh.geometry.dispose();
-    this._bridgeMesh.material.dispose();
-    this._bridgeMesh = null;
-  }
-
   /**
    * Scaffolding on every building born in the newest slice of the repo's
    * history -- "new buildings still have scaffolding up" (S2). One instanced
@@ -713,14 +703,27 @@ export class CityMesh {
   _addSoleTenantMarkers(candidates) {
     if (!candidates.length) return;
     const THREE = this.THREE;
-    const material = new THREE.MeshStandardMaterial({ color: 0xd44b4b, roughness: 0.7, metalness: 0.1 });
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xd44b4b,
+      roughness: 0.7,
+      metalness: 0.1,
+      side: THREE.DoubleSide,
+    });
     const mesh = new THREE.InstancedMesh(soleTenantMarkerGeometry(THREE), material, candidates.length);
     mesh.name = 'sole-tenant-markers';
     mesh.raycast = () => {};
     const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Matrix4();
+    const scaleMatrix = new THREE.Matrix4();
     candidates.forEach((plot, index) => {
       const scale = Math.min(2.2, Math.max(0.9, Math.min(plot.width, plot.depth) * 0.3));
-      matrix.makeScale(scale, scale, scale);
+      scaleMatrix.makeScale(scale, scale, scale);
+      // The pennant is a flat plane; a fixed orientation would face the same
+      // way on every plot and vanish edge-on from most camera angles. A
+      // per-instance rotation keeps it a visible triangle more often, the
+      // way real flags on real poles do not all point one direction.
+      rotation.makeRotationY(seedOffset(plot.width + plot.depth + index) * Math.PI * 2);
+      matrix.multiplyMatrices(rotation, scaleMatrix);
       matrix.setPosition(plot.x + 0.6, 0, plot.z + 0.6);
       mesh.setMatrixAt(index, matrix);
     });

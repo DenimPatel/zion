@@ -42,9 +42,9 @@ Everything in the city is one of these, and nothing is decoration.
 | test files | parks |
 | data files | silos (height = row count) |
 | binary artefacts | monuments |
-| files changed together in one commit | skybridges |
+| files changed together in one commit | listed under "Changes together with" in the detail report |
 | first commit within the newest activity window | scaffolding |
-| recent, decay-weighted churn (percentile) | rooftop beacons feeding cranes; district ground heat |
+| recent, decay-weighted churn (percentile) | graded rooftop beacon (top decile: a crane instead); district ground heat |
 | co-change degree + import in-degree + heat + author count | downtown towers (glass tint, antenna) |
 | one author owns ≥ 90% of a file's lines | a corner flag (bus factor 1) |
 | decision points per function/class (exact for Python, heuristic elsewhere) | floor complexity, shown in the detail report |
@@ -89,15 +89,15 @@ so:
 |---|---|---|
 | authorship, Mayor, author tint | ≥ 2 distinct authors | neutral palette; City Hall prints *"Single author — mayor system disabled"* |
 | weathering / recency | ≥ 3 distinct commit dates | uniform weathering |
-| churn cranes | ≥ 5 commits and a commit touching ≥ 2 files | no cranes |
-| co-change skybridges | ≥ 2 coupling-eligible commits and ≥ 1 shared pair | no bridges, with the reason stated |
+| churn cranes / rooftop beacons | ≥ 5 commits and a commit touching ≥ 2 files | no cranes, no beacons |
+| co-change pairs | ≥ 2 coupling-eligible commits and ≥ 1 shared pair | no pairs listed, with the reason stated |
 
 **The bulk-commit rule.** `interactive-courses` has exactly one commit, touching
 357 of 357 files. Naive co-change coupling on that commit is a *complete graph*:
-63,546 skybridges. A commit is therefore coupling-eligible only if it touched
+63,546 pairs. A commit is therefore coupling-eligible only if it touched
 fewer than `max(8, min(0.2 × tracked_files, 200))` files. On the same rule,
 `macro-harness` keeps two eligible commits and produces **exactly one**
-skybridge (`README.md` ↔ `pyproject.toml`), which is a real relationship.
+co-change pair (`README.md` ↔ `pyproject.toml`), which is a real relationship.
 
 The honest headline for both reference repositories is the same, and the tool
 says it plainly: **1 of 4** districts and **1 of 30** districts have a README, and
