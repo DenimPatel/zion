@@ -613,7 +613,7 @@ because "it renders" is not the same as "it works":
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-which returns `ZION_SELFTEST {…}` containing 54 checks: walk gravity (simulated
+which returns `ZION_SELFTEST {…}` containing 73 checks: walk gravity (simulated
 until the player actually comes to rest on a surface), a collision test that
 drives the player into a building and asserts they stop outside it, drag-to-look
 rotating the camera without capturing the pointer or opening the inspector, a
@@ -627,14 +627,15 @@ guide row expanding into its explanation and highlighting its buildings, one roa
 mesh per road class and one plinth per region, the inspector explaining a
 building's floors with its architect's notes, the health lens and Health tab, and
 that the level of detail follows the camera (fly past the LOD radius and the
-nearest building must be in the near tier, not a far-tier box), and the draw-call
-budget.
+nearest building must be in the near tier, not a far-tier box), the hover
+pipeline surviving every target kind it can be handed (a region, which crashed
+the outline pass), and the draw-call budget.
 
 `--enable-unsafe-swiftshader` is required. Without it, headless Chrome reports
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.
 
 **The HUD itself** needs eyes, not assertions: contrast is the one property none
-of those 54 checks measures. Chrome's `--screenshot` flag cannot capture this
+of those 73 checks measures. Chrome's `--screenshot` flag cannot capture this
 viewer at all — the frame loop never lets `--virtual-time-budget` expire, so the
 process hangs — so `tests/capture.py` drives Chrome over the DevTools Protocol,
 waits on wall-clock time, and runs a snippet before capturing (opening the

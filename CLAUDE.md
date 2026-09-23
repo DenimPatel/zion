@@ -30,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (72 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (73 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \

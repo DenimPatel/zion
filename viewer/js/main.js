@@ -1703,7 +1703,10 @@ function showOutlineFor(target) {
     outline.visible = false;
     return;
   }
-  if (target.kind === 'district') {
+  if (target.kind === 'district' || target.kind === 'region') {
+    // A folder is not outlined by the per-building box: hovering it highlights
+    // the whole neighbourhood instead, and a box round a region would claim a
+    // footprint it does not have.
     outline.visible = false;
     return;
   }
@@ -1728,6 +1731,14 @@ function showOutlineFor(target) {
   }
 
   const building = target.building;
+  // Anything that is not a building has already returned above; this guard is
+  // for the next target kind someone adds, so an unhandled one hides the
+  // outline instead of throwing on `building.x` and taking the whole viewer
+  // down with it.
+  if (!building) {
+    outline.visible = false;
+    return;
+  }
   outline.position.set(
     (building.x || 0) + (building.width || 4) / 2,
     0,
@@ -2801,6 +2812,39 @@ async function runSelfTest() {
     context.inspector.hide();
   } else {
     check('click-inspects-building', false, 'no resident buildings');
+  }
+
+  // 0b-bis. Every hover target kind must survive the outline pass. A region
+  //     target -- a folder above a district -- reached `showOutlineFor` with no
+  //     `building`, read `building.x` and took the whole viewer down before the
+  //     first frame; the check drives the function directly rather than trying
+  //     to raycast a plinth, so it cannot flake.
+  {
+    const region = (state.source.manifest.regions || [])[0];
+    if (region) {
+      // Leave the view exactly as the probe found it. `applyHover` skips work
+      // when the target has not changed, so a probe that hides the outline
+      // without touching `hover.target` would leave the *next* check reading a
+      // stale outline for a building it is still hovering.
+      const restore = hover.target;
+      const wasVisible = context.hoverOutline ? context.hoverOutline.visible : false;
+      let ok = true;
+      let detail = 'region outline suppressed';
+      try {
+        showOutlineFor({ kind: 'region', region });
+        ok = context.hoverOutline.visible === false;
+        if (!ok) detail = 'a region left the hover outline visible';
+      } catch (error) {
+        ok = false;
+        detail = String(error && error.message ? error.message : error);
+      } finally {
+        if (restore) showOutlineFor(restore);
+        else if (context.hoverOutline) context.hoverOutline.visible = wasVisible;
+      }
+      check('hover-region-outline', ok, detail);
+    } else {
+      check('hover-region-outline', true, 'no regions in this manifest');
+    }
   }
 
   // 0c. Hover feedback: something clickable under the cursor must announce
