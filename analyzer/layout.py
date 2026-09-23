@@ -11,6 +11,14 @@ lands in a readable band.
 The treemap is a binary subdivision rather than a pure squarified layout, because
 each split line is also where a street goes -- so the streets fall out of the
 geometry instead of being drawn on top of it.
+
+The treemap is also *nested*: districts are grouped by their folder path, each
+folder that actually splits into more than one piece becomes a region on its
+own raised plinth, and the roads between siblings narrow with depth --
+highways between top-level folders, then avenues, streets and alleys. A road's
+width is therefore how far apart two neighbourhoods are in the folder tree.
+Folders with a single child pass their ground straight through (no road, no
+plinth), so a `src/main/java/com/acme` chain costs nothing.
 """
 
 from __future__ import annotations
@@ -48,6 +56,17 @@ PLOT_GAP = 2.0                   # kept clear between neighbouring plots
 STREET_WIDTH = 6.0
 AVENUE_WIDTH = 11.0
 BLOCK_INSET = 3.0
+
+# Road classes, by how far up the folder tree two neighbours part company.
+# Index = class id emitted with each street: 0 highway, 1 avenue, 2 street,
+# 3 alley. Widths are for a full-size city; small plans scale them down (see
+# `_road_scale`) so a 60 m repository is not all tarmac.
+ROAD_HIGHWAY, ROAD_AVENUE, ROAD_STREET, ROAD_ALLEY = 0, 1, 2, 3
+ROAD_WIDTHS = (14.0, 9.0, 5.5, 3.0)
+ROAD_NAMES = ("highway", "avenue", "street", "alley")
+ROAD_SCALE_MIN = 0.55
+ROAD_SCALE_SIDE = 300.0
+REGION_INSET = 1.5               # plinth edge left showing inside each region
 
 # City Hall stands on ground no district may build on.  The hall is scaled to the
 # skyline, but the plaza has to stay a plaza: if it grew with the tallest building
@@ -93,6 +112,31 @@ class PlacedBuilding:
 
 
 @dataclass
+class Street(Rect):
+    """A strip of road; `cls` is its road class (0 highway .. 3 alley)."""
+
+    cls: int = ROAD_STREET
+
+
+@dataclass
+class Region:
+    """A folder that splits into more than one piece: a raised plinth.
+
+    `level` is 1 for a top-level region and grows inward; `parent` is the key
+    of the enclosing region, or "" at the top. Leaf districts are not regions.
+    """
+
+    key: str
+    name: str
+    level: int
+    rect: Rect
+    parent: str = ""
+    districts: int = 0
+    buildings: int = 0
+    logical_loc: int = 0
+
+
+@dataclass
 class DistrictLayout:
     key: str
     name: str
@@ -108,6 +152,17 @@ class DistrictLayout:
     documented: int = 0
     test_files: int = 0
     data_files: int = 0
+    # Nesting: how many regions enclose this district, and the innermost one.
+    level: int = 0
+    region: str = ""
+    # Architect's aggregates (analyzer/health.py signals summed per district).
+    contributors: int = 0
+    bus_factor: int = 0
+    hotspots: int = 0
+    oversized: int = 0
+    orphans: int = 0
+    knowledge_risks: int = 0
+    cycles: int = 0
     buildings: list[PlacedBuilding] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -126,13 +181,17 @@ class DistrictLayout:
             "documented": self.documented,
             "testFiles": self.test_files,
             "dataFiles": self.data_files,
+            "level": self.level,
+            "region": self.region,
         }
 
 
 @dataclass
 class CityLayout:
     districts: list[DistrictLayout] = field(default_factory=list)
-    streets: list[Rect] = field(default_factory=list)
+    streets: list[Street] = field(default_factory=list)
+    regions: list[Region] = field(default_factory=list)
+    road_widths: tuple[float, ...] = ROAD_WIDTHS
     bounds: Rect = field(default_factory=lambda: Rect(0, 0, 0, 0))
     depth: int = 1
     # Ground reserved for City Hall. Empty until build_layout runs; districts are
@@ -176,7 +235,12 @@ class CityLayout:
         return {
             "depth": self.depth,
             "bounds": [self.bounds.x, self.bounds.y, self.bounds.w, self.bounds.h],
-            "streets": [[s.x, s.y, s.w, s.h] for s in self.streets],
+            "streets": [[s.x, s.y, s.w, s.h, s.cls] for s in self.streets],
+            "regions": [
+                {"key": r.key, "name": r.name, "level": r.level, "parent": r.parent,
+                 "rect": [r.rect.x, r.rect.y, r.rect.w, r.rect.h]}
+                for r in self.regions
+            ],
             "districts": [d.to_dict() for d in self.districts],
             "cityHall": self.city_hall(),
         }
@@ -267,9 +331,15 @@ def _treemap(
     items: list[tuple[str, float]],
     rect: Rect,
     out: dict[str, Rect],
-    streets: list[Rect],
-    depth: int = 0,
+    streets: list[Street],
+    gap: float = STREET_WIDTH,
+    cls: int = ROAD_STREET,
 ) -> None:
+    """Binary weight-balanced split of `rect` among `items`.
+
+    Every cut between these siblings is the same class of road: siblings are
+    equally far apart in the folder tree, whichever cut separates them.
+    """
     if not items:
         return
     if len(items) == 1:
@@ -288,22 +358,20 @@ def _treemap(
 
     # Split the longer axis so districts stay roughly square.
     if rect.w >= rect.h:
-        gap = STREET_WIDTH if depth > 0 else AVENUE_WIDTH
         usable = max(1.0, rect.w - gap)
         first_w = usable * fraction
         r1 = Rect(rect.x, rect.y, first_w, rect.h)
         r2 = Rect(rect.x + first_w + gap, rect.y, usable - first_w, rect.h)
-        streets.append(Rect(rect.x + first_w, rect.y, gap, rect.h))
+        streets.append(Street(rect.x + first_w, rect.y, gap, rect.h, cls))
     else:
-        gap = STREET_WIDTH if depth > 0 else AVENUE_WIDTH
         usable = max(1.0, rect.h - gap)
         first_h = usable * fraction
         r1 = Rect(rect.x, rect.y, rect.w, first_h)
         r2 = Rect(rect.x, rect.y + first_h + gap, rect.w, usable - first_h)
-        streets.append(Rect(rect.x, rect.y + first_h, rect.w, gap))
+        streets.append(Street(rect.x, rect.y + first_h, rect.w, gap, cls))
 
-    _treemap(first, r1, out, streets, depth + 1)
-    _treemap(second, r2, out, streets, depth + 1)
+    _treemap(first, r1, out, streets, gap, cls)
+    _treemap(second, r2, out, streets, gap, cls)
 
 
 def _city_hall_scale(side: float, max_height: float) -> float:
@@ -329,7 +397,7 @@ def _reserve(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> Rect:
     return Rect(plaza.x - gap, plaza.y - gap, plaza.w + 2 * gap, plaza.h + 2 * gap)
 
 
-def _frame_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> list[Rect]:
+def _frame_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH, seam: float = 0.0) -> list[Rect]:
     """The four bands of `rect` that surround the reserve, leaving it clear.
 
     A treemap covers whatever rectangle it is given, so reserving ground for the
@@ -337,41 +405,50 @@ def _frame_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> list[Re
     out in a frame instead, and the hole is where City Hall stands. The bands tile
     the plan minus the reserve exactly once, so no district is lost and none
     overlaps the landmark.
+
+    With a `seam`, each band also gives up half a road's width along every edge
+    it shares with another band, so the road down the seam is real ground rather
+    than a strip painted over somebody's plot.
     """
     reserve = _reserve(rect, plaza, gap)
+    half = seam / 2.0
     bands = [
-        Rect(rect.x, rect.y, rect.w, reserve.y - rect.y),                                  # top
-        Rect(rect.x, reserve.y + reserve.h, rect.w, rect.y + rect.h - (reserve.y + reserve.h)),  # bottom
-        Rect(rect.x, reserve.y, reserve.x - rect.x, reserve.h),                            # left
-        Rect(reserve.x + reserve.w, reserve.y, rect.x + rect.w - (reserve.x + reserve.w), reserve.h),  # right
+        Rect(rect.x, rect.y, rect.w, reserve.y - rect.y - half),                                   # top
+        Rect(rect.x, reserve.y + reserve.h + half, rect.w,
+             rect.y + rect.h - (reserve.y + reserve.h) - half),                                      # bottom
+        Rect(rect.x, reserve.y + half, reserve.x - rect.x, reserve.h - seam),                       # left
+        Rect(reserve.x + reserve.w, reserve.y + half,
+             rect.x + rect.w - (reserve.x + reserve.w), reserve.h - seam),                           # right
     ]
     return [b for b in bands if b.w > 1.0 and b.h > 1.0]
 
 
-def _streets_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH) -> list[Rect]:
-    """The avenue ring around City Hall, and the seams where the bands meet.
+def _streets_around(rect: Rect, plaza: Rect, gap: float = AVENUE_WIDTH, seam: float = STREET_WIDTH) -> list[Street]:
+    """The ring road around City Hall, and the seams where the bands meet.
 
-    The frame leaves the districts touching along the reserve's edges; a street
-    down each seam is what keeps two neighbourhoods from sharing a party wall.
-    Seams are centred on the boundary, which is ground the plot inset already
-    keeps clear of buildings.
+    The ring and the seams are highways: they are what every top-level
+    neighbourhood is reached from. Seams are centred on the band boundaries,
+    which `_frame_around` leaves clear when given the same `seam`.
     """
     reserve = _reserve(rect, plaza, gap)
-    seam = STREET_WIDTH
     half = seam / 2.0
     right_x = reserve.x + reserve.w
     bottom_y = reserve.y + reserve.h
+    cls = ROAD_HIGHWAY
     return [
-        # The ring: City Hall is approached from an avenue, not from a back alley.
-        Rect(reserve.x, reserve.y, reserve.w, gap),
-        Rect(reserve.x, bottom_y - gap, reserve.w, gap),
-        Rect(reserve.x, reserve.y + gap, gap, reserve.h - 2 * gap),
-        Rect(right_x - gap, reserve.y + gap, gap, reserve.h - 2 * gap),
+        # The ring: City Hall is approached from the ring road, not a back alley.
+        Street(reserve.x, reserve.y, reserve.w, gap, cls),
+        Street(reserve.x, bottom_y - gap, reserve.w, gap, cls),
+        Street(reserve.x, reserve.y + gap, gap, reserve.h - 2 * gap, cls),
+        Street(right_x - gap, reserve.y + gap, gap, reserve.h - 2 * gap, cls),
         # The seams, outside the reserve, where the four bands meet.
-        Rect(rect.x, reserve.y - half, reserve.x - rect.x, seam),
-        Rect(right_x, reserve.y - half, rect.x + rect.w - right_x, seam),
-        Rect(rect.x, bottom_y - half, reserve.x - rect.x, seam),
-        Rect(right_x, bottom_y - half, rect.x + rect.w - right_x, seam),
+        Street(rect.x, reserve.y - half, reserve.x - rect.x, seam, cls),
+        Street(right_x, reserve.y - half, rect.x + rect.w - right_x, seam, cls),
+        Street(rect.x, bottom_y - half, reserve.x - rect.x, seam, cls),
+        Street(right_x, bottom_y - half, rect.x + rect.w - right_x, seam, cls),
+        # Shoulders between the ring and the bands above and below it.
+        Street(reserve.x, reserve.y - half, reserve.w, half, cls),
+        Street(reserve.x, bottom_y, reserve.w, half, cls),
     ]
 
 
@@ -463,10 +540,17 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
         return max(content, sum(plot_demand(f) for f in members))
 
     weights = {key: district_weight(members) for key, members in grouped.items()}
-    entries = sorted(weights.items(), key=lambda kv: -kv[1])
+    tree = _folder_tree(weights)
+    top = _collapse(tree)
 
-    total_weight = sum(w for _, w in entries)
-    city_area = max(PLOT_AREA_PER_BUILDING * len(files), total_weight)
+    total_weight = sum(weights.values())
+    base_area = max(PLOT_AREA_PER_BUILDING * len(files), total_weight)
+    road_scale = _road_scale(math.sqrt(base_area))
+    widths = tuple(w * road_scale for w in ROAD_WIDTHS)
+    layout.road_widths = widths
+    # Roads and plinth edges are ground too: allow for them up front so the
+    # nesting does not quietly shrink every building to pay for its streets.
+    city_area = base_area + _road_allowance(top, base_area, total_weight, widths)
     side = max(60.0, math.sqrt(city_area))
     root = Rect(0.0, 0.0, side, side)
 
@@ -485,15 +569,23 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
     layout.hall_scale = scale
 
     rects: dict[str, Rect] = {}
-    streets: list[Rect] = []
+    streets: list[Street] = []
+    highway = widths[ROAD_HIGHWAY]
     # The reserve is capped so the four bands always survive, which is what the
-    # layout test pins down for plan sizes from 60 m to 3.2 km.
-    bands = _frame_around(root, plaza)
-    layout.plaza = plaza
-    layout.hall_scale = scale
-    streets.extend(_streets_around(root, plaza))
-    for band, group in zip(bands, _spread_over_bands(entries, bands)):
-        _treemap(group, band, rects, streets)
+    # layout test pins down for plan sizes from 60 m to 3.2 km. The frame and
+    # the plaza are worked out once, over the top-level folders only; nesting
+    # happens inside each top-level folder's own ground.
+    bands = _frame_around(root, plaza, highway, seam=highway)
+    streets.extend(_streets_around(root, plaza, highway, seam=highway))
+    top_items = [top] if top.leaf else top.children
+    top_entries = [(child.id, child.weight) for child in top_items]
+    by_id = {child.id: child for child in top_items}
+    placed: dict[str, Rect] = {}
+    for band, group in zip(bands, _spread_over_bands(top_entries, bands)):
+        _treemap(group, band, placed, streets, highway, ROAD_HIGHWAY)
+    district_level: dict[str, tuple[int, str]] = {}
+    for item_id, rect in placed.items():
+        _place_node(by_id[item_id], rect, 1, "", rects, streets, layout.regions, district_level, widths)
 
     for key, members in grouped.items():
         rect = rects.get(key, Rect(0, 0, 0, 0))
@@ -515,9 +607,12 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
             documented=sum(1 for f in members if f.doc_ratio >= 0.1),
             test_files=sum(1 for f in members if f.is_test),
             data_files=sum(1 for f in members if f.rows is not None),
+            level=district_level.get(key, (0, ""))[0],
+            region=district_level.get(key, (0, ""))[1],
         )
         if analysis.flags.authorship:
             district.mayor = _mayor(members)
+        _district_health(district, members)
 
         # Keep a visible gap between neighbours so the grid reads as plots.
         gap = min(PLOT_GAP, cell_w * 0.18, cell_h * 0.18)
@@ -575,7 +670,13 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
 
     layout.districts.sort(key=lambda d: (-d.weight, d.key))
     layout.streets = [s for s in streets if s.w > 0.1 and s.h > 0.1]
+    _region_totals(layout)
     layout.bounds = Rect(0.0, 0.0, side, side)
+    # Dependency structure is measured between districts, so it can only be
+    # computed now that every file has one. Idempotent across layout passes.
+    from .architecture import finalize_architecture
+
+    finalize_architecture(analysis)
     return layout
 
 
@@ -605,3 +706,153 @@ def _mayor(members: list[FileMetrics]) -> str:
     if not totals:
         return ""
     return max(totals.items(), key=lambda kv: kv[1])[0]
+
+
+# --------------------------------------------------------------------------
+# Folder tree: regions and road classes
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class _Node:
+    """One item in a nested treemap: a leaf district or a folder of items.
+
+    `id` is the treemap key -- a district key for a leaf, and the folder path
+    prefixed with a slash for a folder (a folder and the district of its own
+    loose files can share a path, and must not share a key).
+    """
+
+    id: str
+    path: str
+    weight: float = 0.0
+    leaf: bool = False
+    children: list["_Node"] = field(default_factory=list)
+
+
+def _folder_tree(weights: dict[str, float]) -> _Node:
+    """Group leaf districts by their folder path, one node per prefix."""
+    root = _Node(id="/", path="")
+    folders: dict[str, _Node] = {"": root}
+
+    def folder(path: str) -> _Node:
+        node = folders.get(path)
+        if node is None:
+            parent_path = path.rsplit("/", 1)[0] if "/" in path else ""
+            node = _Node(id="/" + path, path=path)
+            folders[path] = node
+            folder(parent_path).children.append(node)
+        return node
+
+    for key in sorted(weights):
+        parent = "" if key == ROOT_DISTRICT else key
+        # A district's own files are a leaf *inside* its folder when that folder
+        # also has sub-folders; `_collapse` folds the folder away otherwise.
+        folder(parent).children.append(_Node(id=key, path=key, weight=weights[key], leaf=True))
+
+    def total(node: _Node) -> float:
+        if not node.leaf:
+            node.weight = sum(total(child) for child in node.children)
+            node.children.sort(key=lambda n: (-n.weight, n.id))
+        return node.weight
+
+    total(root)
+    return root
+
+
+def _collapse(node: _Node) -> _Node:
+    """Follow single-child folders down to the first real split (or a leaf)."""
+    while not node.leaf and len(node.children) == 1:
+        node = node.children[0]
+    return node
+
+
+def _road_scale(side: float) -> float:
+    return max(ROAD_SCALE_MIN, min(1.0, side / ROAD_SCALE_SIDE))
+
+
+def _road_class(level: int) -> int:
+    return min(ROAD_ALLEY, level)
+
+
+def _road_allowance(top: _Node, area: float, total_weight: float, widths: tuple[float, ...]) -> float:
+    """Rough ground the roads and plinth edges will take, in square metres.
+
+    Each split in a folder with k children lays k-1 roads about as long as the
+    folder is wide; each region also gives up an inset ring. Estimated from the
+    folder's share of the plan, which is all that is known before layout.
+    """
+    total_weight = total_weight or 1.0
+    allowance = 0.0
+
+    def visit(node: _Node, level: int) -> None:
+        nonlocal allowance
+        if node.leaf:
+            return
+        span = math.sqrt(max(1.0, area * node.weight / total_weight))
+        gap = widths[_road_class(level - 1)] if level else widths[ROAD_HIGHWAY]
+        allowance += max(0, len(node.children) - 1) * gap * span
+        if level:
+            allowance += 4.0 * span * REGION_INSET
+        for child in node.children:
+            visit(_collapse(child), level + 1)
+
+    visit(top, 0)
+    return allowance
+
+
+def _place_node(
+    node: _Node,
+    rect: Rect,
+    level: int,
+    parent: str,
+    rects: dict[str, Rect],
+    streets: list[Street],
+    regions: list[Region],
+    district_level: dict[str, tuple[int, str]],
+    widths: tuple[float, ...],
+) -> None:
+    """Give `node` its ground: a leaf keeps it, a folder becomes a region."""
+    node = _collapse(node)
+    if node.leaf:
+        rects[node.id] = rect
+        district_level[node.id] = (level - 1, parent)
+        return
+    name = node.path[len(parent) + 1:] if parent and node.path.startswith(parent + "/") else node.path
+    regions.append(Region(key=node.path, name=name, level=level, rect=rect, parent=parent))
+    inner = inset(rect, REGION_INSET)
+    cls = _road_class(level)
+    placed: dict[str, Rect] = {}
+    _treemap([(c.id, c.weight) for c in node.children], inner, placed, streets, widths[cls], cls)
+    by_id = {c.id: c for c in node.children}
+    for item_id, child_rect in placed.items():
+        _place_node(by_id[item_id], child_rect, level + 1, node.path, rects, streets, regions, district_level, widths)
+
+
+def _district_health(district: DistrictLayout, members: list[FileMetrics]) -> None:
+    """Sum each file's architect's signals into the district's."""
+    from .health import bus_factor
+
+    lines: dict[str, int] = {}
+    for record in members:
+        for author, added in record.authors.items():
+            lines[author] = lines.get(author, 0) + added
+    district.contributors = len(lines)
+    district.bus_factor = bus_factor(lines) if lines else 0
+    district.hotspots = sum(1 for f in members if f.is_hotspot)
+    district.oversized = sum(1 for f in members if f.is_oversized)
+    district.orphans = sum(1 for f in members if f.is_orphan)
+    district.knowledge_risks = sum(1 for f in members if f.knowledge_risk)
+    district.cycles = len({f.cycle_id for f in members if f.cycle_id})
+
+
+def _region_totals(layout: CityLayout) -> None:
+    """Count districts, buildings and lines under every region."""
+    by_key = {r.key: r for r in layout.regions}
+    for district in layout.districts:
+        key = district.region
+        while key and key in by_key:
+            region = by_key[key]
+            region.districts += 1
+            region.buildings += district.building_count
+            region.logical_loc += district.logical_loc
+            key = region.parent

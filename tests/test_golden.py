@@ -158,6 +158,114 @@ class GoldenCityTests(TempRepoCase):
         # The drop-out is announced rather than silently drawn.
         self.assertTrue(legend["height"])
 
+    def test_age_disabled_when_every_file_is_born_in_the_same_commit(self):
+        # _city()'s later commits only edit alpha/main.py and README.md; every
+        # file (including the ones never touched again) is born in commit 1.
+        _repo, _analysis, _layout, result, manifest, _strings = self._city()
+        self.assertFalse(manifest["flags"]["age"])
+        self.assertTrue(any("birth date" in n for n in self._notes(result.out_dir)))
+        legend = {entry["id"]: entry["enabled"] for entry in manifest["legend"]}
+        self.assertFalse(legend["new_construction"])
+
+    def test_age_enabled_and_new_file_flagged_when_born_later(self):
+        import support
+
+        repo = self.scratch()
+        support.make_repo(repo, commit=False)
+        support.git_commit(repo, "initial", date="2023-01-01T10:00:00+00:00")
+        with open(os.path.join(repo, "alpha", "fresh.py"), "w", encoding="utf-8") as fh:
+            fh.write("def fresh():\n    return 1\n")
+        support.git_commit(repo, "add a new file", date="2023-12-20T10:00:00+00:00")
+
+        analysis, layout, result = self.build_city(repo)
+        manifest = load_manifest(result.out_dir)
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        self.assertTrue(manifest["flags"]["age"])
+
+        by_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_path[resolve(strings, building["path"])] = building
+
+        self.assertTrue(by_path["alpha/fresh.py"]["isNew"])
+        self.assertEqual(by_path["alpha/fresh.py"]["era"], "new")
+        self.assertFalse(by_path["alpha/main.py"]["isNew"])
+        # main.py is tied for oldest with every other file from the initial
+        # commit, so ties may land it in either of the two older tertiles --
+        # but never in "new", the strictly-younger file's own bucket.
+        self.assertNotEqual(by_path["alpha/main.py"]["era"], "new")
+
+    def test_downtown_marks_the_most_imported_file(self):
+        import support
+
+        repo = self.scratch()
+        os.makedirs(os.path.join(repo, "pkg"))
+        with open(os.path.join(repo, "pkg", "__init__.py"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(os.path.join(repo, "pkg", "utils.py"), "w", encoding="utf-8") as fh:
+            fh.write("def helper():\n    return 1\n")
+        with open(os.path.join(repo, "pkg", "a.py"), "w", encoding="utf-8") as fh:
+            fh.write("from pkg import utils\n\n\ndef use_a():\n    return utils.helper()\n")
+        with open(os.path.join(repo, "pkg", "b.py"), "w", encoding="utf-8") as fh:
+            fh.write("from pkg.utils import helper\n\n\ndef use_b():\n    return helper()\n")
+        for name in "cdef":
+            with open(os.path.join(repo, "pkg", f"{name}.py"), "w", encoding="utf-8") as fh:
+                fh.write(f"def {name}_fn():\n    return '{name}'\n")
+
+        support._run(["init", "-q"], repo)
+        support._run(["config", "user.email", "test@example.com"], repo)
+        support._run(["config", "user.name", "Test"], repo)
+        support.git_commit(repo, "initial", date="2024-01-01T10:00:00+00:00")
+
+        analysis, layout, result = self.build_city(repo)
+        manifest = load_manifest(result.out_dir)
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        self.assertTrue(manifest["flags"]["centrality"])
+
+        by_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_path[resolve(strings, building["path"])] = building
+
+        self.assertEqual(by_path["pkg/utils.py"]["importInDegree"], 2)
+        self.assertTrue(by_path["pkg/utils.py"]["downtown"])
+        self.assertFalse(by_path["pkg/c.py"]["downtown"])
+        self.assertFalse(by_path["pkg/a.py"]["downtown"])
+
+    def test_sole_tenant_flags_a_single_owner_with_enough_commits(self):
+        import support
+
+        repo = self.scratch()
+        support.make_repo(repo, commit=False)
+        support.git_commit(repo, "initial", author="Ada Lovelace", date="2024-01-01T10:00:00+00:00")
+        for i in range(2):
+            with open(os.path.join(repo, "alpha", "main.py"), "a", encoding="utf-8") as fh:
+                fh.write(f"\n# revision {i}\n")
+            support.git_commit(repo, f"solo revision {i}", author="Ada Lovelace", date=f"2024-0{i + 2}-01T10:00:00+00:00")
+        for i in range(2):
+            with open(os.path.join(repo, "README.md"), "a", encoding="utf-8") as fh:
+                fh.write(f"\nshared revision {i}\n")
+            support.git_commit(
+                repo, f"shared revision {i}",
+                author="Ada Lovelace" if i % 2 else "Grace Hopper",
+                date=f"2024-0{i + 4}-01T10:00:00+00:00",
+            )
+
+        analysis, layout, result = self.build_city(repo)
+        manifest = load_manifest(result.out_dir)
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        self.assertTrue(manifest["flags"]["authorship"])
+
+        by_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_path[resolve(strings, building["path"])] = building
+
+        self.assertTrue(by_path["alpha/main.py"]["soleTenant"])
+
     def test_include_noise_adds_ruins(self):
         repo = make_repo(self.scratch())
         _analysis, _layout, clean = self.build_city(repo, out_dir=os.path.join(self._tmp, "clean"))

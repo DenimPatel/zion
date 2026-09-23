@@ -14,10 +14,12 @@ is vanilla JS + a vendored `three.js`, no build step, no `npm`/`node_modules`.
 python3 zion.py stats  /path/to/repo        # text report, no build artifacts
 python3 zion.py build  /path/to/repo [-o DIR] [--district-depth N] [--include-noise] [--encrypt] [--single-file]
 python3 zion.py serve  /path/to/repo        # build if needed, serve, open a browser
+python3 zion.py report /path/to/repo [--format md|json] [--compare REV] [--baseline summary.json] [--fail-on LIST]
+python3 zion.py build  /path/to/repo --compare REV   # delta against a revision instead of the last build
 python3 bench/generate_repo.py bench/tmp/repo-50000 --files 50000 --commits 40   # synthetic repo for scale testing
 ```
 
-Tests (74 tests, stdlib only, no test runner dependency):
+Tests (121 tests, stdlib only, no test runner dependency):
 
 ```
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -28,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (40 interactive checks, dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (73 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -41,8 +43,9 @@ Encrypted build: `ZION_PASSPHRASE='…' python3 zion.py build /path/to/repo --en
 
 ## Architecture
 
-**Pipeline (all Python, all in `analyzer/`):** `walk.py` → `gitmeta.py` → `metrics.py` → `layout.py` →
-`crypto.py` (if `--encrypt`) → `emit.py`. The viewer never parses source — it only receives numbers
+**Pipeline (all Python, all in `analyzer/`):** `walk.py` → `gitmeta.py` → `metrics.py` (→ `health.py`, `owners.py`,
+`testmap.py`) → `layout.py` (→ `architecture.py`) → `history.py` + `crypto.py` (if `--encrypt`) → `emit.py`; `report.py`
+renders the same analysis as Markdown/JSON for `zion.py report`. The viewer never parses source — it only receives numbers
 (the manifest + chunk JSON emitted by `emit.py`). `zion.py` is the CLI that wires this pipeline together
 for `stats`/`build`/`serve`/`bench`.
 
@@ -58,9 +61,28 @@ for `stats`/`build`/`serve`/`bench`.
 - `metrics.py` — turns parsed files into per-file metrics, confidence, and the "degeneration rules" that
   disable a legend entry (authorship/mayor, weathering, churn cranes, co-change skybridges) when the repo's
   history is too degenerate to support it (e.g. single author, single commit date).
+- `health.py` — the architect's signals, from numbers `metrics.py` already has: first/last author, bus
+  factor, owner-inactive knowledge risk, hotspots (commit frequency × size), oversized files, orphan
+  candidates and import cycles (iterative Tarjan). Each gated on its own flag (`hotspots`, `knowledge`,
+  `imports`); vendored paths are excluded.
+- `architecture.py` — dependency structure between leaf districts, run at the end of `build_layout` (it needs districts):
+  per-folder Ca/Ce/instability, the folder matrix, layering violations (from a read-only `.zion/rules.json` /
+  `zion.rules.json`, else "the thinner direction of a folder pair that imports both ways") and cross-folder
+  co-change. Tests and vendored code are not design dependencies.
+- `owners.py` — recency-weighted experts ("who to ask", half-life 180 days), author shares, and CODEOWNERS parsing
+  (gitignore semantics, last match wins) with drift = the named individuals commit but did not write the file. Teams
+  are never called drifted. Needs `gitmeta`'s author emails.
+- `testmap.py` — links tests to sources by resolved import and by same-language name stem; `untested_risk` only for
+  hotspot/oversized/downtown files and only when at least one link exists (`flags.tests`). Also `is_braced`
+  (a *function or method* with ≥ 15 decision points — class totals are sums, not one definition).
+- `history.py` — `summary.json` per build (paths HMAC-keyed under `--encrypt`), the delta against the last build in
+  the same output dir (or the one before it when the head did not move), and `analyze_revision` for `--compare REV`
+  (`git archive` into a temp dir; never touches the analyzed working tree).
 - `layout.py` — chooses district depth (most structure within a readable district-count band, preferring
-  no single-building district, ties toward shallower), builds the treemap, derives street geometry from
-  treemap subdivision lines, and reserves the central City Hall plaza before districts are laid out.
+  no single-building district, ties toward shallower), then lays the leaf districts out as a *nested*
+  treemap over their folder tree: each folder that splits becomes a region (raised plinth) and the roads
+  between siblings get a class by depth (0 highway … 3 alley). Single-child folder chains collapse. The
+  City Hall plaza, frame and band spreading run once, over the top-level folders only.
 - `crypto.py` — AES-256-GCM + PBKDF2 (310k iterations), framed as `ZIONENC1` + IV + ciphertext + tag to
   match what WebCrypto's `decrypt` expects in the browser. Uses `vendor/aes_gcm.py` (hand-written,
   standard-library-only cipher pinned to FIPS-197 and NIST GCM test vectors) rather than `cryptography`
@@ -71,12 +93,21 @@ for `stats`/`build`/`serve`/`bench`.
 **Viewer (`viewer/js/`, no framework):** `main.js` is the entry point/orchestrator; `loader.js`/`stream.js`
 handle fetching and camera-centred chunk streaming (bounded by radius then building count); `city.js`
 builds the instanced meshes (one `InstancedMesh` per archetype per LOD tier — draw calls don't scale with
-building count); `shapes.js` defines per-archetype massing (podium/shaft/setback/crown), `facade.js` renders
-windows per-fragment from a building's own metrics (not a shared texture) so window rows equal parsed
-floor counts; `interior.js` builds/destroys building interiors on enter/leave (max 2 cached), slicing source
-by byte offset so displayed text matches exactly what was measured; `cityhall/`, `tour.js`, `cameras.js`,
-`collision.js`, `inspector.js`, `sky.js` are self-explanatory; `vault.js` handles client-side WebCrypto
-decryption of encrypted cities.
+building count); `shapes.js` is the registry of unit-normalised geometry, built from the shared
+`primitives.js` kit and, for anything elaborate, an assembly under `viewer/js/parts/` (`massing.js`,
+`civic.js`, `construction.js`, `parks.js`, `beacons.js`, `health.js`) — every form is a unit-space geometry with
+podium/shaft/setback/crown part tags, so layout, collision and picking never learn which file it came
+from; `facade.js` renders windows per-fragment from a building's own metrics (not a shared texture) so
+window rows equal parsed floor counts; `interior.js` builds/destroys building interiors on enter/leave
+(max 2 cached), slicing source by byte offset so displayed text matches exactly what was measured;
+`labels.js` projects region/district names as DOM labels, revealed by camera distance per level;
+`selection.js` draws what the current selection is connected to (import lines, co-change rings, district arcs) —
+only for the selection, as its own scene group; `notes.js` (localStorage, keyed by repo name + path) and
+`views.js` (URL-hash saved views) are the reader's own state; `parts/structure.js` holds the no-entry sign,
+traffic cones, cross-bracing, survey stake, owner notice and note pin;
+`inspector.js` is the explaining building/district/region report; `cityhall/`, `tour.js`, `cameras.js`,
+`collision.js`, `sky.js` are self-explanatory;
+`vault.js` handles client-side WebCrypto decryption of encrypted cities.
 
 ## Key invariants to preserve
 
@@ -86,6 +117,30 @@ decryption of encrypted cities.
 - Degeneration rules in `metrics.py` must stay in sync with what `layout.py`/the viewer actually disable —
   a legend entry that is turned off must also stop rendering the related geometry (e.g. no cranes without
   churn eligibility).
+- Level of detail is a function of the camera, not only of the resident working set. `refreshResident`
+  in `viewer/js/main.js` must rebuild when the camera travels a fraction of `city.lodRadius`, because a
+  repository under the resident cap keeps every district resident and the streamer then never reports a
+  change — without that rebuild the near/far ranking would stay frozen around the opening camera and
+  everything past it would keep its far-tier box (`lod-follows-camera` guards this).
+- Vertex colours are only valid on the detailed tier. `farGeometry` is a plain box with no colour
+  attribute, so a material with `vertexColors: true` renders it black — enable vertex colours as
+  `detailed && …` (see the town hall material in `viewer/js/city.js`).
+- Drawn size is not measured size. `LANDMARK_SCALE` enlarges a civic form's massing on screen, so
+  anything placed on it (props, cranes, beacons) must be positioned from the scaled dimensions, while
+  collision, hover and the detail report keep the real footprint.
+- The City Guide (`#guide`) is the legend made switchable: `LEGEND_KEYS` in `viewer/js/main.js` maps each
+  manifest legend id to the layer it draws (`archetype`, `mesh` or `option`), its real on-screen colour and
+  the filter query that counts/highlights its buildings. A new legend entry needs a row there *and* a
+  `(id, label, unit, group, description)` entry in `emit.py::LEGEND_SPEC`; an entry with no separate layer
+  is shown with an "always" badge, never as a dead switch.
+- Relationships are drawn for the selection only (`viewer/js/selection.js`). Never draw every import or co-change edge
+  at once — that is the tangle the original skybridges were removed for.
+- `index.json` columns and `FLAG_*` bits are append-only; `viewer/js/facets.js::FLAG_BITS` must mirror `emit.py`.
+- Nothing about the repository may reach `summary.json`, `imports.json` or `city.json` in plaintext under `--encrypt`:
+  edges are building ids, summaries are HMAC-keyed, names go through the string table.
+- Streets are `[x, y, w, h, class]` and regions carry `level`; anything drawn on the ground (district
+  plates, roads, ground props) must sit on `plinthTop(level)` from `viewer/js/city.js`, or it is buried
+  inside the plinth.
 - Geometry must stay byte-identical between plain and encrypted builds; only labels/text change under
   `--encrypt`. Don't let `crypto.py` changes touch coordinates, sizes, or IDs.
 - `analyzer/` must never write into the analyzed repo; output goes to `-o DIR` or the cache dir computed

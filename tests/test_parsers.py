@@ -33,6 +33,39 @@ class PythonParserTests(unittest.TestCase):
         self.assertGreater(result.doc_lines, 0)
         self.assertLess(result.logical_loc, result.physical_lines)
 
+    def test_complexity_and_entrypoint(self):
+        source = (
+            "import os\n"
+            "from pkg.utils import helper\n\n\n"
+            "def plain():\n"
+            "    return 1\n\n\n"
+            "def branchy(x):\n"
+            "    if x:\n"
+            "        for i in range(x):\n"
+            "            if i and x:\n"
+            "                return i\n"
+            "    return 0\n\n\n"
+            "def main():\n"
+            "    return branchy(1)\n\n\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+        )
+        result = parse_text("run.py", source)
+        by_name = {f.name: f for f in result.floors}
+        self.assertEqual(by_name["plain"].complexity, 0)
+        # if, for, if, BoolOp (`i and x`) inside branchy -> at least 4.
+        self.assertGreaterEqual(by_name["branchy"].complexity, 4)
+        self.assertTrue(by_name["main"].is_entrypoint)
+        self.assertFalse(by_name["plain"].is_entrypoint)
+        self.assertIn("os", result.imports)
+        self.assertIn("pkg.utils.helper", result.imports)
+
+    def test_relative_import_specifier_keeps_its_leading_dots(self):
+        source = "from . import sibling\nfrom ..pkg import other\n"
+        result = parse_text("mod.py", source)
+        self.assertIn(".sibling", result.imports)
+        self.assertIn("..pkg.other", result.imports)
+
     def test_broken_python_does_not_raise(self):
         result = parse_text("broken.py", "def f(:\n  pass\n")
         self.assertEqual(result.confidence, "low")

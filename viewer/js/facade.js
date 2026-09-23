@@ -283,10 +283,25 @@ const FRAGMENT_HEAD = /* glsl */ `
     float run = smoothstep(0.35, 1.0, fract(v / (floorH * 3.0)));
     f.tint *= 1.0 - vWeather * 0.32 * streak * mix(0.45, run, sharp) * pier;
 
+    // A darker band just under each window row: rain leaves the sill, the dirt
+    // it carried stays. The cheapest cue that a wall has stood in weather rather
+    // than been extruded this morning, and it costs one smoothstep.
+    float sillDrip = (1.0 - smoothstep(0.0, 0.13, abs(fy - (win.z - 0.11)))) * band;
+    f.tint *= 1.0 - (0.07 + vWeather * 0.15) * sillDrip * pier;
+
+    // A gentle lift up the shaft above the plinth. A tall wall washed with one
+    // flat value reads as a plane; letting it darken slightly toward the street
+    // gives the mass somewhere for the eye to sit.
+    f.tint *= mix(0.93, 1.0, smoothstep(plinth, plinth + H * 0.4, v));
+
     // Glass: darker and far smoother than the wall, so windows read in daylight
     // and not only as emissive dots after dark.
     f.tint *= mix(1.0, 0.34, glass);
     f.roughness = mix(mix(0.92, 0.74, step(0.5, vStyle) * step(vStyle, 1.5)), 0.14, glass);
+    // Per-building surface variation, so a row of identical forms still takes
+    // the light differently -- concrete, stone and painted panel do not return
+    // the same highlight even under the same sky.
+    f.roughness = clamp(f.roughness * mix(0.85, 1.15, zhash(vSeed * 97.7)), 0.05, 1.0);
 
     // Which windows are lit. At range the per-window dice roll averages back to
     // the building's documented ratio, so "lit means documented" still reads

@@ -22,32 +22,78 @@
       <h1 id="city-name">Zion</h1>
       <p id="city-subtitle">loading&hellip;</p>
     </div>
+    <button id="view-link" type="button" title="Copy a link to exactly this view: camera, filter, lens, selection and date">Copy view link</button>
     <button id="panels-toggle" type="button" aria-pressed="false"
-            aria-controls="legend xray" title="Toggle legend and keys (L)">
-      <span id="panels-toggle-label">Hide legend &amp; keys</span>
+            aria-controls="guide" title="Toggle the city guide (L)">
+      <span id="panels-toggle-label">Hide guide</span>
     </button>
   </header>
 
-  <section id="legend" aria-label="Legend">
-    <h2>Legend</h2>
-    <ul id="legend-list"></ul>
-    <div id="legend-notes"></div>
+  <!-- The City Guide: the legend made switchable, explained and counted, in
+       one panel. "Read the city" says what every visual means and switches its
+       layer; "Health" is the architect's shortlist; "Filter" finds and colours. -->
+  <section id="guide" aria-label="City guide">
+    <div class="guide-head">
+      <h2>City guide</h2>
+      <div class="guide-tabs" role="tablist">
+        <button type="button" role="tab" id="guide-tab-read" aria-controls="guide-read" aria-selected="true">Read the city</button>
+        <button type="button" role="tab" id="guide-tab-health" aria-controls="guide-health" aria-selected="false">Health</button>
+        <button type="button" role="tab" id="guide-tab-filter" aria-controls="guide-filter" aria-selected="false">Filter</button>
+      </div>
+    </div>
+    <div id="guide-read" role="tabpanel" aria-labelledby="guide-tab-read">
+      <p class="hint guide-intro">Every shape, colour and prop is a measurement. Click a row to learn
+        what it means; flip its switch to show or hide that layer.</p>
+      <div id="guide-list"></div>
+      <button id="guide-reset" type="button" hidden>Show every layer</button>
+      <div id="guide-notes"></div>
+    </div>
+    <div id="guide-health" role="tabpanel" aria-labelledby="guide-tab-health" hidden></div>
+    <div id="guide-filter" role="tabpanel" aria-labelledby="guide-tab-filter" hidden>
+      <div id="filter" aria-label="Filter">
+        <input id="filter-input" type="text" placeholder="ext:py is:hotspot loc&gt;500 path:src/** OR is:cycle">
+        <details id="filter-help" class="hint">
+          <summary>Query words</summary>
+          <p><code>ext:py</code> <code>lang:python</code> <code>name:README.md</code> <code>path:src/**</code>
+            <code>district:analyzer</code> <code>owner:ada</code> <code>archetype:tower</code></p>
+          <p><code>imports:analyzer/health.py</code> files that import it · <code>importedby:zion.py</code> files it imports</p>
+          <p><code>loc&gt;500</code> <code>cx&gt;=15</code> <code>fanin&gt;10</code> <code>fanout&gt;5</code> <code>age&lt;30</code>
+            <code>heat&gt;0.8</code> <code>delta&gt;50</code></p>
+          <p><code>is:hotspot</code> <code>is:cycle</code> <code>is:violation</code> <code>is:untested</code>
+            <code>is:untestedrisk</code> <code>is:braced</code> <code>is:drift</code> <code>is:unowned</code>
+            <code>is:added</code> <code>is:grown</code> <code>is:new</code> <code>is:orphan</code> <code>is:knowledge</code></p>
+          <p>Words are ANDed; <code>-</code> negates; <code>OR</code> joins alternatives.</p>
+        </details>
+        <p id="filter-summary" class="hint">every building shown</p>
+        <div id="filter-chips"></div>
+        <select id="lens-select" title="colour by">
+          <option value="archetype">colour: archetype</option>
+          <option value="health">colour: health (architect)</option>
+          <option value="language">colour: language</option>
+          <option value="author">colour: author</option>
+          <option value="era">colour: age (era)</option>
+          <option value="heat">colour: recent activity (heat)</option>
+          <option value="downtown">colour: centrality (downtown)</option>
+          <option value="instability">colour: instability (imports out vs in)</option>
+          <option value="tests">colour: test coverage links</option>
+          <option value="complexity">colour: branchiest function</option>
+          <option value="delta">colour: changed since baseline</option>
+          <option value="territory">colour: one author’s territory</option>
+        </select>
+        <select id="lens-author" title="whose territory" hidden></select>
+        <div id="lens-key" class="hint"></div>
+      </div>
+    </div>
   </section>
 
   <section id="inspector" hidden aria-label="Inspector">
     <button id="inspector-close" title="Close">&times;</button>
     <h2 id="inspector-title">&mdash;</h2>
     <p id="inspector-path"></p>
-    <dl id="inspector-metrics"></dl>
+    <div id="inspector-metrics"></div>
     <div id="inspector-floors"></div>
     <p id="inspector-source-hint" class="hint"></p>
-  </section>
-
-  <section id="xray" aria-label="Legend key">
-    <h2>Keys</h2>
-    <table id="xray-table"></table>
-    <button id="xray-reset" type="button" hidden>Show every form</button>
-    <p id="xray-hint" class="hint">Click a row to show or hide that form.</p>
+    <button id="inspector-open-detail" hidden>Open details &#8599;</button>
   </section>
 
   <section id="cityhall" hidden aria-label="City Hall">
@@ -56,12 +102,29 @@
     <div id="cityhall-body"></div>
   </section>
 
+  <!-- The detail window, as an overlay: a --single-file build has no second
+       document to open a real detail.html in, so this reuses the same
+       detail.js render functions in place. See main.js's setupDetailOverlay
+       and inspector.js's onOpenDetail wiring. -->
+  <section id="detail-overlay" hidden aria-label="Details">
+    <button id="detail-overlay-close" title="Close">&times;</button>
+    <h1 id="detail-title">&mdash;</h1>
+    <form id="detail-vault" hidden>
+      <label for="detail-passphrase">This city is locked. Passphrase:</label>
+      <input id="detail-passphrase" name="passphrase" type="password">
+      <button type="submit">Unlock</button>
+      <p class="hint"></p>
+    </form>
+    <div id="detail-body"></div>
+  </section>
+
   <div id="tour" hidden>
     <span id="tour-label"></span>
     <p id="tour-caption"></p>
     <div id="tour-progress"><div id="tour-progress-bar"></div></div>
   </div>
 
+  <div id="map-labels" aria-hidden="true"></div>
   <div id="prompt" hidden></div>
   <div id="crosshair" aria-hidden="true"></div>
   <div id="tooltip" hidden>
@@ -91,6 +154,12 @@
     <div class="control">
       <label for="lit">Lit windows</label>
       <input id="lit" type="range" min="0" max="1" step="0.05" value="1">
+    </div>
+    <div class="control" id="history-control" hidden>
+      <label for="history">History</label>
+      <button id="history-play" type="button" title="Replay the repository's history">&#9654;</button>
+      <input id="history" type="range" min="0" max="1" step="1" value="1">
+      <output id="history-out">today</output>
     </div>
     <div class="keys">
       <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</span>

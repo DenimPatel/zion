@@ -99,6 +99,12 @@ export class CitySource {
     return `District ${district.id}`;
   }
 
+  /** A nested-folder region's label; boroughs are numbered while locked. */
+  regionLabel(region) {
+    if (!this.locked) return this.s(region.name) || `Region ${region.id}`;
+    return `Borough ${region.id}`;
+  }
+
   async assignLockedAddresses(buildings) {
     if (!this.locked || !this.vault) return;
     for (const building of buildings) {
@@ -112,6 +118,46 @@ export class CitySource {
     this.manifest = await getJSON(this.base, 'city.json');
     this.districts = this.manifest.districts || [];
     return this.manifest;
+  }
+
+  /** Co-change pairs, `[[buildingIdA, buildingIdB, count], ...]`. Geometry, not
+   *  text, so it is fetched the same whether the city is locked or not -- only
+   *  present at all when the manifest's `bridges` pointer is set. */
+  async bridges() {
+    if (this._bridges) return this._bridges;
+    if (!this.manifest || !this.manifest.bridges) return [];
+    this._bridges = await getJSON(this.base, this.manifest.bridges);
+    return this._bridges;
+  }
+
+  /** Import edges, `[[fromId, toId, violates], ...]`; ids only, so locked or not. */
+  async imports() {
+    if (this._imports) return this._imports;
+    if (!this.manifest || !this.manifest.imports) return [];
+    this._imports = await getJSON(this.base, this.manifest.imports);
+    return this._imports;
+  }
+
+  /**
+   * The whole-repo facet index: one row per building, columns named by
+   * `manifest.indexColumns`. Loaded once, up front -- unlike district chunks,
+   * which only cover the camera-resident working set (see stream.js) -- so a
+   * filter can answer "how many .py files?" without walking every chunk.
+   */
+  async index() {
+    if (this._index) return this._index;
+    if (!this.manifest || !this.manifest.index) return [];
+    this._index = await getJSON(this.base, this.manifest.index);
+    return this._index;
+  }
+
+  /** The always-plaintext extension table: `ext:py` must work even locked. */
+  async extTable() {
+    if (this._extTable) return this._extTable;
+    if (!this.manifest || !this.manifest.extTable) return [];
+    const buffer = await getBuffer(this.base, this.manifest.extTable);
+    this._extTable = decodeStrings(buffer);
+    return this._extTable;
   }
 
   async loadStrings() {

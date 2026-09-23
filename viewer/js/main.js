@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import { CitySource } from './loader.js';
 import {
   CityMesh,
+  HEALTH_COLOURS,
+  cycleColour,
   createCityHall,
   createImpostors,
   createHoverOutline,
@@ -17,6 +19,11 @@ import {
   placeDistrictMarker,
   ARCHETYPE_COLORS,
   archetypeLabel,
+  DELTA_COLOURS,
+  LENS_BANDS,
+  lensBand,
+  healthSignal,
+  plinthTop,
 } from './city.js';
 import { SkyRig } from './sky.js';
 import { FlyCamera, OrbitCamera, CameraFlight } from './cameras.js';
@@ -26,6 +33,12 @@ import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
+import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
+import { SelectionOverlay, LINK_COLOURS } from './selection.js';
+import { Notes } from './notes.js';
+import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
+import { MapLabels } from './labels.js';
+import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
 const loading = document.getElementById('loading');
@@ -47,10 +60,22 @@ const state = {
   // benchmark can shrink either without changing the code paths under test.
   maxResident: Number(params.get('maxres')) || null,
   shadows: params.get('shadows') !== '0',
+  filterText: '',
   // Archetypes the user has switched off in the Keys panel. Empty means the
   // whole repository is on screen, which is the default and the only state a
   // benchmark or self-test ever sees.
   hiddenArchetypes: new Set(),
+  // Legend entries the user has switched off. Keyed by the manifest legend id
+  // so the panel is driven by the analyzer's own list rather than a second one
+  // kept here by hand.
+  hiddenLayers: new Set(),
+  // Folders the current district/region selection focuses on (S14): every
+  // building outside them fades, the way a filter fades non-matches.
+  focus: null,
+  // The History slider: days before the newest commit, or null for today.
+  timeline: null,
+  // The author the territory lens paints.
+  territoryAuthor: '',
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -90,6 +115,10 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let hallNear = false;
 let rebuilding = false;
+// Where the city was last built for, and when: the near/far split is only valid
+// around that point (see `refreshResident`).
+let lodCentre = null;
+let lodRebuiltAt = 0;
 
 function resize() {
   const width = window.innerWidth;
@@ -106,100 +135,365 @@ resize();
 // HUD
 // ---------------------------------------------------------------------------
 
-function renderLegend() {
-  const manifest = state.source.manifest;
-  const list = document.getElementById('legend-list');
-  list.innerHTML = '';
-  for (const entry of manifest.legend || []) {
-    const item = document.createElement('li');
-    if (!entry.enabled) item.classList.add('disabled');
-    const swatch = document.createElement('span');
-    swatch.className = 'swatch';
-    const label = document.createElement('span');
-    label.textContent = entry.label;
-    const unit = document.createElement('span');
-    unit.className = 'legend-unit';
-    unit.textContent = entry.enabled ? '' : 'off';
-    item.append(swatch, label, unit);
-    list.append(item);
+/**
+ * The City Guide is the legend made switchable, explained and counted.
+ *
+ * The manifest's `legend` owns what each entry *means*: it is emitted by the
+ * analyzer (label, group, and a longer description) and describes the
+ * repository, not the viewer. This table is the viewer's half of the same
+ * contract the degeneration flags already use (`flags.churn` -> cranes) -- it
+ * says which layer an entry draws, how to switch that layer off, what colour it
+ * really is on screen, and which filter query finds the buildings that carry
+ * it (for the live count and the "Highlight" action). There are three
+ * switching mechanisms because they cost different things:
+ *
+ *   archetype  the form is dropped from the resident set and the city rebuilt,
+ *              so collision and hover follow it (the path a form row takes)
+ *   mesh       a separate InstancedMesh is toggled by visibility -- no rebuild
+ *   option     the encoding is baked into the building instances (tint,
+ *              weathering, lit windows, downtown glass, boarded windows), so
+ *              the city is rebuilt with that option off
+ *
+ * An entry with `kind: null` has no layer of its own: it is either a pure
+ * encoding -- height, footprint, floors, district area, roads -- or it lives
+ * in the detail report (skybridges). Those rows are listed, because the panel
+ * is the whole legend, but they are not switches and say so.
+ */
+const LEGEND_KEYS = {
+  height: { kind: null, short: 'Height', colour: 0xc9ced8, reason: 'building height is the city itself' },
+  footprint: { kind: null, short: 'Footprint', colour: 0xa4acb9, reason: 'the footprint is the plan itself' },
+  floors: { kind: null, short: 'Floors', colour: 0x8b95a5, reason: 'floors are the window rows themselves' },
+  lit_windows: { kind: 'option', short: 'Lit windows', colour: 0xffd479 },
+  district_area: { kind: null, short: 'District area', colour: 0x1d2330, reason: 'district area is the layout itself' },
+  roads: { kind: null, short: 'Roads', colour: 0xf2c14e, reason: 'roads are the layout itself' },
+  regions: { kind: null, short: 'Folder plinths', colour: 0x4a5670, reason: 'plinths are the layout itself' },
+  new_construction: { kind: 'mesh', target: 'scaffolding', short: 'Scaffolding', colour: 0xe8b04b, query: 'is:new' },
+  churn: { kind: 'mesh', target: 'cranes', short: 'Cranes', colour: 0xd9a531, query: 'is:hot' },
+  heat: { kind: 'mesh', target: 'heat-beacons', short: 'Rooftop beacons', colour: 0xff9d5c, query: 'heat>0' },
+  weathering: { kind: 'option', short: 'Weathering', colour: 0x7a6a5a },
+  author_tint: { kind: 'option', short: 'Author tint', colour: 0xb28ad6 },
+  sole_tenant: { kind: 'mesh', target: 'sole-tenant-markers', short: 'Corner flags', colour: 0xe4c85a, query: 'is:soletenant' },
+  town_hall: { kind: 'archetype', target: 'town_hall', short: 'Town halls', colour: ARCHETYPE_COLORS.town_hall, query: 'archetype:town_hall' },
+  parks: { kind: 'archetype', target: 'park', short: 'Parks', colour: ARCHETYPE_COLORS.park, query: 'archetype:park' },
+  silos: { kind: 'archetype', target: 'silo', short: 'Silos', colour: ARCHETYPE_COLORS.silo, query: 'archetype:silo' },
+  monuments: { kind: 'archetype', target: 'monument', short: 'Monuments', colour: ARCHETYPE_COLORS.monument, query: 'archetype:monument' },
+  downtown: { kind: 'option', short: 'Downtown towers', colour: 0x8fd6ff, query: 'is:downtown' },
+  skybridges: { kind: 'overlay', target: 'cochange-rings', short: 'Co-change rings', colour: LINK_COLOURS.cochange },
+  hotspots: { kind: 'mesh', target: 'hazard-barriers', short: 'Hazard barriers — hotspots', colour: HEALTH_COLOURS.hotspot, query: 'is:hotspot' },
+  oversized: { kind: 'mesh', target: 'raking-shores', short: 'Buttresses — oversized', colour: HEALTH_COLOURS.oversized, query: 'is:oversized' },
+  orphans: { kind: 'option', short: 'Boarded up — orphans', colour: HEALTH_COLOURS.orphan, query: 'is:orphan' },
+  cycles: { kind: 'mesh', target: 'cycle-pennants', short: 'Pennants — import cycles', colour: HEALTH_COLOURS.cycle, query: 'is:cycle' },
+  knowledge: { kind: 'mesh', target: 'knowledge-flags', short: 'Red flags — owner gone', colour: 0xe8332a, query: 'is:knowledge' },
+  untested: { kind: 'mesh', target: 'traffic-cones', short: 'Traffic cones — untested risk', colour: 0xff6a1a, query: 'is:untestedrisk' },
+  complexity: { kind: 'mesh', target: 'cross-bracing', short: 'Cross-bracing — branch-heavy', colour: 0xb8c2cc, query: 'is:braced' },
+  imports: { kind: 'overlay', target: 'import-lines', short: 'Utility lines — imports', colour: LINK_COLOURS.out, query: 'fanout>0' },
+  instability: { kind: null, short: 'Instability', colour: 0xd9b44a, reason: 'a colour lens: Filter tab → instability' },
+  violations: { kind: 'mesh', target: 'no-entry-signs', short: 'No-entry signs — layering', colour: HEALTH_COLOURS.violation, query: 'is:violation' },
+  district_coupling: { kind: 'overlay', target: 'district-links', short: 'Folder links', colour: LINK_COLOURS.cochange },
+  codeowners: { kind: 'mesh', target: 'owner-notices', short: 'Owner notices — CODEOWNERS drift', colour: 0x8c5ce6, query: 'is:drift' },
+  experts: { kind: null, short: 'Who to ask', colour: 0xb28ad6, reason: 'listed in the inspector, not drawn' },
+  delta: { kind: 'mesh', target: 'survey-stakes', short: 'Survey stakes — changed', colour: DELTA_COLOURS.added, query: 'is:added OR is:grown OR is:shrunk' },
+  timeline: { kind: null, short: 'History', colour: 0xe8b04b, reason: 'the History slider replays it' },
+};
+
+// Forms the legend does not name, so every archetype still has a switch. The
+// four that *are* legend entries (town hall, park, silo, monument) appear under
+// Civic and are not repeated here.
+const FORM_KEYS = ['tower', 'slab', 'warehouse', 'ruin'];
+const FORM_NOTES = {
+  tower: 'The tallest quarter of the code files: a lot of real code in one file.',
+  slab: 'Middle-height files: the ordinary working stock of the city.',
+  warehouse: 'Low, broad files: short, or a few long definitions.',
+  ruin: 'Ignored files, drawn only with --include-noise.',
+};
+
+/** Is one legend entry currently switched off? */
+function layerOff(id) {
+  const spec = LEGEND_KEYS[id];
+  if (!spec || !spec.kind) return false;
+  if (spec.kind === 'archetype') return state.hiddenArchetypes.has(spec.target);
+  return state.hiddenLayers.has(id);
+}
+
+const hexColour = (colour) => `#${(colour === undefined ? 0x777777 : colour).toString(16).padStart(6, '0')}`;
+
+/** How many buildings, repository-wide, a filter query matches -- or null. */
+function countFor(query) {
+  if (!query || !context.facetIndex) return null;
+  const predicate = compileQuery(query);
+  if (!predicate) return null;
+  return runQuery(context.facetIndex, predicate, state.source.manifest.indexColumns).count;
+}
+
+/** "Logical source lines -> building height" reads better with a real arrow. */
+function prettyEncoding(text) {
+  return String(text || '').replace(/\s*->\s*/g, ' → ');
+}
+
+function keyRow({ key, label, short, colour, kind, target, legend, reason, description, query, disabled }) {
+  const row = document.createElement('div');
+  row.className = 'key-row';
+  row.dataset.key = key;
+  if (legend) row.dataset.legend = legend;
+  if (disabled) row.classList.add('disabled');
+
+  let control;
+  if (kind) {
+    row.dataset.kind = kind;
+    if (target) row.dataset.target = target;
+    control = document.createElement('button');
+    control.type = 'button';
+    control.className = 'g-switch';
+    control.setAttribute('role', 'switch');
+    control.setAttribute('aria-label', `Show ${label}`);
+    // The row carries the pressed state too, for anything that reads rows.
+    row.setAttribute('aria-pressed', 'true');
+  } else {
+    row.classList.add('inert');
+    control = document.createElement('span');
+    control.className = 'g-badge';
+    control.textContent = disabled ? 'off' : 'always';
+    control.title = reason || 'no separate layer to switch';
   }
 
-  const notes = document.getElementById('legend-notes');
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.style.background = hexColour(colour);
+
+  const name = document.createElement('button');
+  name.type = 'button';
+  name.className = 'g-name';
+  name.textContent = label;
+  name.setAttribute('aria-expanded', 'false');
+
+  const count = document.createElement('span');
+  count.className = 'g-count';
+  const n = disabled ? null : countFor(query);
+  if (n !== null) {
+    count.textContent = n.toLocaleString();
+    count.title = `${n.toLocaleString()} building${n === 1 ? '' : 's'} in the whole city`;
+  }
+
+  const line = document.createElement('p');
+  line.className = 'g-short';
+  line.textContent = disabled ? `${prettyEncoding(short)} — not drawn for this repository` : prettyEncoding(short);
+
+  const more = document.createElement('div');
+  more.className = 'g-more';
+  more.hidden = true;
+  const text = document.createElement('p');
+  text.textContent = description || prettyEncoding(short);
+  more.append(text);
+  if (disabled && reason) {
+    const why = document.createElement('p');
+    why.textContent = reason;
+    more.append(why);
+  }
+  if (query && n) {
+    const actions = document.createElement('div');
+    actions.className = 'g-actions';
+    const highlight = document.createElement('button');
+    highlight.type = 'button';
+    highlight.dataset.query = query;
+    highlight.className = 'g-highlight';
+    highlight.textContent = `Highlight ${n.toLocaleString()}`;
+    highlight.dataset.label = highlight.textContent;
+    highlight.title = `Dim everything else (filter: ${query})`;
+    actions.append(highlight);
+    more.append(actions);
+  }
+
+  row.append(control, chip, name, count, line, more);
+  return row;
+}
+
+function groupHeading(text) {
+  const heading = document.createElement('div');
+  heading.className = 'guide-group';
+  heading.textContent = text;
+  return heading;
+}
+
+/** Why a legend entry is off, from the analyzer's own notes where one says. */
+function disabledReason(id) {
+  const notes = (state.source.manifest.flags && state.source.manifest.flags.notes) || [];
+  const words = {
+    author_tint: /author/i, sole_tenant: /author/i, churn: /churn/i, heat: /churn/i, hotspots: /churn/i,
+    weathering: /weather|commit dates/i, new_construction: /birth/i, skybridges: /coupling/i,
+    downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
+    untested: /test/i, imports: /import/i, instability: /import/i, district_coupling: /coupling/i,
+    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i,
+  }[id];
+  const note = words ? notes.find((n) => words.test(n)) : null;
+  if (note) return note;
+  if (id === 'cycles') return 'No import cycles were found.';
+  if (id === 'violations') return 'No import points against the layering.';
+  if (id === 'complexity') return 'No function has 15 or more decision points.';
+  if (id === 'codeowners') return 'No CODEOWNERS file in the repository.';
+  if (id === 'district_coupling') return 'No two folders keep changing together.';
+  if (id === 'delta') return 'No baseline yet: build again after the repository changes, or build with --compare REV.';
+  return 'Not drawn: the repository history is too thin for this signal to mean anything.';
+}
+
+function renderGuide() {
+  const manifest = state.source.manifest;
+  const list = document.getElementById('guide-list');
+  list.innerHTML = '';
+
+  let group = null;
+  for (const entry of manifest.legend || []) {
+    const spec = LEGEND_KEYS[entry.id] || { kind: null, short: entry.id, reason: 'no layer to switch' };
+    const heading = entry.group || 'Signals';
+    if (heading !== group) {
+      list.append(groupHeading(heading));
+      group = heading;
+    }
+    // A degeneration flag that is off means the geometry was never drawn, so
+    // there is nothing for the reader to switch: say so rather than offer a
+    // dead control.
+    const disabled = entry.enabled === false;
+    list.append(
+      keyRow({
+        key: `legend:${entry.id}`,
+        label: spec.short,
+        short: entry.label,
+        colour: spec.colour,
+        kind: disabled ? null : spec.kind,
+        target: spec.target,
+        legend: entry.id,
+        reason: disabled ? disabledReason(entry.id) : spec.reason,
+        description: entry.description,
+        query: spec.query,
+        disabled,
+      })
+    );
+  }
+
+  list.append(groupHeading('Forms'));
+  for (const name of FORM_KEYS) {
+    list.append(
+      keyRow({
+        key: `form:${name}`,
+        label: archetypeLabel(name),
+        short: FORM_NOTES[name],
+        colour: ARCHETYPE_COLORS[name],
+        kind: 'archetype',
+        target: name,
+        description: FORM_NOTES[name],
+        query: `archetype:${name}`,
+      })
+    );
+  }
+
+  const notes = document.getElementById('guide-notes');
   notes.innerHTML = '';
   if (state.source.locked) {
     const p = document.createElement('p');
-    p.textContent =
-      'Repo notes are encrypted. Press U and enter the passphrase to read them.';
+    p.textContent = 'Repo notes are encrypted. Press U and enter the passphrase to read them.';
     notes.append(p);
-    return;
-  }
-  for (const note of manifest.stats.notes || []) {
-    const p = document.createElement('p');
-    p.textContent = state.source.s(note);
-    notes.append(p);
-  }
-}
-
-function renderXray() {
-  const table = document.getElementById('xray-table');
-  table.innerHTML = '';
-  for (const [name, colour] of Object.entries(ARCHETYPE_COLORS)) {
-    const row = document.createElement('tr');
-    row.className = 'key-row';
-    row.dataset.archetype = name;
-    row.tabIndex = 0;
-    row.setAttribute('role', 'button');
-
-    const stateCell = document.createElement('td');
-    const box = document.createElement('span');
-    box.className = 'key-state';
-    box.setAttribute('aria-hidden', 'true');
-    stateCell.append(box);
-
-    const label = document.createElement('td');
-    label.textContent = archetypeLabel(name);
-
-    const chipCell = document.createElement('td');
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.style.background = `#${colour.toString(16).padStart(6, '0')}`;
-    chipCell.append(chip);
-
-    row.append(stateCell, label, chipCell);
-    table.append(row);
+  } else {
+    for (const note of manifest.stats.notes || []) {
+      const p = document.createElement('p');
+      p.textContent = state.source.s(note);
+      notes.append(p);
+    }
   }
   syncKeyRows();
+  renderHealth();
+  renderLensKey();
 }
 
-/** Reflect the current filter on every key row and the reset control. */
+/** Reflect every switch on its row and the reset control. */
 function syncKeyRows() {
-  const table = document.getElementById('xray-table');
-  if (!table) return;
-  for (const row of table.querySelectorAll('tr.key-row')) {
-    const name = row.dataset.archetype;
-    const hidden = state.hiddenArchetypes.has(name);
-    row.classList.toggle('off', hidden);
-    row.setAttribute('aria-pressed', String(!hidden));
-    row.title = `${hidden ? 'Show' : 'Hide'} ${archetypeLabel(name)}`;
+  const list = document.getElementById('guide-list');
+  if (!list) return;
+  for (const row of list.querySelectorAll('.key-row')) {
+    const kind = row.dataset.kind;
+    if (!kind) continue;
+    const off = kind === 'archetype'
+      ? state.hiddenArchetypes.has(row.dataset.target)
+      : state.hiddenLayers.has(row.dataset.legend);
+    row.classList.toggle('off', off);
+    row.setAttribute('aria-pressed', String(!off));
+    const control = row.querySelector('.g-switch');
+    if (control) {
+      control.setAttribute('aria-checked', String(!off));
+      control.title = `${off ? 'Show' : 'Hide'} ${row.querySelector('.g-name').textContent}`;
+    }
   }
-  const reset = document.getElementById('xray-reset');
-  if (reset) reset.hidden = state.hiddenArchetypes.size === 0;
+  const reset = document.getElementById('guide-reset');
+  if (reset) {
+    reset.hidden = state.hiddenArchetypes.size === 0 && state.hiddenLayers.size === 0;
+  }
 }
 
 /**
- * Switch one archetype on or off.
+ * Switch one row on or off.
  *
- * The city is rebuilt from the resident set with the hidden forms dropped, so
- * the change reaches everything at once -- the massing, the rooftop clutter,
- * the walk-mode collision, hover and click -- rather than leaving invisible
- * walls or tanks floating over a building that is no longer drawn.
+ * A form is dropped from the resident set and the city rebuilt, so the change
+ * reaches the massing, the rooftop clutter, walk-mode collision and hover at
+ * once rather than leaving invisible walls behind. A prop cluster is its own
+ * InstancedMesh, so it only needs its visibility flipped. An encoding baked
+ * into the instances forces a rebuild with that option off.
  */
-function toggleArchetype(name) {
-  if (!name) return;
-  if (state.hiddenArchetypes.has(name)) state.hiddenArchetypes.delete(name);
-  else state.hiddenArchetypes.add(name);
+function toggleRow(row) {
+  const kind = row.dataset.kind;
+  if (!kind) return;
+  if (kind === 'archetype') {
+    const name = row.dataset.target;
+    if (state.hiddenArchetypes.has(name)) state.hiddenArchetypes.delete(name);
+    else state.hiddenArchetypes.add(name);
+    syncKeyRows();
+    scheduleRebuild();
+    return;
+  }
+  const key = row.dataset.legend;
+  if (state.hiddenLayers.has(key)) state.hiddenLayers.delete(key);
+  else state.hiddenLayers.add(key);
   syncKeyRows();
-  scheduleRebuild();
+  if (kind === 'mesh' || kind === 'overlay') applyHiddenLayers();
+  else scheduleRebuild();
+}
+
+/** Open or close one row's explanation. */
+function toggleExplain(row) {
+  const more = row.querySelector('.g-more');
+  const name = row.querySelector('.g-name');
+  if (!more) return;
+  more.hidden = !more.hidden;
+  row.classList.toggle('open', !more.hidden);
+  if (name) name.setAttribute('aria-expanded', String(!more.hidden));
+}
+
+/** Point at every building a row describes by filtering to it. */
+function highlightQuery(query) {
+  const input = document.getElementById('filter-input');
+  const same = state.filterText === query;
+  state.filterText = same ? '' : query;
+  if (input) input.value = state.filterText;
+  applyActiveFilter();
+  for (const button of document.querySelectorAll('.g-highlight')) {
+    const active = button.dataset.query === state.filterText;
+    button.classList.toggle('active', active);
+    button.textContent = active ? 'Clear highlight' : button.dataset.label;
+  }
+}
+
+/** Re-apply every prop-cluster switch to the mesh that is on screen now. */
+function applyHiddenLayers() {
+  if (!context.city) return;
+  // Every prop back first (the History slider may have hidden them all), then
+  // each switch takes its own layer away again.
+  context.city.showProps();
+  for (const [id, spec] of Object.entries(LEGEND_KEYS)) {
+    if (spec.kind === 'mesh') context.city.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+    else if (spec.kind === 'overlay' && context.overlay) {
+      context.overlay.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+    }
+  }
+  // The History slider hides every prop while it replays the past; a switch
+  // flipped meanwhile must not bring them back early.
+  if (state.timeline !== null) context.city.hideProps();
 }
 
 let rebuildScheduled = false;
@@ -214,10 +508,459 @@ function scheduleRebuild() {
   });
 }
 
-function resetArchetypes() {
+function resetKeys() {
   state.hiddenArchetypes.clear();
+  state.hiddenLayers.clear();
   syncKeyRows();
   scheduleRebuild();
+}
+
+// ---- Health tab: the architect's shortlist -------------------------------
+
+const HEALTH_SECTIONS = [
+  {
+    id: 'hotspots', title: 'Hotspots', colour: HEALTH_COLOURS.hotspot, flag: 'hotspots',
+    text: 'Large and changed often: where refactoring pays back first.',
+  },
+  {
+    id: 'oversized', title: 'Oversized files', colour: HEALTH_COLOURS.oversized, flag: null,
+    text: 'Top 5% by lines and 400+ lines. Split out the longest definition first.',
+  },
+  {
+    id: 'cycles', title: 'Import cycles', colour: HEALTH_COLOURS.cycle, flag: 'imports',
+    text: 'Files that import each other in a loop. Break one edge in each.',
+  },
+  {
+    id: 'knowledge', title: 'Knowledge risk', colour: 0xe8332a, flag: 'knowledge',
+    text: 'The main author has not committed in six months. Pair up or document before it is needed.',
+  },
+  {
+    id: 'orphans', title: 'Possible dead code', colour: HEALTH_COLOURS.orphan, flag: 'imports',
+    text: 'Nothing imports these and they have not changed in six months. Best-effort: verify before deleting.',
+  },
+  {
+    id: 'violations', title: 'Layering violations', colour: HEALTH_COLOURS.violation, flag: 'layering',
+    text: 'Files with an import that points the wrong way. Select one to see the red line.',
+  },
+  {
+    id: 'untested', title: 'Untested risk', colour: 0xff6a1a, flag: 'tests',
+    text: 'Hotspots, oversized and downtown files that no test imports or is named after.',
+  },
+  {
+    id: 'complexity', title: 'Branch-heavy code', colour: 0xb8c2cc, flag: 'complexity',
+    text: 'A function with 15+ decision points, worst first. Hard to test every path.',
+  },
+  {
+    id: 'drift', title: 'CODEOWNERS drift', colour: 0x8c5ce6, flag: 'codeowners',
+    text: 'The people CODEOWNERS names for these files wrote almost none of them.',
+  },
+];
+
+// Extra Health cards that are not one ranked list of files.
+const HEALTH_EXTRA = ['delta', 'dependencies', 'notes'];
+
+function indexRowById() {
+  if (context._rowById) return context._rowById;
+  const map = new Map();
+  const col = columnIndex(state.source.manifest.indexColumns);
+  for (const row of context.facetIndex || []) map.set(row[col.id], row);
+  context._rowById = map;
+  return map;
+}
+
+function healthItem(id) {
+  const row = indexRowById().get(id);
+  const col = columnIndex(state.source.manifest.indexColumns);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'health-item';
+  button.dataset.building = String(id);
+  const path = row ? state.source.s(row[col.path !== undefined ? col.path : col.name]) : '';
+  const loc = row ? row[col.loc] : 0;
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  meta.textContent = `${Number(loc || 0).toLocaleString()} ln`;
+  button.append(meta, document.createTextNode(path || `building ${id}`));
+  return button;
+}
+
+function renderHealth() {
+  const panel = document.getElementById('guide-health');
+  if (!panel) return;
+  panel.innerHTML = '';
+  const manifest = state.source.manifest;
+  const review = manifest.review;
+  const flags = manifest.flags || {};
+  if (!review) {
+    panel.innerHTML = '<p class="health-empty">This city was built before the health review existed. Rebuild it to see hotspots, cycles and knowledge risk.</p>';
+    return;
+  }
+  const intro = document.createElement('p');
+  intro.className = 'hint guide-intro';
+  intro.textContent =
+    'What an architect would look at first. Click a file to fly to it. Switch the colour lens to "health" to see all of these at once.';
+  panel.append(intro);
+
+  for (const section of HEALTH_SECTIONS) {
+    const card = document.createElement('div');
+    card.className = 'health-card';
+    card.dataset.section = section.id;
+    const title = document.createElement('h3');
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.background = hexColour(section.colour);
+    const count = document.createElement('span');
+    count.className = 'count';
+    const total = (review.totals && review.totals[section.id]) || 0;
+    const off = section.flag && !flags[section.flag];
+    count.textContent = off ? 'off' : String(total);
+    title.append(chip, document.createTextNode(section.title), count);
+    const text = document.createElement('p');
+    text.textContent = off ? disabledReason(section.id) : section.text;
+    card.append(title, text);
+
+    if (!off) {
+      const list = document.createElement('ol');
+      if (section.id === 'cycles') {
+        (review.cycles || []).forEach((members, index) => {
+          const li = document.createElement('li');
+          li.className = 'health-cycle';
+          li.style.borderColor = `#${cycleColour(THREE, index + 1).getHexString()}`;
+          for (const id of members) li.append(healthItem(id));
+          list.append(li);
+        });
+      } else {
+        for (const id of review[section.id] || []) {
+          const li = document.createElement('li');
+          li.append(healthItem(id));
+          list.append(li);
+        }
+      }
+      if (!list.children.length) {
+        const none = document.createElement('p');
+        none.className = 'health-empty';
+        none.textContent = 'None found.';
+        card.append(none);
+      } else {
+        card.append(list);
+      }
+    }
+    panel.append(card);
+  }
+  const delta = renderDeltaCard(manifest);
+  if (delta) panel.prepend(intro, delta);
+  const deps = renderDependencyCard(manifest);
+  if (deps) panel.append(deps);
+  panel.append(renderNotesCard());
+}
+
+function card(title, colour, count) {
+  const node = document.createElement('div');
+  node.className = 'health-card';
+  const heading = document.createElement('h3');
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.style.background = hexColour(colour);
+  heading.append(chip, document.createTextNode(title));
+  if (count !== undefined) {
+    const badge = document.createElement('span');
+    badge.className = 'count';
+    badge.textContent = String(count);
+    heading.append(badge);
+  }
+  node.append(heading);
+  return node;
+}
+
+/** What changed since the baseline: the trend line an architect tracks over months. */
+function renderDeltaCard(manifest) {
+  const delta = manifest.delta;
+  if (!delta) return null;
+  const node = card('Since the baseline', DELTA_COLOURS.added, delta.added.length + delta.grown.length + delta.shrunk.length);
+  node.dataset.section = 'delta';
+  const base = delta.baseline || {};
+  const label = base.label >= 0 ? state.source.s(base.label) : base.head ? `build of ${base.head.slice(0, 7)}` : 'the previous build';
+  const text = document.createElement('p');
+  text.textContent =
+    `Against ${label}: ${delta.added.length} added, ${delta.removedCount || 0} removed, ` +
+    `${delta.grown.length} grown and ${delta.shrunk.length} shrunk by 10% or more.`;
+  node.append(text);
+
+  const rows = [
+    ['hotspots', 'Hotspots'], ['cycles', 'Import cycles'], ['violations', 'Layering violations'],
+    ['untested', 'Untested risk'], ['oversized', 'Oversized'], ['knowledge', 'Knowledge risk'],
+    ['orphans', 'Possible dead code'], ['files', 'Files'], ['loc', 'Logical lines'],
+  ];
+  const table = document.createElement('table');
+  table.className = 'delta-table';
+  for (const [key, name] of rows) {
+    const before = (delta.before || {})[key] || 0;
+    const after = (delta.after || {})[key] || 0;
+    const change = after - before;
+    const tr = document.createElement('tr');
+    // Worse is red for every signal row; for files and lines a change is only information.
+    const neutral = key === 'files' || key === 'loc';
+    tr.className = change === 0 ? 'same' : neutral ? 'info' : change > 0 ? 'worse' : 'better';
+    tr.innerHTML = `<td>${name}</td><td class="num">${before.toLocaleString()}</td><td class="num">→ ${after.toLocaleString()}</td>` +
+      `<td class="num">${change > 0 ? '+' : ''}${change.toLocaleString()}</td>`;
+    table.append(tr);
+  }
+  node.append(table);
+
+  const list = document.createElement('ol');
+  const became = delta.became || {};
+  for (const [signal, ids] of Object.entries(became)) {
+    for (const id of (ids || []).slice(0, 6)) {
+      const li = document.createElement('li');
+      const item = healthItem(id);
+      item.querySelector('.meta').textContent = `became ${signal}`;
+      li.append(item);
+      list.append(li);
+    }
+  }
+  for (const [id, lines] of (delta.grown || []).slice(0, 5)) {
+    const li = document.createElement('li');
+    const item = healthItem(id);
+    item.querySelector('.meta').textContent = `+${lines} ln`;
+    li.append(item);
+    list.append(li);
+  }
+  if (list.children.length) node.append(list);
+  const hint = document.createElement('p');
+  hint.className = 'health-empty';
+  hint.textContent = 'Colour lens “changed since baseline” paints it on the map; filter is:added, is:grown, is:shrunk.';
+  node.append(hint);
+  return node;
+}
+
+/** The folder-level dependency picture: the heaviest edges, and every one that points the wrong way. */
+function renderDependencyCard(manifest) {
+  const deps = manifest.dependencies;
+  if (!deps || !deps.matrix || !deps.matrix.length) return null;
+  const node = card('Folder dependencies', LINK_COLOURS.out, deps.matrix.length);
+  node.dataset.section = 'dependencies';
+  const rules = deps.rules >= 0 ? state.source.s(deps.rules) : '';
+  const text = document.createElement('p');
+  text.textContent = rules && rules !== 'majority'
+    ? `Imports between folders, heaviest first. Layering rules: ${rules}.`
+    : 'Imports between folders, heaviest first. With no .zion/rules.json, an import is against the grain when the two folders import each other and this is the thinner direction.';
+  node.append(text);
+  const violating = new Set((deps.violatingPairs || []).map(([a, b]) => `${a}>${b}`));
+  const name = (id) => {
+    const d = manifest.districts[id];
+    return d ? state.source.districtLabel(d) : `district ${id}`;
+  };
+  const list = document.createElement('ol');
+  for (const [from, to, count] of deps.matrix.slice(0, 12)) {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'health-item dep-item';
+    button.dataset.district = String(from);
+    if (violating.has(`${from}>${to}`)) button.classList.add('violating');
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = `${count} import${count === 1 ? '' : 's'}`;
+    button.append(meta, document.createTextNode(`${name(from)} → ${name(to)}`));
+    li.append(button);
+    list.append(li);
+  }
+  node.append(list);
+  if (deps.coupling && deps.coupling.length) {
+    const sub = document.createElement('p');
+    sub.className = 'health-empty';
+    sub.textContent = 'Folders that change together: ' + deps.coupling.slice(0, 4)
+      .map(([a, b, , commits]) => `${name(a)} ↔ ${name(b)} (${commits})`).join(' · ');
+    node.append(sub);
+  }
+  return node;
+}
+
+/** The reader's notes, with export/import so they can travel. */
+function renderNotesCard() {
+  const node = card('Your notes', 0xff5fa2, context.notes ? context.notes.all().length : 0);
+  node.dataset.section = 'notes';
+  const notes = context.notes;
+  const text = document.createElement('p');
+  if (!notes || !notes.available) {
+    text.textContent = 'Notes need browser storage, which is unavailable here.';
+    node.append(text);
+    return node;
+  }
+  text.textContent = 'Pinned in this browser. Add one from a building’s inspector; a pink pin marks it on the map.';
+  node.append(text);
+  const byPath = new Map();
+  const col = columnIndex(state.source.manifest.indexColumns);
+  for (const row of context.facetIndex || []) byPath.set(state.source.s(row[col.path]), row[col.id]);
+  const list = document.createElement('ol');
+  for (const item of notes.all().slice(0, 30)) {
+    const id = byPath.get(item.path);
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'health-item';
+    if (id !== undefined) button.dataset.building = String(id);
+    else button.disabled = true;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = id === undefined ? 'not in this build' : '';
+    button.append(meta, document.createTextNode(item.path));
+    const body = document.createElement('span');
+    body.className = 'note-text';
+    body.textContent = item.text;
+    button.append(body);
+    li.append(button);
+    list.append(li);
+  }
+  if (list.children.length) node.append(list);
+  const actions = document.createElement('div');
+  actions.className = 'g-actions';
+  const exportButton = document.createElement('button');
+  exportButton.type = 'button';
+  exportButton.className = 'chip-btn';
+  exportButton.textContent = 'Export';
+  exportButton.addEventListener('click', () => {
+    const blob = new Blob([notes.exportJson()], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'zion-notes.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  });
+  const importButton = document.createElement('button');
+  importButton.type = 'button';
+  importButton.className = 'chip-btn';
+  importButton.textContent = 'Import…';
+  importButton.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      try {
+        notes.importJson(await file.text());
+      } catch (error) {
+        text.textContent = `Could not import: ${error.message}`;
+      }
+    });
+    input.click();
+  });
+  actions.append(exportButton, importButton);
+  node.append(actions);
+  return node;
+}
+
+/** Fly to a building by id: it may not be resident, so fall back to its district. */
+async function flyToBuilding(id) {
+  let building = context.resident.find((b) => b.id === id);
+  if (!building) {
+    const row = indexRowById().get(id);
+    const col = columnIndex(state.source.manifest.indexColumns);
+    const district = row && state.source.manifest.districts[row[col.district]];
+    if (district) {
+      teleportTo({ kind: 'district', district });
+      // The district streams in as the camera arrives; open the file then.
+      setTimeout(() => {
+        const arrived = context.resident.find((b) => b.id === id);
+        if (arrived && context.inspector) context.inspector.showBuilding(arrived);
+      }, 1800);
+    }
+    return;
+  }
+  teleportTo({ kind: 'building', building });
+}
+
+function renderLensKey() {
+  const key = document.getElementById('lens-key');
+  const lens = document.getElementById('lens-select');
+  if (!key || !lens) return;
+  key.innerHTML = '';
+  const authorSelect = document.getElementById('lens-author');
+  if (authorSelect) authorSelect.hidden = lens.value !== 'territory';
+  const item = (colour, label, count) => {
+    const span = document.createElement('span');
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.background = typeof colour === 'string' ? colour : hexColour(colour);
+    span.append(chip, document.createTextNode(count === undefined ? label : `${label} · ${count.toLocaleString()}`));
+    key.append(span);
+  };
+  // Counts are over the buildings on screen: the key says how much of what
+  // you are looking at falls in each band, not a legend in the abstract.
+  const resident = context.resident || [];
+  if (lens.value === 'health') {
+    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+    const flags = state.source.manifest.flags || {};
+    const counts = {};
+    for (const b of resident) {
+      const signal = healthSignal(b, flags);
+      counts[signal] = (counts[signal] || 0) + 1;
+    }
+    for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) item(colour, names[signal], counts[signal] || 0);
+  } else if (LENS_BANDS[lens.value]) {
+    const counts = new Map();
+    for (const b of resident) {
+      const band = lensBand(lens.value, b);
+      counts.set(band, (counts.get(band) || 0) + 1);
+    }
+    for (const band of LENS_BANDS[lens.value]) item(band.colour, band.label, counts.get(band) || 0);
+  } else if (lens.value === 'heat') {
+    item('linear-gradient(90deg,#4b5563,#ff4d2e)', 'stable → hottest, by recent decay-weighted churn');
+  } else if (lens.value === 'downtown') {
+    item('linear-gradient(90deg,#2a2c31,#8fd6ff)', 'peripheral → most central');
+  } else if (lens.value === 'era') {
+    item(0x8a5a44, 'oldest third');
+    item(0x8f97a3, 'middle third');
+    item(0xbfe3ef, 'newest third');
+  } else if (lens.value === 'territory') {
+    const who = state.territoryAuthor || 'nobody selected';
+    item('linear-gradient(90deg,#26282d,#ffc24a)', `share of the lines written by ${who}`);
+  }
+}
+
+/** Folder names on the map: regions by level, districts up close. */
+function setupMapLabels() {
+  const container = document.getElementById('map-labels');
+  if (!container) return;
+  const manifest = state.source.manifest;
+  const items = [];
+  for (const region of manifest.regions || []) {
+    const [x, z, w, h] = region.rect;
+    items.push({
+      text: state.source.regionLabel(region),
+      x: x + w / 2,
+      z: z + h / 2,
+      y: 2,
+      level: region.level,
+      kind: 'region',
+      weight: region.logicalLoc || region.buildings || 0,
+    });
+  }
+  for (const district of manifest.districts || []) {
+    const [x, z, w, h] = district.rect;
+    items.push({
+      text: state.source.districtLabel(district),
+      x: x + w / 2,
+      z: z + h / 2,
+      y: 1,
+      level: district.level || 0,
+      kind: 'district',
+      weight: district.logicalLoc || 0,
+    });
+  }
+  if (!context.labels) context.labels = new MapLabels(container, camera);
+  const bounds = manifest.bounds;
+  context.labels.setItems(items, Math.max(bounds[2], bounds[3]));
+}
+
+function selectGuideTab(name) {
+  for (const tab of ['read', 'health', 'filter']) {
+    const button = document.getElementById(`guide-tab-${tab}`);
+    const panel = document.getElementById(`guide-${tab}`);
+    if (button) button.setAttribute('aria-selected', String(tab === name));
+    if (panel) panel.hidden = tab !== name;
+  }
 }
 
 function setPanelsHidden(hidden) {
@@ -226,7 +969,7 @@ function setPanelsHidden(hidden) {
   if (!button) return;
   button.setAttribute('aria-pressed', String(hidden));
   const label = document.getElementById('panels-toggle-label');
-  if (label) label.textContent = hidden ? 'Show legend & keys' : 'Hide legend & keys';
+  if (label) label.textContent = hidden ? 'Show guide' : 'Hide guide';
 }
 
 function togglePanels() {
@@ -234,24 +977,43 @@ function togglePanels() {
 }
 
 document.getElementById('panels-toggle').addEventListener('click', togglePanels);
+for (const tab of ['read', 'health', 'filter']) {
+  document.getElementById(`guide-tab-${tab}`).addEventListener('click', () => selectGuideTab(tab));
+}
 
-// A key row is the whole switch, so the label, the state box and the colour
-// chip all act on the same archetype. Stop propagation on the keyboard path:
+// The switch toggles the layer; the name opens the explanation; Highlight
+// filters to the buildings the row describes. Keyboard events stop here:
 // Enter would otherwise also reach the global handler and enter a building.
-const xrayTable = document.getElementById('xray-table');
-xrayTable.addEventListener('click', (event) => {
-  const row = event.target.closest('tr.key-row');
-  if (row) toggleArchetype(row.dataset.archetype);
-});
-xrayTable.addEventListener('keydown', (event) => {
-  if (event.key !== 'Enter' && event.key !== ' ') return;
-  const row = event.target.closest('tr.key-row');
+const guideList = document.getElementById('guide-list');
+guideList.addEventListener('click', (event) => {
+  const row = event.target.closest('.key-row');
   if (!row) return;
-  event.preventDefault();
-  event.stopPropagation();
-  toggleArchetype(row.dataset.archetype);
+  if (event.target.closest('.g-switch')) toggleRow(row);
+  else if (event.target.closest('.g-highlight')) {
+    highlightQuery(event.target.closest('.g-highlight').dataset.query);
+  } else if (event.target.closest('.g-name') || event.target.closest('.chip') || event.target.closest('.g-short')) {
+    toggleExplain(row);
+  }
 });
-document.getElementById('xray-reset').addEventListener('click', resetArchetypes);
+guideList.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.stopPropagation();
+});
+document.getElementById('guide-health').addEventListener('click', (event) => {
+  const item = event.target.closest('.health-item');
+  if (!item) return;
+  if (item.dataset.district !== undefined) {
+    const district = state.source.manifest.districts[Number(item.dataset.district)];
+    if (district) {
+      teleportTo({ kind: 'district', district });
+      context.inspector.showDistrict(district);
+    }
+    return;
+  }
+  if (item.dataset.building !== undefined) flyToBuilding(Number(item.dataset.building));
+});
+document.getElementById('guide-health').addEventListener('keydown', (event) => event.stopPropagation());
+document.getElementById('guide-reset').addEventListener('click', resetKeys);
 
 function renderTitle() {
   const manifest = state.source.manifest;
@@ -311,6 +1073,14 @@ function rebuildCity(buildings) {
     : buildings;
   mesh.build(shown, {
     cameraXZ: { x: camera.position.x, z: camera.position.z },
+    // The Keys panel's encoding switches, resolved here so a rebuild -- whoever
+    // asked for it -- cannot drop them back to the manifest default.
+    authorTint: !state.hiddenLayers.has('author_tint'),
+    weathering: !state.hiddenLayers.has('weathering'),
+    downtown: !state.hiddenLayers.has('downtown'),
+    orphans: !state.hiddenLayers.has('orphans'),
+    litCap: state.hiddenLayers.has('lit_windows') ? 0 : 1,
+    notes: pinnedIds(),
   });
   // Stand-in massing for districts that are not resident, so streaming does not
   // leave a hard edge at the horizon. Impostors have no archetype of their own,
@@ -328,6 +1098,13 @@ function rebuildCity(buildings) {
     disposeGroup(previous.group);
   }
   context.city = mesh;
+  // A rebuild (streaming, LOD, a switch) must not silently drop the lens --
+  // or the History slider's date.
+  mesh.territoryAuthor = state.territoryAuthor;
+  const lens = document.getElementById('lens-select');
+  if (lens && lens.value !== 'archetype') mesh.recolour(lens.value);
+  if (state.timeline !== null) mesh.setTimeline(state.timeline, { burn: historySpan() >= 45 });
+  applyHiddenLayers();
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
 
@@ -335,17 +1112,468 @@ function rebuildCity(buildings) {
   if (context.hall) context.grid.addBox(context.hall.userData.box);
   if (context.walk) context.walk.grid = context.grid;
   applyTime();
+  applyActiveFilter();
 }
+
+// ---------------------------------------------------------------------------
+// Filtering, colour lens and facet chips (S15/S16/S17/S18)
+// ---------------------------------------------------------------------------
+
+function resolveExt(idx) {
+  return (context.extTable && context.extTable[idx]) || '';
+}
+
+/** A query compiled with everything the richer tokens need (edges, districts). */
+function compileQuery(text) {
+  const manifest = state.source.manifest;
+  return parseQuery(text, manifest.indexColumns, (idx) => state.source.s(idx), resolveExt, {
+    edges: context.edges,
+    rows: context.facetIndex,
+    resolveDistrict: (id) => {
+      const district = manifest.districts[id];
+      return district ? state.source.s(district.key) : '';
+    },
+  });
+}
+
+/** Re-run the current filter text against the resident set. Called after any
+ *  streaming rebuild, since a fresh CityMesh has no ghosting of its own.
+ *
+ *  A focused folder (a selected district or region, S14) narrows the result
+ *  further: everything outside it fades exactly as a non-match does, so the
+ *  folder stands out without leaving the city. */
+function applyActiveFilter() {
+  if (!context.city || !context.facetIndex) return;
+  const text = state.filterText || '';
+  const predicate = compileQuery(text);
+  const summary = document.getElementById('filter-summary');
+  const focus = state.focus;
+  if (!predicate && !focus) {
+    context.city.clearFilter();
+    if (summary) summary.textContent = 'every building shown';
+    return;
+  }
+  const districtCol = columnIndex(state.source.manifest.indexColumns).district;
+  const scoped = focus
+    ? (row) => focus.has(row[districtCol]) && (!predicate || predicate(row))
+    : predicate;
+  const result = runQuery(context.facetIndex, scoped, state.source.manifest.indexColumns);
+  context.city.applyFilter(result.ids);
+  if (summary) {
+    summary.textContent =
+      `${result.count.toLocaleString()} files · ${result.loc.toLocaleString()} lines ` +
+      `· in ${result.districts} district${result.districts === 1 ? '' : 's'}` +
+      (focus ? ' · inside the selected folder' : '');
+  }
+}
+
+function renderChips() {
+  const container = document.getElementById('filter-chips');
+  if (!container || !context.facetIndex) return;
+  const facets = buildFacets(
+    context.facetIndex,
+    state.source.manifest.indexColumns,
+    (idx) => state.source.s(idx),
+    resolveExt
+  );
+  container.innerHTML = '';
+  const top = [...facets.specials, ...facets.archetypes.slice(0, 4), ...facets.languages.slice(0, 4)];
+  for (const chip of top) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip-btn';
+    button.textContent = `${chip.label} (${chip.count})`;
+    button.addEventListener('click', () => {
+      const input = document.getElementById('filter-input');
+      input.value = chip.query;
+      state.filterText = chip.query;
+      applyActiveFilter();
+    });
+    container.append(button);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detail overlay (S19): reuses the already-loaded main-window CitySource, so
+// opening a building's details costs no extra fetch of the manifest/strings
+// it already has resident.
+// ---------------------------------------------------------------------------
+
+function setupDetailOverlay() {
+  const overlay = document.getElementById('detail-overlay');
+  const close = document.getElementById('detail-overlay-close');
+  if (close) close.addEventListener('click', () => { overlay.hidden = true; });
+  if (context.inspector) {
+    context.inspector.onOpenDetail = (kind, id) => {
+      if (!overlay) return;
+      resetDetailPanel();
+      overlay.hidden = false;
+      const render = kind === 'building' ? renderBuilding : renderDistrict;
+      render(state.source, id).catch((error) => {
+        document.getElementById('detail-title').textContent = `Could not load: ${error.message}`;
+      });
+    };
+  }
+  // A file clicked inside the overlay posts here instead of navigating.
+  if ('BroadcastChannel' in window) {
+    const channel = new BroadcastChannel('zion');
+    channel.addEventListener('message', (event) => {
+      const id = event.data && event.data.fly;
+      if (id === undefined || id === null) return;
+      const target = context.resident && context.resident.find((b) => b.id === id);
+      if (target) teleportTo({ kind: 'building', building: target });
+    });
+  }
+}
+
+function setupFilterAndLens() {
+  const input = document.getElementById('filter-input');
+  if (input) {
+    input.addEventListener('input', (event) => {
+      state.filterText = event.target.value;
+      applyActiveFilter();
+    });
+  }
+  const lens = document.getElementById('lens-select');
+  if (lens) {
+    lens.addEventListener('change', (event) => applyLens(event.target.value));
+  }
+  // The territory lens paints one author; the list is the manifest's own
+  // author table, so a locked city offers no names until it is unlocked.
+  const authorSelect = document.getElementById('lens-author');
+  if (authorSelect) {
+    fillAuthorSelect();
+    authorSelect.addEventListener('change', (event) => {
+      state.territoryAuthor = event.target.value;
+      applyLens('territory');
+    });
+  }
+}
+
+function fillAuthorSelect() {
+  const select = document.getElementById('lens-author');
+  if (!select) return;
+  const authors = (state.source.manifest.stats && state.source.manifest.stats.authors) || [];
+  select.innerHTML = '';
+  for (const row of authors.slice(0, 60)) {
+    const name = state.source.s(row.name);
+    if (!name) continue;
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = `${name} (${row.lines.toLocaleString()} lines)`;
+    select.append(option);
+  }
+  if (!state.territoryAuthor && select.options.length) state.territoryAuthor = select.options[0].value;
+  select.value = state.territoryAuthor;
+}
+
+/** Switch the colour lens, keeping the select, the key and the city in step. */
+function applyLens(value) {
+  const lens = document.getElementById('lens-select');
+  if (lens && lens.value !== value) lens.value = value;
+  if (context.city) {
+    context.city.territoryAuthor = state.territoryAuthor;
+    context.city.recolour(value);
+  }
+  renderLensKey();
+}
+
+// ---------------------------------------------------------------------------
+// Selection: what the selected thing is connected to (selection.js), and the
+// focus fade for a selected folder (S14).
+// ---------------------------------------------------------------------------
+
+function buildingById(id) {
+  if (!context._residentById || context._residentById.size !== context.resident.length) {
+    context._residentById = new Map(context.resident.map((b) => [b.id, b]));
+  }
+  return context._residentById.get(id);
+}
+
+/** Ground point of a building, or of its district's centre when not resident. */
+function positionOf(id) {
+  const manifest = state.source.manifest;
+  const building = buildingById(id);
+  if (building) {
+    const district = manifest.districts[building.district];
+    return {
+      x: (building.x || 0) + (building.width || 4) / 2,
+      z: (building.y || 0) + (building.depth || 4) / 2,
+      y: plinthTop(district ? district.level : 0),
+      width: building.width,
+      depth: building.depth,
+      height: building.height,
+    };
+  }
+  const row = indexRowById().get(id);
+  if (!row) return null;
+  const district = manifest.districts[row[columnIndex(manifest.indexColumns).district]];
+  return district ? { ...districtCentre(district), approximate: true } : null;
+}
+
+function districtCentre(district) {
+  if (!district) return null;
+  const [x, z, w, h] = district.rect;
+  return { x: x + w / 2, z: z + h / 2, y: plinthTop(district.level) + 1 };
+}
+
+let selectionToken = 0;
+
+async function updateSelection(selection) {
+  const token = ++selectionToken;
+  const overlay = context.overlay;
+  const manifest = state.source.manifest;
+  const previousFocus = state.focus;
+  state.focus = null;
+  if (!selection) {
+    if (overlay) overlay.clear();
+  } else if (selection.kind === 'building') {
+    const b = selection.building;
+    const edges = context.edges;
+    const outgoing = edges ? (edges.imports.get(b.id) || []).map((to) => [to, edges.violating.has(`${b.id}>${to}`)]) : [];
+    const incoming = edges ? (edges.importers.get(b.id) || []).map((from) => [from, edges.violating.has(`${from}>${b.id}`)]) : [];
+    let partners = [];
+    if (manifest.flags && manifest.flags.coupling) {
+      try {
+        const bridges = await state.source.bridges();
+        if (token !== selectionToken) return;
+        partners = bridges.filter(([x, y]) => x === b.id || y === b.id).map(([x, y, n]) => [x === b.id ? y : x, n]);
+      } catch (error) {
+        partners = [];
+      }
+    }
+    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, positionOf });
+  } else if (selection.kind === 'district') {
+    const d = selection.district;
+    const deps = manifest.dependencies;
+    const links = [];
+    if (deps) {
+      const violating = new Set((deps.violatingPairs || []).map(([a, c]) => `${a}>${c}`));
+      for (const [from, to, count] of deps.matrix || []) {
+        if (from === d.id) links.push({ district: manifest.districts[to], kind: 'out', weight: count, violates: violating.has(`${from}>${to}`) });
+        else if (to === d.id) links.push({ district: manifest.districts[from], kind: 'in', weight: count, violates: violating.has(`${from}>${to}`) });
+      }
+      const heaviestImport = Math.max(1, ...links.map((l) => l.weight));
+      const coupling = (deps.coupling || []).filter(([a, c]) => a === d.id || c === d.id);
+      const heaviestCommits = Math.max(1, ...coupling.map((row) => row[3]));
+      for (const [a, c, , commits] of coupling) {
+        // Scaled onto the import weights, so the thickest co-change arc and
+        // the thickest import arc are comparable on screen.
+        links.push({ district: manifest.districts[a === d.id ? c : a], kind: 'cochange', weight: (commits / heaviestCommits) * heaviestImport });
+      }
+    }
+    if (overlay) overlay.showDistrict(d, { links: links.filter((l) => l.district), centreOf: districtCentre });
+    state.focus = new Set([d.id]);
+  } else if (selection.kind === 'region') {
+    if (overlay) overlay.clear();
+    state.focus = new Set(selection.districtIds || []);
+  }
+  if (previousFocus || state.focus) applyActiveFilter();
+}
+
+/** Building ids that carry one of the reader's notes. */
+function pinnedIds() {
+  const notes = context.notes;
+  if (!notes || !notes.available || state.source.locked || !context.facetIndex) return null;
+  const paths = new Set(notes.all().map((n) => n.path));
+  if (!paths.size) return null;
+  const col = columnIndex(state.source.manifest.indexColumns);
+  const ids = new Set();
+  for (const row of context.facetIndex) if (paths.has(state.source.s(row[col.path]))) ids.add(row[col.id]);
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
+// History slider (S7): the city as it stood on a past day.
+// ---------------------------------------------------------------------------
+
+function historySpan() {
+  const meta = state.source.manifest.meta || {};
+  const flags = state.source.manifest.flags || {};
+  return flags.age ? Math.max(0, meta.historyDays || 0) : 0;
+}
+
+function historyDate(daysBefore) {
+  const meta = state.source.manifest.meta || {};
+  if (!meta.headTs) return `${Math.round(daysBefore)} days before the newest commit`;
+  return new Date((meta.headTs - daysBefore * 86400) * 1000).toISOString().slice(0, 10);
+}
+
+/** `null` returns to the present; otherwise days before the newest commit. */
+function setTimeline(daysBefore) {
+  const span = historySpan();
+  state.timeline = daysBefore === null || daysBefore === undefined || !span ? null : Math.max(0, Math.min(span, daysBefore));
+  const slider = document.getElementById('history');
+  const out = document.getElementById('history-out');
+  if (slider) slider.value = String(state.timeline === null ? span : span - state.timeline);
+  let born = null;
+  if (context.city) {
+    // Monthly buckets say nothing about a history shorter than a month or two.
+    born = context.city.setTimeline(state.timeline, { burn: span >= 45 });
+    if (state.timeline === null) applyHiddenLayers();
+  }
+  if (out) {
+    out.textContent = state.timeline === null
+      ? 'today'
+      : `${historyDate(state.timeline)}${born !== null ? ` · ${born.toLocaleString()} files` : ''}`;
+  }
+  document.body.classList.toggle('history-active', state.timeline !== null);
+}
+
+let historyPlayback = null;
+
+function toggleHistoryPlayback() {
+  const button = document.getElementById('history-play');
+  if (historyPlayback) {
+    cancelAnimationFrame(historyPlayback.frame);
+    historyPlayback = null;
+    if (button) button.textContent = '▶';
+    return;
+  }
+  const span = historySpan();
+  if (!span) return;
+  // Twelve seconds for the whole history, however long it is.
+  const started = performance.now();
+  const duration = 12000;
+  const step = (now) => {
+    const t = Math.min(1, (now - started) / duration);
+    setTimeline(span * (1 - t));
+    if (t >= 1) {
+      historyPlayback = null;
+      if (button) button.textContent = '▶';
+      setTimeline(null);
+      return;
+    }
+    historyPlayback.frame = requestAnimationFrame(step);
+  };
+  historyPlayback = { frame: requestAnimationFrame(step) };
+  if (button) button.textContent = '❚❚';
+}
+
+function setupHistory() {
+  const control = document.getElementById('history-control');
+  const slider = document.getElementById('history');
+  const span = historySpan();
+  if (!control || !slider) return;
+  control.hidden = !span;
+  if (!span) return;
+  slider.min = '0';
+  slider.max = String(span);
+  slider.step = String(Math.max(0.5, span / 400));
+  slider.value = String(span);
+  slider.addEventListener('input', () => {
+    const value = Number(slider.value);
+    setTimeline(value >= span ? null : span - value);
+  });
+  const play = document.getElementById('history-play');
+  if (play) play.addEventListener('click', toggleHistoryPlayback);
+  setTimeline(null);
+}
+
+// ---------------------------------------------------------------------------
+// Saved views (views.js): the view on screen as a link.
+// ---------------------------------------------------------------------------
+
+function currentView() {
+  const selected = context.inspector && context.inspector.selected;
+  const selection = selected && selected.kind === 'building'
+    ? { kind: 'building', id: selected.building.id }
+    : selected && selected.kind === 'district'
+      ? { kind: 'district', id: selected.district.id }
+      : null;
+  const lens = document.getElementById('lens-select');
+  return captureView({
+    position: camera.position,
+    yaw: context.fly.yaw,
+    pitch: context.fly.pitch,
+    filter: state.filterText,
+    lens: lens ? lens.value : 'archetype',
+    author: lens && lens.value === 'territory' ? state.territoryAuthor : '',
+    selection,
+    timeline: state.timeline,
+  });
+}
+
+async function applyView(view) {
+  if (!view) return false;
+  setMode('fly');
+  context.fly.position.set(view.position.x, view.position.y, view.position.z);
+  context.fly.yaw = view.yaw;
+  context.fly.pitch = view.pitch;
+  context.fly.apply();
+  state.filterText = view.filter || '';
+  const input = document.getElementById('filter-input');
+  if (input) input.value = state.filterText;
+  if (view.author) {
+    state.territoryAuthor = view.author;
+    const select = document.getElementById('lens-author');
+    if (select) select.value = view.author;
+  }
+  lodRebuiltAt = -Infinity;
+  await refreshResident(true);
+  applyLens(view.lens || 'archetype');
+  setTimeline(view.timeline);
+  applyActiveFilter();
+  if (view.selection && view.selection.kind === 'district') {
+    const district = state.source.manifest.districts[view.selection.id];
+    if (district) context.inspector.showDistrict(district);
+  } else if (view.selection) {
+    const building = buildingById(view.selection.id);
+    if (building) context.inspector.showBuilding(building);
+  }
+  return true;
+}
+
+function setupViewLinks() {
+  const button = document.getElementById('view-link');
+  if (button) {
+    button.addEventListener('click', async () => {
+      const hash = viewToHash(currentView());
+      history.replaceState(null, '', `${location.pathname}${location.search}${hash}`);
+      const copied = await copyText(location.href);
+      const label = button.textContent;
+      button.textContent = copied ? 'Link copied' : 'Link ready';
+      setTimeout(() => { button.textContent = label; }, 1600);
+    });
+  }
+  window.addEventListener('hashchange', () => applyView(viewFromHash(location.hash)));
+}
+
 
 async function refreshResident(force = false) {
   if (rebuilding || !context.streamer) return;
   rebuilding = true;
   try {
     const changed = await context.streamer.update(camera.position.x, camera.position.z, force);
+    // Detail follows the camera, not just the working set.
+    //
+    // When the whole city is already resident -- any repository under the
+    // resident cap, which is every repository a person is likely to open -- the
+    // streamer never reports a change, so an early return here left the LOD
+    // ranking frozen around wherever the camera first stood. Everything past
+    // that radius kept its far-tier box for the rest of the session: fly to a
+    // park and it was still a cube. Rebuilding when the camera has travelled a
+    // fraction of the LOD radius keeps the near tier where the eye actually is.
+    const radius = (context.city && context.city.lodRadius) || 600;
+    // A fraction of the radius, not a fixed floor: a small city's radius is
+    // 240 m, and a 400 m floor left buildings 240-400 m away as boxes.
+    const travel = Math.max(80, radius * 0.6);
+    const moved =
+      !lodCentre ||
+      Math.hypot(lodCentre.x - camera.position.x, lodCentre.z - camera.position.z) > travel;
+    const now = performance.now();
     if (changed) {
       context.resident = context.streamer.buildings();
       state.source.buildings = context.resident;
       rebuildCity(context.resident);
+      lodCentre = { x: camera.position.x, z: camera.position.z };
+      lodRebuiltAt = now;
+    } else if (moved && !state.tourFrozen && now - lodRebuiltAt > 600) {
+      // Rate-limited so flying at speed cannot rebuild every frame; a rebuild
+      // is synchronous and touches every instance in the city.
+      rebuildCity(context.resident);
+      lodCentre = { x: camera.position.x, z: camera.position.z };
+      lodRebuiltAt = now;
     }
   } finally {
     rebuilding = false;
@@ -413,12 +1641,21 @@ function raycastAt(ndcX, ndcY) {
 /** District plates and district impostors: both stand for a folder. */
 function raycastDistricts() {
   const meshes = context.city.group.children.filter(
-    (child) => child.name === 'district-plates' || child.name === 'district-impostors'
+    (child) =>
+      child.name === 'district-plates' ||
+      child.name === 'district-impostors' ||
+      child.name === 'region-plinths'
   );
   if (!meshes.length) return null;
   const hits = raycaster.intersectObjects(meshes, false);
   if (!hits.length) return null;
   const hit = hits[0];
+  // A plinth's edge, or a road across it, is the folder that contains them.
+  if (hit.object.name === 'region-plinths') {
+    const region = hit.object.userData.regions && hit.object.userData.regions[hit.instanceId];
+    if (!region) return null;
+    return { kind: 'region', region, mesh: hit.object, instanceId: hit.instanceId, point: hit.point };
+  }
   const districts = hit.object.userData.districts;
   const district = districts && districts[hit.instanceId];
   if (!district) return null;
@@ -437,6 +1674,7 @@ function sameTarget(a, b) {
   if (a.kind !== b.kind) return false;
   if (a.kind === 'city_hall') return true;
   if (a.kind === 'district') return a.district.id === b.district.id;
+  if (a.kind === 'region') return a.region.id === b.region.id;
   return a.building === b.building;
 }
 
@@ -465,7 +1703,10 @@ function showOutlineFor(target) {
     outline.visible = false;
     return;
   }
-  if (target.kind === 'district') {
+  if (target.kind === 'district' || target.kind === 'region') {
+    // A folder is not outlined by the per-building box: hovering it highlights
+    // the whole neighbourhood instead, and a box round a region would claim a
+    // footprint it does not have.
     outline.visible = false;
     return;
   }
@@ -490,6 +1731,14 @@ function showOutlineFor(target) {
   }
 
   const building = target.building;
+  // Anything that is not a building has already returned above; this guard is
+  // for the next target kind someone adds, so an unhandled one hides the
+  // outline instead of throwing on `building.x` and taking the whole viewer
+  // down with it.
+  if (!building) {
+    outline.visible = false;
+    return;
+  }
   outline.position.set(
     (building.x || 0) + (building.width || 4) / 2,
     0,
@@ -511,6 +1760,16 @@ function tooltipFor(target) {
       title: 'City Hall',
       meta: 'the repository report card',
       hint: 'click, or press C, to open',
+    };
+  }
+  if (target.kind === 'region') {
+    const r = target.region;
+    return {
+      title: `${state.source.regionLabel(r)}/`,
+      meta:
+        `folder · ${r.districts} neighbourhoods · ${r.buildings} buildings · ` +
+        `${(r.logicalLoc || 0).toLocaleString()} lines`,
+      hint: 'click to inspect this folder · raised plinth = nested folder',
     };
   }
   if (target.kind === 'district') {
@@ -557,8 +1816,12 @@ function applyHover(target, clientX, clientY) {
   hover.y = clientY;
 
   if (context.city) {
-    if (target && (target.kind === 'building' || target.kind === 'district')) {
-      context.city.setHighlight(target.mesh, target.instanceId, target.kind === 'district' ? 0.45 : 0.62);
+    if (target && (target.kind === 'building' || target.kind === 'district' || target.kind === 'region')) {
+      context.city.setHighlight(
+        target.mesh,
+        target.instanceId,
+        target.kind === 'building' ? 0.62 : target.kind === 'region' ? 0.3 : 0.45
+      );
     } else {
       context.city.clearHighlight();
     }
@@ -568,6 +1831,8 @@ function applyHover(target, clientX, clientY) {
   // whole block rather than a box around one mesh.
   if (target && target.kind === 'district') {
     placeDistrictMarker(context.hoverDistrictMarker, target.district.rect);
+  } else if (target && target.kind === 'region') {
+    placeDistrictMarker(context.hoverDistrictMarker, target.region.rect);
   } else {
     context.hoverDistrictMarker.visible = false;
   }
@@ -736,6 +2001,11 @@ function activate(target) {
   if (target.kind === 'district') {
     context.inspector.showDistrict(target.district);
     orbitAround(target);
+    return;
+  }
+  if (target.kind === 'region') {
+    context.inspector.showRegion(target.region);
+    orbitAround({ kind: 'district', district: { rect: target.region.rect } });
     return;
   }
   context.inspector.showBuilding(target.building);
@@ -1138,8 +2408,15 @@ async function refreshLabelsAfterUnlock() {
   context.resident = context.streamer.buildings();
   state.source.buildings = context.resident;
   context.inspector.hide();
-  renderLegend();
+  // Notes are keyed by the repository's name and each file's path, both of
+  // which only exist once the labels do.
+  setupNotes();
+  fillAuthorSelect();
+  renderGuide();
+  setupMapLabels();
   renderTitle();
+  renderChips();
+  applyActiveFilter();
 }
 
 async function attemptUnlock(passphrase) {
@@ -1255,10 +2532,16 @@ function runBench(frames = 60) {
 // ---------------------------------------------------------------------------
 
 let last = performance.now();
+let beaconClock = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+
+  // Rooftop obstruction lights blink on their own clock. Held still while a
+  // capture freezes the tour, so a scripted screenshot is deterministic.
+  if (!state.tourFrozen) beaconClock += dt;
+  if (context.city) context.city.setBeaconPulse(beaconClock);
 
   if (state.mode === 'interior' && context.interior.active) {
     driveInterior(dt);
@@ -1293,6 +2576,7 @@ function frame(now) {
   refreshResident();
   refreshHover();
   renderer.render(scene, camera);
+  if (context.labels) context.labels.update(now, window.innerWidth, window.innerHeight);
 }
 
 function driveInterior(dt) {
@@ -1528,6 +2812,39 @@ async function runSelfTest() {
     context.inspector.hide();
   } else {
     check('click-inspects-building', false, 'no resident buildings');
+  }
+
+  // 0b-bis. Every hover target kind must survive the outline pass. A region
+  //     target -- a folder above a district -- reached `showOutlineFor` with no
+  //     `building`, read `building.x` and took the whole viewer down before the
+  //     first frame; the check drives the function directly rather than trying
+  //     to raycast a plinth, so it cannot flake.
+  {
+    const region = (state.source.manifest.regions || [])[0];
+    if (region) {
+      // Leave the view exactly as the probe found it. `applyHover` skips work
+      // when the target has not changed, so a probe that hides the outline
+      // without touching `hover.target` would leave the *next* check reading a
+      // stale outline for a building it is still hovering.
+      const restore = hover.target;
+      const wasVisible = context.hoverOutline ? context.hoverOutline.visible : false;
+      let ok = true;
+      let detail = 'region outline suppressed';
+      try {
+        showOutlineFor({ kind: 'region', region });
+        ok = context.hoverOutline.visible === false;
+        if (!ok) detail = 'a region left the hover outline visible';
+      } catch (error) {
+        ok = false;
+        detail = String(error && error.message ? error.message : error);
+      } finally {
+        if (restore) showOutlineFor(restore);
+        else if (context.hoverOutline) context.hoverOutline.visible = wasVisible;
+      }
+      check('hover-region-outline', ok, detail);
+    } else {
+      check('hover-region-outline', true, 'no regions in this manifest');
+    }
   }
 
   // 0c. Hover feedback: something clickable under the cursor must announce
@@ -1902,6 +3219,373 @@ async function runSelfTest() {
     `camera moved ${handbackJump.toFixed(3)}m after the tour ended`
   );
 
+  // 5d. The City Guide is the whole legend, and a switch that exists must
+  //     actually reach the geometry rather than only recolour a row.
+  {
+    const legend = state.source.manifest.legend || [];
+    const legendRows = document.querySelectorAll(
+      '#guide-list .key-row[data-key^="legend:"]'
+    );
+    check(
+      'keys-covers-legend',
+      legendRows.length === legend.length,
+      `${legendRows.length} rows for ${legend.length} legend entries`
+    );
+
+    const inert = [...document.querySelectorAll('#guide-list .key-row.inert')];
+    check(
+      'keys-inert-encodings',
+      inert.length > 0 && inert.every((row) => !row.hasAttribute('aria-pressed')),
+      `${inert.length} encoding row(s) listed without a switch`
+    );
+
+    const craneRow = document.querySelector('#guide-list .key-row[data-key="legend:churn"]');
+    const cranes = context.city.group.getObjectByName('cranes');
+    if (craneRow && craneRow.dataset.kind === 'mesh' && cranes) {
+      toggleRow(craneRow);
+      check('keys-hides-layer', cranes.visible === false, 'crane layer hidden');
+      toggleRow(craneRow);
+      check('keys-restores-layer', cranes.visible === true, 'crane layer shown again');
+    } else {
+      check('keys-hides-layer', true, 'no crane layer in this city');
+      check('keys-restores-layer', true, 'no crane layer in this city');
+    }
+
+    const formRow = [...document.querySelectorAll('#guide-list .key-row[data-kind="archetype"]')].find(
+      (row) => context.resident.some((b) => (b.archetype || 'warehouse') === row.dataset.target)
+    );
+    if (formRow) {
+      const archetype = formRow.dataset.target;
+      toggleRow(formRow);
+      rebuildCity(context.resident);
+      const drawn = [...context.city.records.values()]
+        .flat()
+        .filter((b) => (b.archetype || 'warehouse') === archetype).length;
+      check('keys-form-switch', drawn === 0, `${archetype} dropped from the resident set`);
+      toggleRow(formRow);
+      rebuildCity(context.resident);
+    } else {
+      check('keys-form-switch', true, 'no resident form to switch');
+    }
+
+    // An encoding switch rebuilds with that option off; downtown is the easiest
+    // one to see, because its antennas are their own cluster and must vanish.
+    const downtownRow = document.querySelector('#guide-list .key-row[data-key="legend:downtown"]');
+    if (downtownRow && downtownRow.dataset.kind === 'option') {
+      const before = context.city.group.getObjectByName('antennas');
+      toggleRow(downtownRow);
+      rebuildCity(context.resident);
+      const after = context.city.group.getObjectByName('antennas');
+      const cleared = !before || before.count === 0 || !after || after.count === 0;
+      check(
+        'keys-option-switch',
+        cleared,
+        `${before ? before.count : 0} antennas -> ${after ? after.count : 0}`
+      );
+      toggleRow(downtownRow);
+      rebuildCity(context.resident);
+    } else {
+      check('keys-option-switch', true, 'no downtown encoding in this city');
+    }
+  }
+
+  // 5e. The guide explains, counts and highlights; the ground shows the
+  //     folder tree; the report explains a building; health is one lens away.
+  {
+    const row = document.querySelector('#guide-list .key-row[data-key="legend:height"]');
+    const name = row && row.querySelector('.g-name');
+    if (name) name.click();
+    const more = row && row.querySelector('.g-more');
+    check(
+      'guide-explains',
+      Boolean(more && !more.hidden && more.textContent.length > 40),
+      more ? `${more.textContent.length} chars of explanation` : 'no height row'
+    );
+    if (name) name.click();
+
+    const highlight = document.querySelector('#guide-list .g-highlight');
+    if (highlight) {
+      const query = highlight.dataset.query;
+      highlightQuery(query);
+      const applied = state.filterText === query && Boolean(context.city._filtered);
+      highlightQuery(query);
+      check('guide-highlight', applied && !state.filterText, `highlight ${query} then clear`);
+    } else {
+      check('guide-highlight', true, 'no countable layer in this city');
+    }
+
+    const manifest = state.source.manifest;
+    const classes = new Set((manifest.streets || []).map((s) => (s.length > 4 ? s[4] : 2)));
+    const roadMeshes = context.city.group.children.filter((c) => c.name.startsWith('streets-') && c.name !== 'streets-markings');
+    check(
+      'roads-have-classes',
+      roadMeshes.length === classes.size && roadMeshes.length > 0,
+      `${roadMeshes.length} road meshes for ${classes.size} classes`
+    );
+    const plinths = context.city.group.getObjectByName('region-plinths');
+    const regionCount = (manifest.regions || []).length;
+    check(
+      'regions-drawn',
+      regionCount === 0 ? !plinths : Boolean(plinths && plinths.count === regionCount),
+      `${plinths ? plinths.count : 0} plinths for ${regionCount} regions`
+    );
+
+    const withFloors = context.resident.find((b) => b.floors > 1 && b.source);
+    if (withFloors) {
+      context.inspector.showBuilding(withFloors);
+      for (let i = 0; i < 40 && !document.querySelector('#inspector-floors .floor'); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const text = document.getElementById('inspector-metrics').textContent;
+      const floorsListed = document.querySelectorAll('#inspector-floors .floor').length;
+      check(
+        'inspector-explains-floors',
+        /row of windows/i.test(text) && /Architect/.test(text) && floorsListed === withFloors.floors,
+        `${floorsListed} floors listed for ${withFloors.floors}`
+      );
+      context.inspector.hide();
+    } else {
+      check('inspector-explains-floors', true, 'no building with floors resident');
+    }
+
+    const mesh = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 0);
+    if (mesh) {
+      const before = Array.from(mesh.userData.baseColors.slice(0, 3));
+      context.city.recolour('health');
+      const after = Array.from(mesh.userData.baseColors.slice(0, 3));
+      context.city.recolour('archetype');
+      check('health-lens', before.some((v, i) => Math.abs(v - after[i]) > 1e-3), 'health lens recolours');
+    } else {
+      check('health-lens', true, 'no buildings');
+    }
+    const cards = document.querySelectorAll('#guide-health .health-card').length;
+    const expected = HEALTH_SECTIONS.length + (manifest.delta ? 1 : 0) +
+      (manifest.dependencies && manifest.dependencies.matrix && manifest.dependencies.matrix.length ? 1 : 0) + 1;
+    check('health-tab', manifest.review ? cards === expected : cards === 0, `${cards} health cards of ${expected}`);
+  }
+
+  // 5f. The next layer: selection overlays, folder focus, the new lenses,
+  //     query words, the History slider, saved views and notes.
+  {
+    const manifest = state.source.manifest;
+    const flags = manifest.flags || {};
+    const overlay = context.overlay;
+
+    const linked = context.resident.find((b) => (b.importsOut || 0) > 0);
+    if (linked && context.edges) {
+      context.inspector.showBuilding(linked);
+      await updateSelection({ kind: 'building', building: linked });
+      const lines = overlay.group.children.filter((c) => c.name.startsWith('import-lines'));
+      check('overlay-import-lines', lines.length > 0, `${lines.length} line meshes for ${linked.importsOut} imports`);
+      state.hiddenLayers.add('imports');
+      applyHiddenLayers();
+      const hidden = lines.every((l) => !l.visible);
+      state.hiddenLayers.delete('imports');
+      applyHiddenLayers();
+      check('overlay-switch', hidden && lines.every((l) => l.visible), 'import lines follow their City Guide switch');
+      const structure = document.getElementById('inspector-metrics').textContent;
+      check('inspector-structure', /Imports/.test(structure) && /Instability|Imported by|file/.test(structure), 'Structure section present');
+      context.inspector.hide();
+      await updateSelection(null);
+      check('overlay-clears', overlay.group.children.length === 0, `${overlay.group.children.length} left`);
+    } else {
+      check('overlay-import-lines', true, 'no resolved imports in this city');
+    }
+
+    const district = manifest.districts.find((d) => d.buildings > 0 && d.buildings < context.resident.length);
+    if (district && context.city) {
+      context.inspector.showDistrict(district);
+      await updateSelection({ kind: 'district', district });
+      const outside = context.resident.filter((b) => b.district !== district.id && b.districtId !== district.id);
+      const ghosted = context.city._filtered ? context.city._filtered.touched.length : 0;
+      const shownOutside = outside.filter((b) => !state.hiddenArchetypes.has(b.archetype)).length;
+      check('district-focus-fade', ghosted >= shownOutside && ghosted > 0, `${ghosted} faded, ${shownOutside} outside the folder`);
+      const wantsLinks = manifest.dependencies && ((manifest.dependencies.matrix || []).some((r) => r[0] === district.id || r[1] === district.id) ||
+        (manifest.dependencies.coupling || []).some((r) => r[0] === district.id || r[1] === district.id));
+      const arcs = overlay.group.children.filter((c) => c.name.startsWith('district-links')).length;
+      check('district-links', wantsLinks ? arcs > 0 : arcs === 0, `${arcs} arc meshes`);
+      context.inspector.hide();
+      await updateSelection(null);
+      check('focus-clears', !context.city._filtered || Boolean(state.filterText), 'fade removed with the selection');
+    } else {
+      check('district-focus-fade', true, 'single-district city');
+    }
+
+    const mesh = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 1);
+    if (mesh) {
+      const lensChanges = {};
+      for (const lens of ['instability', 'tests', 'complexity', 'delta', 'territory']) {
+        const before = Array.from(mesh.userData.baseColors);
+        applyLens(lens);
+        const after = Array.from(mesh.userData.baseColors);
+        lensChanges[lens] = before.some((v, i) => Math.abs(v - after[i]) > 1e-3);
+      }
+      const keyItems = document.querySelectorAll('#lens-key span.chip').length;
+      applyLens('archetype');
+      check('new-lenses-recolour', lensChanges.instability || !flags.imports, JSON.stringify(lensChanges));
+      check('lens-key-bands', keyItems > 0, `${keyItems} key entries for the last lens`);
+    }
+
+    // Query words: OR is a union, district: and imports: resolve.
+    const a = countFor('is:hotspot') || 0;
+    const b = countFor('is:test') || 0;
+    const both = countFor('is:hotspot is:test') || 0;
+    const either = countFor('is:hotspot OR is:test') || 0;
+    check('query-or', either === a + b - both, `${a} + ${b} - ${both} = ${either}`);
+    if (district) {
+      const inFolder = countFor(`district:${state.source.s(district.key)}`) || 0;
+      check('query-district', inFolder >= district.buildings, `${inFolder} for ${district.buildings} buildings`);
+    }
+    if (context.edges && context.edges.imports.size) {
+      const [from, targets] = context.edges.imports.entries().next().value;
+      const col = columnIndex(manifest.indexColumns);
+      const target = indexRowById().get(targets[0]);
+      const predicate = compileQuery(`imports:${state.source.s(target[col.path])}`);
+      const row = indexRowById().get(from);
+      check('query-imports', Boolean(predicate && row && predicate(row)), `imports:${state.source.s(target[col.path])}`);
+    }
+    const owner = manifest.stats.authors && manifest.stats.authors[0];
+    if (owner && flags.authorship) {
+      const name = state.source.s(owner.name).split(' ')[0].toLowerCase();
+      check('query-owner', (countFor(`owner:${name}`) || 0) > 0, `owner:${name}`);
+    }
+
+    // The History slider: part of the city before its newest files existed.
+    const span = historySpan();
+    if (span > 0) {
+      setTimeline(span * 0.5);
+      const shown = [...context.city.meshes.values()]
+        .filter((m) => m.name.startsWith('buildings-'))
+        .reduce((sum, m) => {
+          const matrix = new THREE.Matrix4();
+          let n = 0;
+          for (let i = 0; i < m.count; i++) {
+            m.getMatrixAt(i, matrix);
+            if (Math.abs(matrix.elements[0]) > 1e-6) n++;
+          }
+          return sum + n;
+        }, 0);
+      const younger = context.resident.filter((x) => (x.ageDays || 0) < span * 0.5).length;
+      const cranes = context.city.group.getObjectByName('cranes');
+      const cranesHidden = !cranes || cranes.visible === false;
+      setTimeline(null);
+      const restoredCranes = context.city.group.getObjectByName('cranes');
+      check('timeline-replays', shown === context.resident.length - younger && cranesHidden,
+        `${shown} standing halfway through ${Math.round(span)} days (${younger} not yet built), props hidden: ${cranesHidden}`);
+      check('timeline-restores', !restoredCranes || restoredCranes.visible === !state.hiddenLayers.has('churn'), 'props back');
+    } else {
+      check('timeline-replays', true, 'no history span');
+    }
+
+    // Saved views round-trip through the URL hash.
+    const view = currentView();
+    const parsed = viewFromHash(viewToHash({ ...view, f: 'is:hotspot' }));
+    check('view-roundtrip',
+      Boolean(parsed) && Math.abs(parsed.position.x - camera.position.x) < 0.2 && parsed.filter === 'is:hotspot',
+      parsed ? `(${parsed.position.x}, ${parsed.position.y}, ${parsed.position.z})` : 'unreadable');
+
+    // Notes pin a building; removing the note removes the pin.
+    const notes = context.notes;
+    const sample = context.resident.find((x) => x.archetype !== 'park') || context.resident[0];
+    if (notes && notes.available && !state.source.locked && sample) {
+      const path = state.source.s(sample.path);
+      const had = notes.get(path);
+      notes.set(path, 'selftest note');
+      rebuildCity(context.resident);
+      const pins = context.city.group.getObjectByName('note-pins');
+      notes.set(path, had);
+      rebuildCity(context.resident);
+      const after = context.city.group.getObjectByName('note-pins');
+      check('notes-pin', Boolean(pins && pins.count >= 1) && (!after || had), `${pins ? pins.count : 0} pin(s)`);
+    } else {
+      check('notes-pin', true, 'notes unavailable (storage or locked)');
+    }
+
+    // Every new prop cluster that has a resident building to stand on exists.
+    const expectations = [
+      ['no-entry-signs', flags.layering, (x) => x.violations > 0],
+      ['traffic-cones', flags.tests, (x) => x.untestedRisk],
+      ['cross-bracing', flags.complexity, (x) => x.braced],
+      ['survey-stakes', flags.delta, (x) => Boolean(x.delta)],
+      ['owner-notices', flags.codeowners, (x) => x.ownerDrift],
+      ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
+    ];
+    const missing = expectations
+      .filter(([, on, test]) => on && context.resident.some(test))
+      .filter(([name]) => !context.city.group.getObjectByName(name))
+      .map(([name]) => name);
+    check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
+  }
+
+  // 5e. Detail follows the camera. A building beyond the opening camera's LOD
+  //     radius must move into the near-tier mesh once the camera goes to it.
+  //     Without this the ranking stayed frozen around wherever the camera first
+  //     stood, so flying anywhere kept far-tier boxes -- a park stayed a cube no
+  //     matter how close it was inspected.
+  {
+    const startPosition = camera.position.clone();
+    const startYaw = context.fly.yaw;
+    const startPitch = context.fly.pitch;
+    let target = null;
+    let farthest = 0;
+    for (const building of context.resident) {
+      const distance = Math.hypot(
+        building.x + building.width / 2 - startPosition.x,
+        building.y + building.depth / 2 - startPosition.z
+      );
+      if (distance > farthest) {
+        farthest = distance;
+        target = building;
+      }
+    }
+    const radius = context.city.lodRadius || 600;
+    if (target && farthest > radius) {
+      const archetype = target.archetype || 'warehouse';
+      setMode('fly');
+      context.fly.position.set(
+        target.x + target.width / 2,
+        Math.max(60, (target.height || 4) * 2),
+        target.y + target.depth / 2
+      );
+      context.fly.yaw = 0;
+      context.fly.pitch = -1.0;
+      context.fly.apply();
+      // The check is not subject to the flight rate limit. -Infinity rather
+      // than 0: under Chrome's virtual clock performance.now() can still be
+      // below the 600 ms limit here, and `now - 0` would skip the rebuild.
+      lodRebuiltAt = -Infinity;
+      await refreshResident();
+      const nearMesh = context.city.group.children.find(
+        (child) => child.name === `buildings-${archetype}`
+      );
+      let nearest = Infinity;
+      if (nearMesh) {
+        const matrix = new THREE.Matrix4();
+        for (let i = 0; i < nearMesh.count; i++) {
+          nearMesh.getMatrixAt(i, matrix);
+          const elements = matrix.elements;
+          nearest = Math.min(
+            nearest,
+            Math.hypot(elements[12] - camera.position.x, elements[14] - camera.position.z)
+          );
+        }
+      }
+      check(
+        'lod-follows-camera',
+        Boolean(nearMesh) && nearest < radius,
+        nearMesh
+          ? `nearest ${archetype} at ${nearest.toFixed(0)}m, LOD radius ${radius.toFixed(0)}m`
+          : `no near-tier mesh for ${archetype}`
+      );
+    } else {
+      check('lod-follows-camera', true, 'city fits inside one LOD radius');
+    }
+    context.fly.position.copy(startPosition);
+    context.fly.yaw = startYaw;
+    context.fly.pitch = startPitch;
+    context.fly.apply();
+  }
+
   // 6. Renderer still healthy after all of that.
   const payload = runBench(12);
   check('draw-calls', payload.drawCalls <= 60, `${payload.drawCalls} draw calls`);
@@ -2010,6 +3694,18 @@ function maxHeightOf(manifest) {
   return Math.max(1, ...manifest.districts.map((d) => d.skyline.maxHeight));
 }
 
+/** The reader's notes, keyed by the repository's name once it is readable. */
+function setupNotes() {
+  const manifest = state.source.manifest;
+  const name = manifest.meta && manifest.meta.name >= 0 ? state.source.s(manifest.meta.name) : '';
+  context.notes = new Notes(state.source.locked ? 'locked' : `${name || 'repo'}`);
+  if (context.inspector) context.inspector.notes = context.notes;
+  context.notes.onChange(() => {
+    renderHealth();
+    scheduleRebuild();
+  });
+}
+
 async function boot() {
   const progress = (text) => {
     loadingText.textContent = text;
@@ -2069,6 +3765,9 @@ async function boot() {
         : Infinity,
   });
 
+  // What a selection is connected to, drawn only for the selection.
+  context.overlay = new SelectionOverlay(THREE, scene);
+
   progress('placing buildings');
   if (manifest.meta.buildingCount <= 600) {
     // Small enough to hold whole; streaming would only add latency.
@@ -2079,7 +3778,18 @@ async function boot() {
   }
   state.source.buildings = context.resident;
   await state.source.assignLockedAddresses(context.resident);
+  context.facetIndex = await state.source.index();
+  context.extTable = await state.source.extTable();
+  // Import edges: ids only, so the same whether the city is locked or not.
+  context.edges = manifest.imports ? edgeMaps(await state.source.imports()) : null;
+  setupNotes();
+  setupFilterAndLens();
+  renderChips();
   rebuildCity(context.resident);
+  // The first build is valid around the opening camera, so a later rebuild is
+  // only due once the camera has actually travelled from here.
+  lodCentre = { x: camera.position.x, z: camera.position.z };
+  lodRebuiltAt = performance.now();
 
   context.fly = new FlyCamera(THREE, camera, bounds);
   context.orbit = new OrbitCamera(THREE, camera, bounds);
@@ -2087,6 +3797,31 @@ async function boot() {
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
   context.inspector = new Inspector(state.source);
+  // The inspector names other files (cycle members, co-changed files) and can
+  // fly to them; both need the whole-repo index, which it does not hold.
+  context.inspector.pathForId = (id) => {
+    const row = indexRowById().get(id);
+    if (!row) return '';
+    const col = columnIndex(state.source.manifest.indexColumns);
+    return state.source.s(row[col.path !== undefined ? col.path : col.name]);
+  };
+  context.inspector.districtForId = (id) => {
+    const row = indexRowById().get(id);
+    return row ? row[columnIndex(state.source.manifest.indexColumns).district] : null;
+  };
+  context.inspector.onFly = (id) => flyToBuilding(id);
+  context.inspector.edges = context.edges;
+  context.inspector.notes = context.notes;
+  context.inspector.onDistrict = (id) => {
+    const district = state.source.manifest.districts[id];
+    if (!district) return;
+    teleportTo({ kind: 'district', district });
+    context.inspector.showDistrict(district);
+  };
+  context.inspector.onSelect = (selection) => {
+    updateSelection(selection).catch(() => {});
+  };
+  setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
     panel: document.getElementById('cityhall'),
     body: document.getElementById('cityhall-body'),
@@ -2116,10 +3851,12 @@ async function boot() {
   camera.fov = manifest.camera.fov;
   camera.updateProjectionMatrix();
 
-  renderLegend();
-  renderXray();
+  renderGuide();
+  setupMapLabels();
   renderTitle();
   applyTime();
+  setupHistory();
+  setupViewLinks();
 
   loading.classList.add('done');
   window.zion = {
@@ -2134,6 +3871,9 @@ async function boot() {
     teleportTo,
     attemptUnlock,
   };
+
+  // A shared link opens on the view it was taken from.
+  if (!state.selftest && location.hash) await applyView(viewFromHash(location.hash));
 
   if (state.selftest) {
     // Awaited, not deferred: WebCrypto operations (the 310,000-iteration PBKDF2

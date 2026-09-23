@@ -279,6 +279,64 @@ class FileMetrics:
     # a record built without them still lays out, as a square, off `footprint`.
     footprint_w: float = 0.0
     footprint_d: float = 0.0
+    # Time signals (S1/S4 in docs/VISUALIZATION_ROADMAP.md). `age_days` is
+    # relative to the repo's own newest commit, never wall-clock time -- an
+    # old clone still shows its own newest files as new, and the number does
+    # not change between two test runs on two different days.
+    first_ts: float = 0.0
+    age_days: float = 0.0
+    is_new: bool = False
+    era: str = "mid"  # old | mid | new, a tertile of age_days across the repo
+    activity: list[int] = field(default_factory=list)
+    recent_churn: float = 0.0
+    heat: float = 0.0  # percentile rank of recent_churn across the repo, 0..1
+    # Downtown (S8 in docs/VISUALIZATION_ROADMAP.md).
+    raw_imports: list[str] = field(default_factory=list)  # as the parser saw them, unresolved
+    import_in_degree: int = 0  # how many other files resolve an import to this one
+    centrality: float = 0.0  # composite percentile rank, 0..1
+    downtown: bool = False  # top slice of centrality
+    sole_tenant: bool = False  # bus-factor-1: one author, most of the lines (S12)
+    # Architect's signals, filled by analyzer/health.py.
+    first_author: str = ""
+    imports_resolved: list[str] = field(default_factory=list)  # rel paths this file imports
+    author_count: int = 0
+    bus_factor: int = 0
+    owner_away_days: float = 0.0
+    owner_inactive: bool = False
+    knowledge_risk: bool = False
+    size_pct: float = 0.0
+    is_oversized: bool = False
+    longest_floor: tuple[str, int] | None = None
+    max_complexity: int = 0
+    hotspot: float = 0.0
+    hotspot_rank: int = 0
+    is_hotspot: bool = False
+    is_orphan: bool = False
+    cycle_id: int = 0
+    cycle_size: int = 0
+    # Dependency structure (analyzer/architecture.py), filled once districts exist.
+    import_violations: list[str] = field(default_factory=list)  # imports that break a layering rule
+    is_violation: bool = False
+    file_instability: float = -1.0  # fan-out / (fan-in + fan-out); -1 with no imports either way
+    # Ownership (analyzer/owners.py).
+    author_shares: list[tuple[str, float]] = field(default_factory=list)
+    expert_scores: dict[str, float] = field(default_factory=dict)
+    experts: list[tuple[str, float]] = field(default_factory=list)
+    author_buckets: dict[str, set[int]] = field(default_factory=dict)
+    declared_owners: list[str] = field(default_factory=list)
+    owner_drift: bool = False
+    is_unowned: bool = False
+    # Tests and complexity (analyzer/testmap.py).
+    tested_by: list[str] = field(default_factory=list)
+    is_tested: bool = False
+    is_untested: bool = False
+    untested_risk: bool = False
+    is_braced: bool = False
+    brace_complexity: int = 0  # the most decision points in one function or method
+    # Change since a baseline (analyzer/history.py).
+    delta: str = ""  # "" | "added" | "grown" | "shrunk"
+    loc_delta: int = 0
+    became: list[str] = field(default_factory=list)  # signals gained since the baseline
 
     @property
     def weight(self) -> float:
@@ -298,6 +356,18 @@ class RepoFlags:
     recency: bool = False
     churn: bool = False
     coupling: bool = False
+    age: bool = False
+    centrality: bool = False
+    # Architect's signals (analyzer/health.py), each gated like the data under it.
+    hotspots: bool = False
+    knowledge: bool = False
+    imports: bool = False
+    # Next layer (architecture.py, owners.py, testmap.py, history.py).
+    layering: bool = False
+    codeowners: bool = False
+    tests: bool = False
+    complexity: bool = False
+    delta: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -306,6 +376,16 @@ class RepoFlags:
             "recency": self.recency,
             "churn": self.churn,
             "coupling": self.coupling,
+            "age": self.age,
+            "centrality": self.centrality,
+            "hotspots": self.hotspots,
+            "knowledge": self.knowledge,
+            "imports": self.imports,
+            "layering": self.layering,
+            "codeowners": self.codeowners,
+            "tests": self.tests,
+            "complexity": self.complexity,
+            "delta": self.delta,
             "notes": list(self.notes),
         }
 
@@ -321,6 +401,10 @@ class RepoAnalysis:
     git: GitIndex | None = None
     languages: dict[str, int] = field(default_factory=dict)
     total_bytes: int = 0
+    cycles: list[list[str]] = field(default_factory=list)  # import cycles, largest first
+    architecture: object = None  # architecture.Architecture, once a layout exists
+    codeowners_path: str = ""
+    delta: dict | None = None  # history.apply_delta's result, when a baseline exists
 
     @property
     def total_logical_loc(self) -> int:
@@ -342,6 +426,10 @@ def compute_flags(git: GitIndex) -> RepoFlags:
     flags.recency = git.active_dates >= 3
     flags.churn = git.commit_count >= 5 and git.max_eligible_commit_files >= 2
     flags.coupling = git.eligible_commits >= 2 and len(git.coupling) > 0
+    # At least two distinct birth days among tracked files: a repo where every
+    # file was added in the same commit has nothing for "new" to mean.
+    birth_days = {int(f.first_ts // 86400) for f in git.files.values() if f.first_ts}
+    flags.age = len(birth_days) >= 2
 
     if not flags.authorship:
         flags.notes.append("Single author - mayor system disabled.")
@@ -349,6 +437,8 @@ def compute_flags(git: GitIndex) -> RepoFlags:
         flags.notes.append("Fewer than three active commit dates - weathering is uniform.")
     if not flags.churn:
         flags.notes.append("Too little churn history - cranes disabled.")
+    if not flags.age:
+        flags.notes.append("All tracked files share one birth date - new-construction scaffolding disabled.")
     if not flags.coupling:
         if git.bulk_commits:
             flags.notes.append(
@@ -367,7 +457,9 @@ def analyze(
 ) -> RepoAnalysis:
     """Parse every file and assemble the metric set."""
     analysis = RepoAnalysis(root=root, git=git)
-    now = None
+    # Weathering is measured back from the repo's own newest commit, like age
+    # and heat: the same clone must build the same city on any day.
+    now = git.last_ts if git.available and git.last_ts else None
 
     for entry in entries:
         result = parse_pkg.parse_file(entry.abs, entry.name, entry.is_binary)
@@ -428,16 +520,23 @@ def analyze(
             confidence={"size": "high", "symbols": result.confidence, "docs": result.confidence},
         )
 
+        record.raw_imports = result.imports
+
         file_git = git.files.get(entry.rel)
         if file_git is not None:
             record.commits = file_git.commits
             record.churn = file_git.churn
             record.last_ts = file_git.last_ts
             record.last_author = file_git.last_author
+            record.first_author = file_git.first_author
             record.last_message = file_git.last_message
             record.primary_author = file_git.primary_author
             record.ownership_share = file_git.ownership_share()
             record.authors = dict(file_git.authors)
+            record.first_ts = file_git.first_ts
+            record.activity = list(file_git.activity)
+            record.recent_churn = file_git.recent_churn
+            record.author_buckets = {a: set(b) for a, b in file_git.author_buckets.items()}
         else:
             record.confidence["authorship"] = "unknown"
 
@@ -450,4 +549,212 @@ def analyze(
     if git.available:
         for record in analysis.files:
             record.recency_days = days_since(record.last_ts, now) if record.last_ts else 0.0
+        _finalize_time_signals(analysis, git)
+    _finalize_downtown(analysis, git)
+    if analysis.flags.authorship:
+        # Bus-factor-1 (S12): one author owns almost all of a file's lines, in
+        # a repo where "one author" is not just everyone -- only meaningful
+        # once RepoFlags.authorship already says ownership means something.
+        for record in analysis.files:
+            record.sole_tenant = record.ownership_share >= SOLE_TENANT_SHARE and record.commits >= SOLE_TENANT_MIN_COMMITS
+    from .health import finalize_health
+    from .owners import finalize_owners
+    from .testmap import finalize_tests
+
+    finalize_health(analysis, git)
+    finalize_owners(analysis, git)
+    finalize_tests(analysis)
     return analysis
+
+
+SOLE_TENANT_SHARE = 0.9
+SOLE_TENANT_MIN_COMMITS = 3
+
+
+# New-construction window: the newest slice of the repo's own lifetime, floored
+# at 30 days so a young repo does not call everything new. See S2 in
+# docs/VISUALIZATION_ROADMAP.md.
+NEW_WINDOW_FRACTION = 0.10
+NEW_WINDOW_MIN_DAYS = 30.0
+
+
+def _finalize_time_signals(analysis: "RepoAnalysis", git: GitIndex) -> None:
+    """Age tertiles, the new-construction window, and the heat percentile.
+
+    All three are computed once, over every file, so each is relative to
+    *this* repo rather than an arbitrary fixed threshold -- the same
+    philosophy `choose_depth` already applies to district count. Age (birth
+    date spread) and heat (recent churn) are independent signals with
+    independent degeneration rules, so each is gated on its own flag.
+    """
+    if analysis.flags.age:
+        repo_lifetime_days = max(0.0, (git.last_ts - git.first_ts) / 86400.0)
+        window = max(NEW_WINDOW_MIN_DAYS, repo_lifetime_days * NEW_WINDOW_FRACTION)
+
+        dated = [f for f in analysis.files if f.first_ts]
+        for record in dated:
+            record.age_days = max(0.0, (git.last_ts - record.first_ts) / 86400.0)
+            record.is_new = record.age_days <= window
+
+        # Era tertiles: oldest third / middle third / newest third by age, not
+        # a fixed day count, so the split means something in a two-week-old
+        # repo and a ten-year-old one alike.
+        by_age = sorted(dated, key=lambda f: f.age_days)
+        third = max(1, len(by_age) // 3)
+        for index, record in enumerate(by_age):
+            if index < third:
+                record.era = "new"
+            elif index < 2 * third:
+                record.era = "mid"
+            else:
+                record.era = "old"
+
+    # Heat: percentile rank of recent_churn, gated on the same degeneration
+    # rule cranes already use -- not on `flags.age`, since a repo can have
+    # meaningful churn history with every file born on the same day (a single
+    # initial commit, then years of edits).
+    if analysis.flags.churn:
+        churny = sorted((f for f in analysis.files if f.recent_churn > 0), key=lambda f: f.recent_churn)
+        total = len(churny)
+        for rank, record in enumerate(churny):
+            record.heat = (rank + 1) / total if total else 0.0
+
+
+# --------------------------------------------------------------------------
+# Downtown (S8): centrality from co-change degree, import in-degree, heat and
+# ownership breadth.
+# --------------------------------------------------------------------------
+
+DOWNTOWN_FRACTION = 0.05
+DOWNTOWN_MIN_FILES = 3
+CBD_DENSITY_MULTIPLE = 2.0
+
+
+def _python_module_map(files: list[FileMetrics]) -> dict[str, str]:
+    """Dotted module path -> rel path, for every Python file."""
+    mapping: dict[str, str] = {}
+    for record in files:
+        if record.language != "python" or not record.rel.endswith(".py"):
+            continue
+        rel = record.rel
+        if rel.endswith("/__init__.py"):
+            dotted = rel[: -len("/__init__.py")].replace("/", ".")
+        else:
+            dotted = rel[:-3].replace("/", ".")
+        mapping[dotted] = rel
+    return mapping
+
+
+def _resolve_python_import(spec: str, importer_rel: str, module_map: dict[str, str]) -> str | None:
+    """Best-effort: a dotted module or a name pulled from one, or a relative
+    import resolved against the importing file's own package directory."""
+    if spec.startswith("."):
+        level = len(spec) - len(spec.lstrip("."))
+        remainder = spec[level:]
+        base_parts = importer_rel.replace("\\", "/").split("/")[:-1]  # drop the filename
+        # Level 1 (`from . import x`) means "this package"; each extra dot
+        # climbs one more directory, matching Python's own semantics.
+        climb = max(0, level - 1)
+        base_parts = base_parts[: len(base_parts) - climb] if climb else base_parts
+        candidate = ".".join(base_parts + (remainder.split(".") if remainder else []))
+    else:
+        candidate = spec
+
+    parts = candidate.split(".")
+    for i in range(len(parts), 0, -1):
+        probe = ".".join(parts[:i])
+        if probe in module_map and module_map[probe] != importer_rel:
+            return module_map[probe]
+    return None
+
+
+_RELATIVE_PATH_SUFFIXES = ("", ".js", ".jsx", ".ts", ".tsx", "/index.js", "/index.ts", "/index.jsx", "/index.tsx")
+
+
+def _resolve_relative_path_import(spec: str, importer_rel: str, path_set: set[str]) -> str | None:
+    """A `./foo` or `../bar/baz` specifier, resolved against the importing
+    file's own directory and tried against a small set of common extensions
+    -- there is no module system to consult, only the file tree itself."""
+    import posixpath
+
+    base_dir = posixpath.dirname(importer_rel)
+    joined = posixpath.normpath(posixpath.join(base_dir, spec))
+    for suffix in _RELATIVE_PATH_SUFFIXES:
+        candidate = joined + suffix
+        if candidate in path_set and candidate != importer_rel:
+            return candidate
+    return None
+
+
+def _percentile_ranks(values: dict[str, float]) -> dict[str, float]:
+    """Rank-based percentile, 0..1, ties broken by stable sort order.
+
+    Rank rather than raw value, so one enormous outlier (a util file imported
+    everywhere) does not compress every other file's score toward zero.
+    """
+    positive = sorted((key for key, v in values.items() if v > 0), key=lambda k: values[k])
+    total = len(positive)
+    return {key: (rank + 1) / total for rank, key in enumerate(positive)}
+
+
+def _finalize_downtown(analysis: "RepoAnalysis", git: GitIndex) -> None:
+    """Score every file's centrality and mark the top slice as downtown.
+
+    Weights are dropped and the rest renormalised when a component has
+    nothing to say -- a single-author repo still gets a downtown from
+    coupling and imports alone, just not from ownership breadth.
+    """
+    files = analysis.files
+    if not files:
+        return
+
+    module_map = _python_module_map(files)
+    path_set = {f.rel for f in files}
+
+    in_degree: dict[str, int] = {}
+    edge_count = 0
+    for record in files:
+        for spec in record.raw_imports:
+            target = (
+                _resolve_python_import(spec, record.rel, module_map)
+                if record.language == "python"
+                else _resolve_relative_path_import(spec, record.rel, path_set)
+            )
+            if target:
+                in_degree[target] = in_degree.get(target, 0) + 1
+                edge_count += 1
+                if target not in record.imports_resolved:
+                    record.imports_resolved.append(target)
+    for record in files:
+        record.import_in_degree = in_degree.get(record.rel, 0)
+
+    coupling_degree: dict[str, int] = {}
+    if analysis.flags.coupling and git.coupling:
+        for path_a, path_b in git.coupling:
+            coupling_degree[path_a] = coupling_degree.get(path_a, 0) + 1
+            coupling_degree[path_b] = coupling_degree.get(path_b, 0) + 1
+
+    components: list[tuple[float, dict[str, float]]] = []
+    if coupling_degree:
+        components.append((0.35, _percentile_ranks({f.rel: coupling_degree.get(f.rel, 0) for f in files})))
+    if edge_count:
+        components.append((0.35, _percentile_ranks({f.rel: float(in_degree.get(f.rel, 0)) for f in files})))
+    if analysis.flags.churn:
+        components.append((0.20, _percentile_ranks({f.rel: f.heat for f in files})))
+    if analysis.flags.authorship:
+        components.append((0.10, _percentile_ranks({f.rel: float(len(f.authors)) for f in files})))
+
+    analysis.flags.centrality = bool(coupling_degree) or bool(edge_count)
+    if not analysis.flags.centrality:
+        analysis.flags.notes.append("No coupling data or resolvable imports - downtown disabled.")
+        return
+
+    weight_total = sum(w for w, _ in components)
+    for record in files:
+        record.centrality = sum(w * ranks.get(record.rel, 0.0) for w, ranks in components) / weight_total
+
+    ranked = sorted(files, key=lambda f: -f.centrality)
+    cutoff = max(DOWNTOWN_MIN_FILES, round(len(files) * DOWNTOWN_FRACTION))
+    for record in ranked[:cutoff]:
+        if record.centrality > 0:
+            record.downtown = True

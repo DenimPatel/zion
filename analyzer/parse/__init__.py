@@ -34,6 +34,9 @@ class Floor:
     end_line: int = 0
     loc: int = 0              # lines of source this floor spans
     depth: int = 0            # 0 = top level, 1 = nested (methods inside a class)
+    is_entrypoint: bool = False  # a __main__ guard or a function literally named main
+    complexity: int = 0       # decision points: If/For/While/Try/BoolOp/comprehension (exact
+                              # for Python; a keyword count for brace languages, medium confidence)
 
 
 @dataclass
@@ -47,6 +50,13 @@ class ParseResult:
     rows: int | None = None   # data files only
     confidence: str = "high"  # high | medium | low
     parse_error: str = ""
+    # Raw import specifiers, resolved to repo paths later in metrics.py (which
+    # has the whole file list to resolve against, not just this one file).
+    # Python: dotted module names, relative ones kept as literal leading dots
+    # ("." + module, per import level). Brace languages: relative path
+    # specifiers only ("./foo", "../bar/baz") -- a bare package name like
+    # 'react' cannot resolve to a repo file and is not worth carrying.
+    imports: list[str] = field(default_factory=list)
 
 
 DOC_TRUNCATE = 160

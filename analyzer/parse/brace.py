@@ -145,6 +145,40 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
     return "".join(out).splitlines(), depth_at_line, comment_only
 
 
+# Relative import/require specifiers only: `import x from 'react'` cannot
+# resolve to a file in this repo and is not worth carrying past this module.
+# Applied to the raw source rather than the masked one -- a heuristic on top
+# of a heuristic, medium confidence either way, and false positives from a
+# commented-out import are rare enough not to matter for a centrality score.
+_RE_RELATIVE_IMPORT = re.compile(
+    r"""(?:from|import)\s+['"](\.[^'"]+)['"]|require\(\s*['"](\.[^'"]+)['"]\s*\)"""
+)
+
+
+def _relative_imports(source: str) -> list[str]:
+    imports = []
+    for match in _RE_RELATIVE_IMPORT.finditer(source):
+        imports.append(match.group(1) or match.group(2))
+    return imports
+
+
+# Keyword-count complexity heuristic, applied to a floor's own masked line
+# range. Not an AST, so this over- or under-counts (a `case` inside a string
+# is already stripped by `_strip`, but a `for` inside a comment slipping past
+# it would not be); confidence for brace languages is "medium" everywhere
+# else in this file for the same reason.
+_RE_COMPLEXITY_KEYWORD = re.compile(r"\b(?:if|for|foreach|while|catch|case)\b")
+_RE_COMPLEXITY_OPERATOR = re.compile(r"&&|\|\||\?\?")
+
+
+def _complexity_of_lines(masked_lines: list[str], start: int, end: int) -> int:
+    span = masked_lines[max(0, start - 1) : max(0, end - 1)]
+    return sum(
+        len(_RE_COMPLEXITY_KEYWORD.findall(line)) + len(_RE_COMPLEXITY_OPERATOR.findall(line))
+        for line in span
+    )
+
+
 def parse_brace(source: str, language: str) -> ParseResult:
     masked_lines, depth_at_line, comment_only = _strip(source, language)
 
@@ -216,6 +250,8 @@ def parse_brace(source: str, language: str) -> ParseResult:
                 continue
             floor.end_line = block_end(floor.line)
             floor.loc = max(1, floor.end_line - floor.line)
+            floor.complexity = _complexity_of_lines(masked_lines, floor.line, floor.end_line)
+            floor.is_entrypoint = floor.name in ("main", "run")
             floors.append(floor)
 
     return ParseResult(
@@ -225,4 +261,5 @@ def parse_brace(source: str, language: str) -> ParseResult:
         comment_lines=comment_lines,
         doc_lines=comment_lines,
         confidence="medium",
+        imports=_relative_imports(source) if language in ("javascript", "typescript") else [],
     )

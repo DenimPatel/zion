@@ -69,6 +69,85 @@ def _floor_from(node: ast.AST, kind: str, depth: int, docstring: str) -> Floor:
     )
 
 
+def _imports_from(tree: ast.AST) -> list[str]:
+    """Raw import specifiers, resolved to repo paths later (metrics.py).
+
+    ``import a.b.c`` yields ``"a.b.c"``. ``from a.b import c`` yields
+    ``"a.b"`` -- the module, not the names pulled from it, since a symbol
+    inside a module does not change which *file* the import points at.
+    A relative ``from . import x`` / ``from ..pkg import y`` yields the
+    literal leading dots plus whatever module followed them (``"."``,
+    ``"..pkg"``), which metrics.py resolves against the importing file's own
+    package directory.
+    """
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            dots = "." * node.level
+            module = node.module or ""
+            if not dots and not module:
+                continue
+            # `from pkg import utils` is ambiguous between "the submodule
+            # pkg.utils" and "the name utils inside pkg/__init__.py" without
+            # deeper resolution than this parser does. Trying base.name first
+            # (metrics.py's resolver falls back to shorter prefixes) covers
+            # the more common submodule case while still finding the package
+            # itself if that name is not actually a file. A dot separator is
+            # only inserted between two non-empty parts, so `from . import x`
+            # (dots=".", module="") yields ".x", not "..x".
+            names = [alias.name for alias in node.names if alias.name != "*"]
+            if names:
+                imports.extend(f"{dots}{module}.{name}" if module else f"{dots}{name}" for name in names)
+            else:
+                imports.append(f"{dots}{module}")
+    return imports
+
+
+_COMPLEXITY_NODES = (
+    ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try,
+    ast.BoolOp, ast.comprehension, ast.With, ast.AsyncWith,
+)
+
+
+def _complexity_of(node: ast.AST) -> int:
+    """Decision points inside one floor's own node -- not the whole file.
+
+    A plain count of branch/loop/exception-handler/boolean-combination nodes.
+    Not McCabe-exact (no +1 baseline, no match-case yet), but monotonic in the
+    right direction: more branches, higher number.
+    """
+    return sum(1 for child in ast.walk(node) if isinstance(child, _COMPLEXITY_NODES))
+
+
+def _entrypoint_names(tree: ast.AST) -> set[str]:
+    """Names of functions the front door actually calls.
+
+    A function literally named `main` is one entrypoint; the other is
+    whatever a top-level `if __name__ == "__main__":` guard calls, which is
+    often something else (`run`, `cli`, `app.main`). Best-effort: only bare
+    ``name()`` calls are recognised, not ``module.name()``.
+    """
+    names = {"main"}
+    for node in getattr(tree, "body", []):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in test.comparators)
+        ):
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                names.add(child.func.id)
+    return names
+
+
 def parse_python(source: str) -> ParseResult:
     tree = ast.parse(source)
     comments = _comment_lines(source)
@@ -79,20 +158,26 @@ def parse_python(source: str) -> ParseResult:
     logical = total - blank - len(comments - docstrings) - len(docstrings)
     logical = max(0, logical)
 
+    entrypoints = _entrypoint_names(tree)
     floors: list[Floor] = []
     symbols = 0
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            floors.append(_floor_from(node, "function", 0, ast.get_docstring(node) or ""))
+            floor = _floor_from(node, "function", 0, ast.get_docstring(node) or "")
+            floor.complexity = _complexity_of(node)
+            floor.is_entrypoint = node.name in entrypoints
+            floors.append(floor)
             symbols += 1
         elif isinstance(node, ast.ClassDef):
-            floors.append(_floor_from(node, "class", 0, ast.get_docstring(node) or ""))
+            floor = _floor_from(node, "class", 0, ast.get_docstring(node) or "")
+            floor.complexity = _complexity_of(node)
+            floors.append(floor)
             symbols += 1
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    floors.append(
-                        _floor_from(child, "method", 1, ast.get_docstring(child) or "")
-                    )
+                    method = _floor_from(child, "method", 1, ast.get_docstring(child) or "")
+                    method.complexity = _complexity_of(child)
+                    floors.append(method)
                     symbols += 1
 
     return ParseResult(
@@ -102,4 +187,5 @@ def parse_python(source: str) -> ParseResult:
         comment_lines=len(comments),
         doc_lines=len(comments | docstrings),
         confidence="high",
+        imports=_imports_from(tree),
     )
