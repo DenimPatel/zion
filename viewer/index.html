@@ -22,6 +22,7 @@
       <h1 id="city-name">Zion</h1>
       <p id="city-subtitle">loading&hellip;</p>
     </div>
+    <button id="plan-toggle" type="button" aria-pressed="false" title="Plan view: the city from straight above, north up (P)">Plan view</button>
     <button id="view-link" type="button" title="Copy a link to exactly this view: camera, filter, lens, selection and date">Copy view link</button>
     <button id="panels-toggle" type="button" aria-pressed="false"
             aria-controls="guide" title="Toggle the city guide (L)">
@@ -124,6 +125,23 @@
     <div id="tour-progress"><div id="tour-progress-bar"></div></div>
   </div>
 
+  <!-- The minimap: the whole plan in a corner. Click to fly, drag to scrub,
+       wheel to zoom the map; M or the button folds it to a pill. -->
+  <section id="minimap" aria-label="Minimap">
+    <div class="minimap-head">
+      <h2>Map</h2>
+      <span class="minimap-actions">
+        <button type="button" class="minimap-zoom-out" title="Zoom the map out">&minus;</button>
+        <button type="button" class="minimap-zoom-in" title="Zoom the map in">+</button>
+        <button type="button" class="minimap-toggle" aria-expanded="true" title="Minimize the map (M)">&#8600;</button>
+      </span>
+    </div>
+    <canvas id="minimap-canvas" width="208" height="208"
+            title="Click to fly there · drag to scrub · Shift-click to frame a folder"></canvas>
+    <div class="minimap-tip" hidden></div>
+    <button type="button" class="minimap-pill" title="Show the map (M)" aria-label="Show the map">&#9638; Map</button>
+  </section>
+
   <div id="map-labels" aria-hidden="true"></div>
   <div id="prompt" hidden></div>
   <div id="crosshair" aria-hidden="true"></div>
@@ -173,6 +191,8 @@
       <span><kbd>N</kbd> next stop</span>
       <span><kbd>C</kbd> city hall</span>
       <span><kbd>O</kbd> orbit city</span>
+      <span><kbd>P</kbd> plan view</span>
+      <span><kbd>M</kbd> map</span>
       <span><kbd>U</kbd> unlock</span>
       <span><kbd>Esc</kbd> release</span>
     </div>

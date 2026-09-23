@@ -832,8 +832,7 @@ body.detail-page {
 #inspector-open-detail[hidden] { display: none; }
 
 /* ---------- the next layer: structure, history, views, notes ---------- */
-#view-link {
-  margin-left: auto;
+#plan-toggle, #view-link {
   margin-right: 8px;
   padding: 6px 11px;
   background: var(--panel-solid);
@@ -846,7 +845,8 @@ body.detail-page {
   pointer-events: auto;
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
 }
-#view-link:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#plan-toggle { margin-left: auto; }
+#plan-toggle:hover, #view-link:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
 #lens-author {
   width: 100%;
   margin-top: 6px;
@@ -943,3 +943,68 @@ body.history-active #history-out { color: #ff7a4a; }
 .hall-matrix td { width: 22px; height: 18px; text-align: center; border: 1px solid rgba(148, 163, 184, 0.1); }
 .hall-matrix td.self { background: rgba(148, 163, 184, 0.08); }
 .hall-matrix td.violating { outline: 2px solid #e0245e; outline-offset: -2px; }
+
+/* ---------- plan view button ---------- */
+#plan-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+
+/* ---------- minimap ---------- */
+/* Fixed rather than a grid cell: the footer spans the whole bottom row and its
+   height changes as it wraps, so the map sits above it by its measured height
+   (--footer-h, set by minimap.js). */
+#minimap {
+  position: fixed;
+  right: 14px;
+  bottom: calc(var(--footer-h, 58px) + 26px);
+  width: 232px;
+  padding: 8px 10px 10px;
+  z-index: 3;
+  pointer-events: auto;
+}
+#minimap h2 { margin: 0; }
+.minimap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.minimap-actions { display: flex; gap: 4px; }
+.minimap-actions button, .minimap-pill {
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  color: var(--ink-dim);
+  font: 12px/1 var(--sans);
+  min-width: 22px;
+  height: 22px;
+  cursor: pointer;
+}
+.minimap-actions button:hover, .minimap-pill:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#minimap-canvas {
+  display: block;
+  width: 212px;
+  height: 212px;
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.minimap-tip {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 12px;
+  font: 11px var(--mono);
+  color: var(--ink);
+  background: rgba(8, 11, 19, 0.85);
+  border-radius: 4px;
+  padding: 3px 6px;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.minimap-tip[hidden] { display: none; }
+.minimap-pill { display: none; padding: 0 10px; height: 30px; }
+#minimap.collapsed { width: auto; padding: 0; background: none; border: 0; box-shadow: none; backdrop-filter: none; }
+#minimap.collapsed .minimap-head,
+#minimap.collapsed canvas,
+#minimap.collapsed .minimap-tip { display: none; }
+#minimap.collapsed .minimap-pill { display: block; background: var(--panel); }
+/* The inspector shares the right-hand column: leave the map its corner. */
+body.minimap-open #inspector { max-height: calc(var(--panel-space) - 250px); }
+body.hall-open #minimap { opacity: 0.25; }
+body.panels-hidden #minimap:not(.collapsed) { opacity: 0.85; }

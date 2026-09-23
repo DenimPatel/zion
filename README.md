@@ -278,7 +278,9 @@ that one is the repository root in each case.
 | `Q` / `E` | fly down / up |
 | mouse | look (click once to capture the pointer; `Esc` releases) |
 | `V` | toggle fly ⇄ walk |
-| `O` | top-down overview |
+| `O` | orbit: circle the city (or whatever you clicked) |
+| `P` | plan view: straight down, north up, a long lens; drag or `W` `A` `S` `D` pans, wheel or `Q` `E` zooms, `R` frames the whole city |
+| `M` | fold / unfold the minimap |
 | `E` | enter the building you are facing, or City Hall when you are standing at it |
 | `U` | unlock an encrypted city |
 | `[` `]` | change floor while inside a building |
@@ -317,6 +319,28 @@ through. While it holds, the district being described is marked on the ground an
 numbers, and a progress bar shows how far along the circuit is. Press `N` to skip
 ahead. Cities with more than 32 districts are sampled evenly, and the label says
 so rather than silently dropping most of the map.
+
+**The minimap is always there.** A small map in the bottom-right corner draws the
+whole plan -- region plinths, roads by class, district plates, City Hall -- from
+the manifest, so districts that have not streamed in are on it too. Plates and
+buildings are tinted by the **active colour lens** (the same function paints the
+city and the map), the **filter's matches** are bright dots, the **selection** is
+ringed, and files carrying one of **your notes** have a pink pin. The camera is a
+view cone, or in the plan view the rectangle of ground on screen; when it
+stands outside the city the marker is pinned to the map's edge. **Click to fly
+there**, drag to scrub the view across the city, Shift-click to frame a whole
+folder, and use the wheel or `+` / `−` to zoom the map, which then follows the
+camera. `M` or the corner button folds it to a pill, and the choice is
+remembered (it starts folded on narrow screens).
+
+**The plan view reads the city as a map.** `P` (or *Plan view* in the title
+bar) rises from wherever you are to a camera straight above the point you were
+looking at, north up, through a 28° lens so towers do not lean out of frame and
+hide their neighbours. Fog is pushed back by the altitude while it is up.
+Picking still works (click a building to inspect it), minimap clicks glide the
+plan instead of dropping out of it, and a *Copy view link* taken in the plan
+reopens in the plan. `P` again hands the exact vantage back to free flight,
+still looking down, so nothing jumps.
 
 **City Hall** is the one building that is not a file: it is the repository's own
 report card, standing at the centre of the plan on a plaza the districts are laid
@@ -710,7 +734,7 @@ analyzer/
 viewer/
   index.html · css/hud.css
   js/  main · loader · city · stream · interior · cityhall/tour · cameras
-       · collision · inspector · labels · sky · vault
+       · collision · inspector · labels · minimap · sky · vault
        parts/ massing · civic · construction · parks · beacons · health
 vendor/                  three.module.js (pinned, with provenance) · aes_gcm.py
 tests/                   105 stdlib tests + committed fixture repositories

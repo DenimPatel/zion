@@ -30,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (73 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (82 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -101,6 +101,9 @@ from; `facade.js` renders windows per-fragment from a building's own metrics (no
 window rows equal parsed floor counts; `interior.js` builds/destroys building interiors on enter/leave
 (max 2 cached), slicing source by byte offset so displayed text matches exactly what was measured;
 `labels.js` projects region/district names as DOM labels, revealed by camera distance per level;
+`minimap.js` is the bottom-right 2D-canvas map (drawn from the manifest, tinted through `city.js::lensColour`,
+click-to-fly via `main.js::miniMapNavigate`); `cameras.js::TopCamera` is the plan view (`P`, straight down,
+north up, rotation set directly because `lookAt` is degenerate overhead);
 `selection.js` draws what the current selection is connected to (import lines, co-change rings, district arcs) —
 only for the selection, as its own scene group; `notes.js` (localStorage, keyed by repo name + path) and
 `views.js` (URL-hash saved views) are the reader's own state; `parts/structure.js` holds the no-entry sign,
@@ -133,6 +136,8 @@ traffic cones, cross-bracing, survey stake, owner notice and note pin;
   the filter query that counts/highlights its buildings. A new legend entry needs a row there *and* a
   `(id, label, unit, group, description)` entry in `emit.py::LEGEND_SPEC`; an entry with no separate layer
   is shown with an "always" badge, never as a dead switch.
+- The city and the minimap colour through one function, `city.js::lensColour`. A new lens is added there, never
+  copied into `minimap.js`.
 - Relationships are drawn for the selection only (`viewer/js/selection.js`). Never draw every import or co-change edge
   at once — that is the tangle the original skybridges were removed for.
 - `index.json` columns and `FLAG_*` bits are append-only; `viewer/js/facets.js::FLAG_BITS` must mirror `emit.py`.

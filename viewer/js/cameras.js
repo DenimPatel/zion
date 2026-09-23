@@ -396,6 +396,190 @@ export class OrbitCamera {
   }
 }
 
+/**
+ * Plan view: the city read as a map, straight down, north up.
+ *
+ * An oblique camera is how you *look at* a city; a plan is how you *read* it --
+ * every district is its true shape, nothing hides behind a tower, and the roads
+ * say how the folders nest. The camera sits exactly overhead, so its rotation
+ * is set directly rather than through `lookAt`, which has no defined "up" when
+ * the view direction is vertical. Panning moves the ground point under the
+ * camera; zooming changes the height.
+ */
+export class TopCamera {
+  constructor(THREE, camera, bounds, skyline = 0) {
+    this.THREE = THREE;
+    this.camera = camera;
+    // A long lens: at 60 degrees the towers under the camera lean out of the
+    // frame and hide their neighbours; at 28 the plan reads like a map. The
+    // viewer eases the camera's fov toward this while the plan is active.
+    this.fov = 28;
+    this.skyline = skyline;
+    this.target = new THREE.Vector3();
+    this.keys = new Set();
+    this.setBounds(bounds);
+    this.height = this.maxHeight * 0.6;
+    this.target.set(bounds[0] + bounds[2] / 2, 0, bounds[1] + bounds[3] / 2);
+    this._active = false;
+    this._onKeyDown = (event) => {
+      if (event.repeat) return;
+      this.keys.add(event.code);
+    };
+    this._onKeyUp = (event) => this.keys.delete(event.code);
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+  }
+
+  setBounds(bounds) {
+    this.bounds = bounds;
+    const span = Math.max(bounds[2], bounds[3]);
+    // Never low enough for the tallest tower to reach the lens.
+    this.minHeight = Math.max(30, span * 0.08, (this.skyline || 0) * 1.5);
+    // High enough that the whole plan fits a 60 degree frustum with margin.
+    this.maxHeight = Math.max(this.minHeight * 2, span * 3.4);
+  }
+
+  get active() {
+    return this._active;
+  }
+
+  set active(value) {
+    this._active = value;
+    if (!value) this.keys.clear();
+  }
+
+  /** The height at which the whole plan fills the frame. */
+  frameHeight() {
+    const [, , bw, bh] = this.bounds;
+    const fov = (this.fov * Math.PI) / 180;
+    const aspect = this.camera.aspect || 1;
+    const fitDepth = bh / 2 / Math.tan(fov / 2);
+    const fitWidth = bw / 2 / (Math.tan(fov / 2) * aspect);
+    return Math.min(this.maxHeight, Math.max(this.minHeight, Math.max(fitDepth, fitWidth) * 1.08));
+  }
+
+  /** Frame the whole plan. */
+  frame() {
+    const [bx, bz, bw, bh] = this.bounds;
+    this.target.set(bx + bw / 2, 0, bz + bh / 2);
+    this.height = this.frameHeight();
+    this.apply();
+  }
+
+  /**
+   * Take over from the fly camera: the plan is centred on the ground point the
+   * fly camera was looking at, at a height that keeps roughly the same scale.
+   */
+  adopt(fly) {
+    const cosPitch = Math.cos(fly.pitch);
+    const dir = { x: -Math.sin(fly.yaw) * cosPitch, y: Math.sin(fly.pitch), z: -Math.cos(fly.yaw) * cosPitch };
+    const span = Math.max(this.bounds[2], this.bounds[3]);
+    const reach = dir.y < -0.05 ? Math.min(span * 1.5, fly.position.y / -dir.y) : span * 0.25;
+    this.target.set(fly.position.x + dir.x * reach, 0, fly.position.z + dir.z * reach);
+    this.height = this.frameHeight() * 0.6;
+    this._clamp();
+  }
+
+  /** The pose `adopt` settles on, for an animated hand-over. */
+  pose() {
+    const THREE = this.THREE;
+    const position = new THREE.Vector3(this.target.x, this.height, this.target.z);
+    const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0, 'YXZ'));
+    return { position, quaternion };
+  }
+
+  /** Hand the vantage back to the fly camera, looking (almost) straight down. */
+  handOff(fly) {
+    fly.position.copy(this.camera.position);
+    fly.yaw = 0;
+    fly.pitch = -(Math.PI / 2 - 0.02);
+    fly.velocity.set(0, 0, 0);
+    fly.clamp();
+    fly.apply();
+  }
+
+  /** Centre the plan on a ground point, keeping the height. */
+  centreOn(x, z) {
+    this.target.x = x;
+    this.target.z = z;
+    this._clamp();
+    this.apply();
+  }
+
+  /** Metres of ground per screen pixel at the current height. */
+  metresPerPixel(viewportHeight) {
+    const fov = ((this.camera.fov || this.fov) * Math.PI) / 180;
+    return (2 * this.height * Math.tan(fov / 2)) / Math.max(1, viewportHeight);
+  }
+
+  /** Drag: the ground follows the pointer, like dragging a paper map. */
+  panDelta(dx, dy, viewportHeight) {
+    const scale = this.metresPerPixel(viewportHeight);
+    this.target.x -= dx * scale;
+    this.target.z -= dy * scale;
+    this._clamp();
+    this.apply();
+  }
+
+  /** Wheel: lower or raise the camera, geometrically so each notch feels the same. */
+  zoomBy(notches) {
+    if (!notches) return;
+    this.height *= Math.pow(0.86, notches);
+    this._clamp();
+    this.apply();
+  }
+
+  /** The ground rectangle currently on screen: [x, z, w, h]. */
+  visibleRect() {
+    const fov = ((this.camera.fov || this.fov) * Math.PI) / 180;
+    const h = 2 * this.height * Math.tan(fov / 2);
+    const w = h * (this.camera.aspect || 1);
+    return [this.target.x - w / 2, this.target.z - h / 2, w, h];
+  }
+
+  _clamp() {
+    this.height = Math.min(this.maxHeight, Math.max(this.minHeight, this.height));
+    const [bx, bz, bw, bh] = this.bounds;
+    const margin = Math.max(bw, bh) * 0.25;
+    this.target.x = Math.max(bx - margin, Math.min(bx + bw + margin, this.target.x));
+    this.target.z = Math.max(bz - margin, Math.min(bz + bh + margin, this.target.z));
+  }
+
+  apply() {
+    const { position, quaternion } = this.pose();
+    this.camera.position.copy(position);
+    this.camera.quaternion.copy(quaternion);
+  }
+
+  update(dt) {
+    if (!this._active) return;
+    let x = 0;
+    let z = 0;
+    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) z -= 1;
+    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) z += 1;
+    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) x += 1;
+    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) x -= 1;
+    if (this.keys.has('KeyE')) this.height *= Math.pow(0.4, dt);
+    if (this.keys.has('KeyQ')) this.height *= Math.pow(2.5, dt);
+    if (x || z) {
+      // A screen-height of ground every ~1.4 s, whatever the zoom.
+      let speed = this.height * 0.8;
+      if (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) speed *= 2.6;
+      if (this.keys.has('AltLeft') || this.keys.has('AltRight')) speed *= 0.25;
+      const length = Math.hypot(x, z);
+      this.target.x += (x / length) * speed * dt;
+      this.target.z += (z / length) * speed * dt;
+    }
+    this._clamp();
+    this.apply();
+  }
+
+  dispose() {
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+  }
+}
+
 /** Smoothly fly the camera to a point of interest (used by the City Hall table). */
 export class CameraFlight {
   constructor(camera) {
@@ -404,16 +588,21 @@ export class CameraFlight {
   }
 
   start(fromPosition, fromQuaternion, toPosition, toTarget, duration = 1.4) {
+    const look = new this.camera.constructor();
+    look.position.copy(toPosition);
+    look.lookAt(toTarget);
+    this.startPose(fromPosition, fromQuaternion, toPosition, look.quaternion, duration);
+  }
+
+  /** As `start`, to an explicit orientation (a straight-down view has no lookAt). */
+  startPose(fromPosition, fromQuaternion, toPosition, toQuaternion, duration = 1.4) {
     this.active = true;
     this.elapsed = 0;
     this.duration = duration;
     this.fromPosition = fromPosition.clone();
     this.fromQuaternion = fromQuaternion.clone();
-    const look = new this.camera.constructor();
-    look.position.copy(toPosition);
-    look.lookAt(toTarget);
     this.toPosition = toPosition.clone();
-    this.toQuaternion = look.quaternion.clone();
+    this.toQuaternion = toQuaternion.clone();
   }
 
   update(dt) {

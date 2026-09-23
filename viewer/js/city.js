@@ -305,6 +305,56 @@ function tintFor(THREE, baseHex, author, strength) {
   return base.clone().lerp(authorColor, strength);
 }
 
+/**
+ * One building's colour under a lens, written into `out` (a THREE.Color).
+ *
+ * The city and the minimap both paint with this, so a district on the map is
+ * the same colour as its buildings on screen.
+ */
+export function lensColour(THREE, source, lens, building, archetype, territoryAuthor, out) {
+  const manifest = source.manifest;
+  const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
+  if (lens === 'language') {
+    const lang = source.s(building.language);
+    return lang ? out.setHSL(hueFor(lang), 0.5, 0.55) : out.set(0x777777);
+  }
+  if (lens === 'author') {
+    const author = authorTint ? source.s(building.author) : '';
+    return author ? out.setHSL(hueFor(author), 0.45, 0.55) : out.set(0x777777);
+  }
+  if (lens === 'era') {
+    // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
+    // building's own age relative to the rest of the repo (S3).
+    const ERA_COLOURS = { old: 0x8a5a44, mid: 0x8f97a3, new: 0xbfe3ef };
+    return out.set(ERA_COLOURS[building.era] || ERA_COLOURS.mid);
+  }
+  if (lens === 'heat') {
+    // Cool grey (stable) through amber to red (hottest): recent,
+    // decay-weighted churn, not lifetime totals (S4).
+    const value = Math.max(0, Math.min(1, building.heat || 0));
+    return out.set(0x4b5563).lerp(new THREE.Color(0xff4d2e), value);
+  }
+  if (lens === 'health') return out.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
+  if (LENS_BANDS[lens]) return out.set(lensBand(lens, building).colour);
+  if (lens === 'territory') {
+    // One author's territory: brightness is their share of the file's
+    // lines, so where they wrote everything glows and where they wrote
+    // nothing is ghost grey.
+    const share = (building.authorShares || []).find(([name]) => source.s(name) === territoryAuthor);
+    const value = share ? share[1] : 0;
+    return out.set(0x26282d).lerp(new THREE.Color(0xffc24a), Math.sqrt(value));
+  }
+  if (lens === 'downtown') {
+    const centrality = Math.max(0, Math.min(1, building.centrality || 0));
+    return out.set(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality);
+  }
+  const author = authorTint ? source.s(building.author) : '';
+  out.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+  const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
+  if (downtownEligible && building.downtown) out.lerp(new THREE.Color(0x8fd6ff), 0.4);
+  return out;
+}
+
 export class CityMesh {
   constructor(THREE, source) {
     this.THREE = THREE;
@@ -849,8 +899,6 @@ export class CityMesh {
    */
   recolour(lens) {
     const THREE = this.THREE;
-    const manifest = this.source.manifest;
-    const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
     const colour = new THREE.Color();
 
     for (const [uuid, members] of this.records) {
@@ -859,42 +907,7 @@ export class CityMesh {
       const archetype = mesh.name.replace(/^buildings-/, '').replace(/-far$/, '');
       const base = mesh.userData.baseColors;
       members.forEach((building, index) => {
-        if (lens === 'language') {
-          const lang = this.source.s(building.language);
-          colour.copy(lang ? new THREE.Color().setHSL(hueFor(lang), 0.5, 0.55) : new THREE.Color(0x777777));
-        } else if (lens === 'author') {
-          const author = authorTint ? this.source.s(building.author) : '';
-          colour.copy(author ? new THREE.Color().setHSL(hueFor(author), 0.45, 0.55) : new THREE.Color(0x777777));
-        } else if (lens === 'era') {
-          // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
-          // building's own age relative to the rest of the repo (S3).
-          const ERA_COLOURS = { old: 0x8a5a44, mid: 0x8f97a3, new: 0xbfe3ef };
-          colour.copy(new THREE.Color(ERA_COLOURS[building.era] || ERA_COLOURS.mid));
-        } else if (lens === 'heat') {
-          // Cool grey (stable) through amber to red (hottest): recent,
-          // decay-weighted churn, not lifetime totals (S4).
-          const value = Math.max(0, Math.min(1, building.heat || 0));
-          colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
-        } else if (lens === 'health') {
-          colour.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
-        } else if (LENS_BANDS[lens]) {
-          colour.set(lensBand(lens, building).colour);
-        } else if (lens === 'territory') {
-          // One author's territory: brightness is their share of the file's
-          // lines, so where they wrote everything glows and where they wrote
-          // nothing is ghost grey (`this.territoryAuthor` is set by main.js).
-          const share = (building.authorShares || []).find(([name]) => this.source.s(name) === this.territoryAuthor);
-          const value = share ? share[1] : 0;
-          colour.copy(new THREE.Color(0x26282d).lerp(new THREE.Color(0xffc24a), Math.sqrt(value)));
-        } else if (lens === 'downtown') {
-          const centrality = Math.max(0, Math.min(1, building.centrality || 0));
-          colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
-        } else {
-          const author = authorTint ? this.source.s(building.author) : '';
-          colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
-          const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
-          if (downtownEligible && building.downtown) colour.lerp(new THREE.Color(0x8fd6ff), 0.4);
-        }
+        lensColour(THREE, this.source, lens, building, archetype, this.territoryAuthor, colour);
         base[index * 3] = colour.r;
         base[index * 3 + 1] = colour.g;
         base[index * 3 + 2] = colour.b;

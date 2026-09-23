@@ -4,8 +4,8 @@
  * An architect who finds something wants to point a colleague at it -- in a
  * pull request, a design doc, a chat. The URL hash carries everything that
  * makes a view: the camera, the filter, the colour lens (and the author, for
- * the territory lens), the selected building or district, and the History
- * slider. Nothing about the repository is in the link beyond what the query
+ * the territory lens), the selected building or district, the History
+ * slider, and whether the view is the plan (map) view. Nothing about the repository is in the link beyond what the query
  * itself says, so a view of a locked city stays as opaque as the city.
  *
  * Format: `#view=` + URL-safe base64 of a small JSON object. Unknown or broken
@@ -32,8 +32,10 @@ function decode(text) {
 const round = (value, places = 1) => Math.round(value * 10 ** places) / 10 ** places;
 
 /** Capture a view from its parts. `selection` is `{kind: 'building'|'district', id}` or null. */
-export function captureView({ position, yaw, pitch, filter, lens, author, selection, timeline }) {
+export function captureView({ position, yaw, pitch, filter, lens, author, selection, timeline, mode }) {
   const view = { p: [round(position.x), round(position.y), round(position.z)], yw: round(yaw, 3), pt: round(pitch, 3) };
+  // Only the plan view is recorded: every other mode reopens as free flight.
+  if (mode === 'top') view.m = 't';
   if (filter) view.f = filter;
   if (lens && lens !== 'archetype') view.l = lens;
   if (author) view.a = author;
@@ -67,6 +69,7 @@ export function viewFromHash(hash) {
       author: typeof view.a === 'string' ? view.a : '',
       selection,
       timeline: Number.isFinite(view.t) ? view.t : null,
+      mode: view.m === 't' ? 'top' : 'fly',
     };
   } catch (error) {
     return null;

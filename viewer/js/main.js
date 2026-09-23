@@ -22,11 +22,12 @@ import {
   DELTA_COLOURS,
   LENS_BANDS,
   lensBand,
+  lensColour,
   healthSignal,
   plinthTop,
 } from './city.js';
 import { SkyRig } from './sky.js';
-import { FlyCamera, OrbitCamera, CameraFlight } from './cameras.js';
+import { FlyCamera, OrbitCamera, TopCamera, CameraFlight } from './cameras.js';
 import { CollisionGrid, WalkCamera } from './collision.js';
 import { Interior } from './interior.js';
 import { CityHall, Tour } from './tour.js';
@@ -38,6 +39,7 @@ import { SelectionOverlay, LINK_COLOURS } from './selection.js';
 import { Notes } from './notes.js';
 import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
 import { MapLabels } from './labels.js';
+import { MiniMap } from './minimap.js';
 import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
@@ -49,7 +51,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   source: new CitySource('.'),
-  mode: 'fly', // fly | walk | orbit | interior
+  mode: 'fly', // fly | walk | orbit | top | interior
   night: 0,
   litScale: 1,
   time: 12,
@@ -100,6 +102,7 @@ const context = {
   sky: null,
   fly: null,
   orbit: null,
+  top: null,
   flight: null,
   walk: null,
   grid: null,
@@ -954,6 +957,77 @@ function setupMapLabels() {
   context.labels.setItems(items, Math.max(bounds[2], bounds[3]));
 }
 
+/** The minimap (minimap.js): the viewer's side of its contract. */
+function setupMiniMap() {
+  const root = document.getElementById('minimap');
+  if (!root) return;
+  const colour = new THREE.Color();
+  const lensSelect = document.getElementById('lens-select');
+  const planButton = document.getElementById('plan-toggle');
+  if (planButton) planButton.addEventListener('click', togglePlan);
+  context.minimap = new MiniMap(root, {
+    THREE,
+    camera,
+    manifest: state.source.manifest,
+    buildings: () => context.resident,
+    colourOf: (building) => {
+      const lens = lensSelect ? lensSelect.value : 'archetype';
+      return lensColour(THREE, state.source, lens, building, building.archetype || 'warehouse', state.territoryAuthor, colour).clone();
+    },
+    matches: () => state.filterMatches || null,
+    positionOf,
+    selection: () => (context.inspector && context.inspector.selected) || null,
+    notedIds: () => pinnedIds(),
+    districtLabel: (district) => state.source.districtLabel(district),
+    mode: () => state.mode,
+    visibleRect: () => context.top.visibleRect(),
+    navigate: miniMapNavigate,
+  });
+}
+
+/**
+ * Where a minimap gesture takes the camera. A click flies there; a drag scrubs,
+ * moving the view immediately so the city slides under the cursor; a
+ * Shift-click on a folder frames that folder.
+ */
+function miniMapNavigate(x, z, how) {
+  if (state.mode === 'interior') return;
+  if (how && how.district) {
+    teleportTo({ kind: 'district', district: how.district });
+    return;
+  }
+  const district = context.minimap && context.minimap.districtAt({ x, z });
+  const h = district ? district.skyline.maxHeight : 12;
+  if (how !== 'scrub') {
+    teleportTo({ kind: 'point', x, z, h });
+    return;
+  }
+  context.flight.active = false;
+  if (state.mode === 'top') {
+    context.top.centreOn(x, z);
+  } else if (state.mode === 'orbit') {
+    context.orbit.spinning = false;
+    context.orbit.target.set(x, 0, z);
+    context.orbit._clampTarget();
+    context.orbit.apply();
+  } else {
+    if (state.mode !== 'fly') setMode('fly');
+    // Keep altitude and heading; slide so the point on the ground the camera
+    // looks at is the one under the cursor.
+    const fly = context.fly;
+    const cosPitch = Math.cos(fly.pitch);
+    const dir = { x: -Math.sin(fly.yaw) * cosPitch, y: Math.sin(fly.pitch), z: -Math.cos(fly.yaw) * cosPitch };
+    const bounds = state.source.manifest.bounds;
+    const span = Math.max(bounds[2], bounds[3]);
+    const reach = dir.y < -0.05 ? Math.min(span * 0.6, fly.position.y / -dir.y) : 0;
+    fly.position.x = x - dir.x * reach;
+    fly.position.z = z - dir.z * reach;
+    fly.velocity.set(0, 0, 0);
+    fly.clamp();
+    fly.apply();
+  }
+}
+
 function selectGuideTab(name) {
   for (const tab of ['read', 'health', 'filter']) {
     const button = document.getElementById(`guide-tab-${tab}`);
@@ -1108,6 +1182,7 @@ function rebuildCity(buildings) {
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
 
+  if (context.minimap) context.minimap.invalidate();
   context.grid = new CollisionGrid(shown);
   if (context.hall) context.grid.addBox(context.hall.userData.box);
   if (context.walk) context.walk.grid = context.grid;
@@ -1148,7 +1223,9 @@ function applyActiveFilter() {
   const predicate = compileQuery(text);
   const summary = document.getElementById('filter-summary');
   const focus = state.focus;
+  if (context.minimap) context.minimap.invalidate();
   if (!predicate && !focus) {
+    state.filterMatches = null;
     context.city.clearFilter();
     if (summary) summary.textContent = 'every building shown';
     return;
@@ -1158,6 +1235,7 @@ function applyActiveFilter() {
     ? (row) => focus.has(row[districtCol]) && (!predicate || predicate(row))
     : predicate;
   const result = runQuery(context.facetIndex, scoped, state.source.manifest.indexColumns);
+  state.filterMatches = result.ids;
   context.city.applyFilter(result.ids);
   if (summary) {
     summary.textContent =
@@ -1275,6 +1353,7 @@ function applyLens(value) {
     context.city.territoryAuthor = state.territoryAuthor;
     context.city.recolour(value);
   }
+  if (context.minimap) context.minimap.invalidate();
   renderLensKey();
 }
 
@@ -1491,6 +1570,7 @@ function currentView() {
     author: lens && lens.value === 'territory' ? state.territoryAuthor : '',
     selection,
     timeline: state.timeline,
+    mode: state.mode,
   });
 }
 
@@ -1501,6 +1581,15 @@ async function applyView(view) {
   context.fly.yaw = view.yaw;
   context.fly.pitch = view.pitch;
   context.fly.apply();
+  if (view.mode === 'top') {
+    setMode('top');
+    // A plan link reopens on exactly the ground it showed, with no glide.
+    context.flight.active = false;
+    context.top.target.set(view.position.x, 0, view.position.z);
+    context.top.height = view.position.y;
+    context.top._clamp();
+    context.top.apply();
+  }
   state.filterText = view.filter || '';
   const input = document.getElementById('filter-input');
   if (input) input.value = state.filterText;
@@ -1930,6 +2019,9 @@ function lookDelta(dx, dy) {
     if (pointerState.button === 2) context.orbit.panDelta(dx, dy);
     else context.orbit.orbitDelta(dx, dy);
     setOrbitPrompt();
+  } else if (state.mode === 'top') {
+    // A plan is a map: dragging slides the paper, it never tilts the view.
+    context.top.panDelta(dx, dy, window.innerHeight);
   } else if (state.mode === 'fly') {
     context.fly.lookDelta(dx, dy);
   }
@@ -2128,6 +2220,9 @@ canvas.addEventListener('wheel', (event) => {
   if (state.mode === 'orbit') {
     context.orbit.zoomBy(-notches);
     setOrbitPrompt();
+  } else if (state.mode === 'top') {
+    context.flight.active = false;
+    context.top.zoomBy(-notches);
   } else {
     context.fly.dolly(-notches);
   }
@@ -2165,10 +2260,27 @@ function setMode(mode) {
   applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
   const previous = state.mode;
+  if (previous === 'top' && mode !== 'top') {
+    // Leave the plan from exactly where it is, looking down, so nothing jumps.
+    context.flight.active = false;
+    context.top.handOff(context.fly);
+  }
   state.mode = mode;
   context.fly.enabled = mode === 'fly';
   context.orbit.active = mode === 'orbit';
   context.walk.enabled = mode === 'walk';
+  context.top.active = mode === 'top';
+  syncPlanButton();
+  if (mode === 'top' && previous !== 'top') {
+    if (previous === 'orbit') context.orbit.handOff(context.fly);
+    document.exitPointerLock?.();
+    // Centre the plan on what the camera was looking at, then rise into it.
+    context.top.adopt(context.fly);
+    const pose = context.top.pose();
+    context.flight.startPose(camera.position.clone(), camera.quaternion.clone(), pose.position, pose.quaternion, 1.1);
+    setPlanPrompt();
+    return;
+  }
   if (mode === 'orbit') {
     // Pick up wherever the view already is, and start the lap: "show me the
     // city from all sides" is the whole reason to be here, so it should not
@@ -2188,6 +2300,43 @@ function setMode(mode) {
   if (mode !== 'fly') document.exitPointerLock?.();
   if (mode === 'orbit') setOrbitPrompt();
   else setPrompt('');
+}
+
+/**
+ * The plan view looks through a longer lens than flight does; ease between the
+ * two so entering or leaving the map is a zoom, not a cut.
+ */
+function easeFov(dt) {
+  // Fog is tuned for a camera among the buildings; from the plan's height it
+  // would wash the whole map out. Push it back by the altitude while the plan
+  // is up, and restore it exactly afterwards.
+  const fog = scene.fog;
+  if (fog) {
+    if (!fog.userData) fog.userData = {};
+    if (fog.userData.near === undefined) fog.userData = { near: fog.near, far: fog.far };
+    const lift = state.mode === 'top' ? camera.position.y : 0;
+    fog.near = fog.userData.near + lift;
+    fog.far = fog.userData.far + lift;
+  }
+  const manifestFov = state.source.manifest && state.source.manifest.camera ? state.source.manifest.camera.fov : 60;
+  const want = state.mode === 'top' ? context.top.fov : manifestFov;
+  if (Math.abs(camera.fov - want) < 0.01) return;
+  camera.fov = Math.abs(camera.fov - want) < 0.05 ? want : camera.fov + (want - camera.fov) * Math.min(1, dt * 5);
+  camera.updateProjectionMatrix();
+}
+
+function setPlanPrompt() {
+  if (state.mode !== 'top') return;
+  setPrompt('Plan view &nbsp;·&nbsp; drag or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to pan, wheel or <kbd>Q</kbd><kbd>E</kbd> to zoom &nbsp;·&nbsp; <kbd>R</kbd> whole city &nbsp;·&nbsp; <kbd>P</kbd> to fly from here');
+}
+
+function syncPlanButton() {
+  const button = document.getElementById('plan-toggle');
+  if (button) button.setAttribute('aria-pressed', String(state.mode === 'top'));
+}
+
+function togglePlan() {
+  setMode(state.mode === 'top' ? 'fly' : 'top');
 }
 
 async function enterInterior(building) {
@@ -2228,12 +2377,28 @@ function teleportTo(target) {
       h: building.height || 10,
     };
     context.inspector.showBuilding(building);
+  } else if (target.kind === 'point') {
+    point = { x: target.x, z: target.z, h: target.h || 12, size: target.size };
   } else {
     const [x, z, w, h] = target.district.rect;
-    point = { x: x + w / 2, z: z + h / 2, h: target.district.skyline.maxHeight };
+    point = { x: x + w / 2, z: z + h / 2, h: target.district.skyline.maxHeight, size: Math.max(w, h) };
   }
   context.cityHall.hide();
   document.body.classList.remove('hall-open');
+  if (state.mode === 'top') {
+    // Stay on the map: glide the plan over the place instead of dropping out
+    // of it. A district is framed whole; a file or a point keeps the zoom
+    // unless it is too far out to pick the building out.
+    const top = context.top;
+    top.target.x = point.x;
+    top.target.z = point.z;
+    if (point.size) top.height = point.size * 1.5;
+    else if (target.kind === 'building') top.height = Math.min(top.height, span * 0.3);
+    top._clamp();
+    const pose = top.pose();
+    context.flight.startPose(camera.position.clone(), camera.quaternion.clone(), pose.position, pose.quaternion, 0.9);
+    return;
+  }
   setMode('fly');
   context.flight.start(
     camera.position.clone(),
@@ -2294,17 +2459,28 @@ window.addEventListener('keydown', async (event) => {
     case 'KeyO':
       setMode(state.mode === 'orbit' ? 'fly' : 'orbit');
       break;
+    case 'KeyP':
+      togglePlan();
+      break;
+    case 'KeyM':
+      if (context.minimap) context.minimap.toggle();
+      break;
     case 'KeyR':
-      // Re-frame the whole plan without leaving the orbit.
+      // Re-frame the whole plan without leaving the orbit (or the map).
       if (state.mode === 'orbit') {
         context.orbit.frame(state.source.manifest.bounds);
         setOrbitPrompt();
+      } else if (state.mode === 'top') {
+        context.flight.active = false;
+        context.top.frame();
       }
       break;
     case 'KeyN':
       context.tour.skipToNext();
       break;
     case 'KeyT':
+      // The tour flies its own oblique route; it cannot run on a map.
+      if (state.mode === 'top') setMode('fly');
       context.tour.start();
       setPrompt(
         context.tour.running
@@ -2329,7 +2505,8 @@ window.addEventListener('keydown', async (event) => {
       }
       break;
     case 'KeyE':
-      await handleEnter();
+      // In the plan, E is zoom (TopCamera reads it), not "enter".
+      if (state.mode !== 'top') await handleEnter();
       break;
     case 'BracketLeft':
       if (state.mode === 'interior') context.interior.nextFloor(-1);
@@ -2414,6 +2591,7 @@ async function refreshLabelsAfterUnlock() {
   fillAuthorSelect();
   renderGuide();
   setupMapLabels();
+  if (context.minimap) context.minimap.invalidate();
   renderTitle();
   renderChips();
   applyActiveFilter();
@@ -2565,6 +2743,8 @@ function frame(now) {
       context.flight.update(dt);
     } else if (state.mode === 'orbit') {
       context.orbit.update(dt);
+    } else if (state.mode === 'top') {
+      context.top.update(dt);
     } else if (state.mode === 'walk') {
       context.walk.update(dt);
       updateWalkPrompt();
@@ -2573,10 +2753,12 @@ function frame(now) {
     }
   }
 
+  easeFov(dt);
   refreshResident();
   refreshHover();
   renderer.render(scene, camera);
   if (context.labels) context.labels.update(now, window.innerWidth, window.innerHeight);
+  if (context.minimap) context.minimap.update(now);
 }
 
 function driveInterior(dt) {
@@ -3510,8 +3692,16 @@ async function runSelfTest() {
       ['owner-notices', flags.codeowners, (x) => x.ownerDrift],
       ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
     ];
+    // Props stand only on the detailed (near) tier, so only a building drawn
+    // there can be expected to carry one -- whichever files happen to sit near
+    // the camera is a property of the repository, not of the viewer.
+    const nearTier = [];
+    for (const [uuid, members] of context.city.records) {
+      const mesh = context.city.meshes.get(uuid);
+      if (mesh && !mesh.name.endsWith('-far')) nearTier.push(...members);
+    }
     const missing = expectations
-      .filter(([, on, test]) => on && context.resident.some(test))
+      .filter(([, on, test]) => on && nearTier.some(test))
       .filter(([name]) => !context.city.group.getObjectByName(name))
       .map(([name]) => name);
     check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
@@ -3580,6 +3770,117 @@ async function runSelfTest() {
     } else {
       check('lod-follows-camera', true, 'city fits inside one LOD radius');
     }
+    context.fly.position.copy(startPosition);
+    context.fly.yaw = startYaw;
+    context.fly.pitch = startPitch;
+    context.fly.apply();
+  }
+
+  // 5b. Plan view and minimap.
+  {
+    const startPosition = context.fly.position.clone();
+    const startYaw = context.fly.yaw;
+    const startPitch = context.fly.pitch;
+    setMode('top');
+    context.flight.update(10);
+    context.top.update(0);
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    check('plan-view-overhead', state.mode === 'top' && forward.y < -0.99,
+      `mode ${state.mode}, forward.y ${forward.y.toFixed(4)}`);
+    const heightBefore = context.top.height;
+    canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 300, bubbles: true, cancelable: true }));
+    check('plan-view-zoom', context.top.height < heightBefore,
+      `${heightBefore.toFixed(0)}m -> ${context.top.height.toFixed(0)}m`);
+    const planView = viewFromHash(viewToHash(currentView()));
+    check('plan-view-link', Boolean(planView) && planView.mode === 'top', planView ? planView.mode : 'unreadable');
+    const planPosition = camera.position.clone();
+    setMode('fly');
+    check('plan-view-handoff',
+      state.mode === 'fly' && context.fly.position.distanceTo(planPosition) < 1e-3 && context.fly.pitch < -1.5,
+      `moved ${context.fly.position.distanceTo(planPosition).toFixed(4)}m, pitch ${context.fly.pitch.toFixed(3)}`);
+
+    const minimap = context.minimap;
+    if (minimap) {
+      const wasCollapsed = minimap.collapsed;
+      minimap.toggle(false);
+      const draw = () => {
+        minimap.lastDraw = -Infinity;
+        minimap.update(performance.now());
+        const { width, height } = minimap.canvas;
+        const data = minimap.ctx.getImageData(0, 0, width, height).data;
+        let lit = 0;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const v = data[i] + data[i + 1] + data[i + 2];
+          sum += v * ((i >> 2) % 97 + 1);
+          if (v > 60) lit++;
+        }
+        return { lit, sum, total: width * height };
+      };
+      const archetypeDraw = draw();
+      check('minimap-drawn', archetypeDraw.lit > archetypeDraw.total * 0.05,
+        `${archetypeDraw.lit} of ${archetypeDraw.total} pixels lit`);
+
+      const lensBefore = document.getElementById('lens-select').value;
+      applyLens('heat');
+      const heatDraw = draw();
+      applyLens(lensBefore);
+      check('minimap-lens-follows', heatDraw.sum !== archetypeDraw.sum || context.resident.length === 0,
+        'district tint follows the colour lens');
+
+      // Click the centre of the largest district: the camera must fly there.
+      const district = [...state.source.manifest.districts].sort((a, b) => b.rect[2] * b.rect[3] - a.rect[2] * a.rect[3])[0];
+      const click = (world) => {
+        const t = minimap._transform();
+        const rect = minimap.canvas.getBoundingClientRect();
+        const ratio = t.width / Math.max(1, rect.width);
+        const clientX = rect.left + (world.x * t.scale + t.ox) / ratio;
+        const clientY = rect.top + (world.z * t.scale + t.oz) / ratio;
+        const init = { clientX, clientY, button: 0, pointerId: 7, bubbles: true };
+        minimap.canvas.dispatchEvent(new PointerEvent('pointerdown', init));
+        minimap.canvas.dispatchEvent(new PointerEvent('pointerup', init));
+      };
+      if (district) {
+        const centre = districtCentre(district);
+        click(centre);
+        context.flight.update(10);
+        // Where does the view ray meet the ground the flight aimed at?
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const aimY = district.skyline.maxHeight * 0.4;
+        const t = (aimY - camera.position.y) / (fwd.y || -1e-6);
+        const hitX = camera.position.x + fwd.x * t;
+        const hitZ = camera.position.z + fwd.z * t;
+        const miss = Math.hypot(hitX - centre.x, hitZ - centre.z);
+        const tolerance = Math.max(3, minimap._window()[2] / 150);
+        check('minimap-click-flies', state.mode === 'fly' && miss < tolerance,
+          `aimed ${miss.toFixed(1)}m from the clicked point (tolerance ${tolerance.toFixed(1)}m)`);
+
+        setMode('top');
+        context.flight.update(10);
+        click(centre);
+        context.flight.update(10);
+        context.top.update(0);
+        const planMiss = Math.hypot(context.top.target.x - centre.x, context.top.target.z - centre.z);
+        check('minimap-click-plan', state.mode === 'top' && planMiss < tolerance,
+          `plan centred ${planMiss.toFixed(1)}m from the clicked point`);
+        setMode('fly');
+      } else {
+        check('minimap-click-flies', true, 'no districts');
+        check('minimap-click-plan', true, 'no districts');
+      }
+
+      minimap.toggle(true);
+      const hidden = getComputedStyle(minimap.canvas).display === 'none';
+      const pillShown = getComputedStyle(minimap.root.querySelector('.minimap-pill')).display !== 'none';
+      minimap.toggle(false);
+      const back = getComputedStyle(minimap.canvas).display !== 'none';
+      check('minimap-collapse', hidden && pillShown && back, `collapsed ${hidden}, pill ${pillShown}, restored ${back}`);
+      minimap.toggle(wasCollapsed);
+    } else {
+      check('minimap-drawn', false, 'no minimap');
+    }
+
+    context.flight.active = false;
     context.fly.position.copy(startPosition);
     context.fly.yaw = startYaw;
     context.fly.pitch = startPitch;
@@ -3703,6 +4004,7 @@ function setupNotes() {
   context.notes.onChange(() => {
     renderHealth();
     scheduleRebuild();
+    if (context.minimap) context.minimap.invalidate();
   });
 }
 
@@ -3793,6 +4095,7 @@ async function boot() {
 
   context.fly = new FlyCamera(THREE, camera, bounds);
   context.orbit = new OrbitCamera(THREE, camera, bounds);
+  context.top = new TopCamera(THREE, camera, bounds, maxHeightOf(manifest));
   context.flight = new CameraFlight(camera);
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
@@ -3820,6 +4123,7 @@ async function boot() {
   };
   context.inspector.onSelect = (selection) => {
     updateSelection(selection).catch(() => {});
+    if (context.minimap) context.minimap.invalidate();
   };
   setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
@@ -3853,6 +4157,7 @@ async function boot() {
 
   renderGuide();
   setupMapLabels();
+  setupMiniMap();
   renderTitle();
   applyTime();
   setupHistory();
