@@ -103,6 +103,38 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(viewer, python)
 
 
+class GradeTests(unittest.TestCase):
+    def test_grade_rule(self):
+        from analyzer.grades import grade, letter
+
+        self.assertEqual([letter(v) for v in (95, 85, 75, 65, 10)], list("ABCDF"))
+        self.assertIsNone(grade([]))
+        self.assertEqual(grade([(100, set()), (400, set())])["grade"], "A")
+        # One of two equal files a hotspot: half the (sqrt-weighted) code lost.
+        half = grade([(100, {"hotspot"}), (100, set())])
+        self.assertEqual(half["score"], 50.0)
+        self.assertEqual(half["why"], [["hotspot", 50.0]])
+        # A file with every flag cannot count for more than all of itself.
+        capped = grade([(100, {"hotspot", "defect", "cycle", "violation"}), (100, set())])
+        self.assertEqual(capped["score"], 50.0)
+        # Minor signals cost less than serious ones.
+        self.assertGreater(grade([(100, {"orphan"}), (100, set())])["score"], 80)
+
+    def test_grade_at_baseline_uses_the_summary_bits(self):
+        from analyzer.grades import at_baseline
+        from analyzer.history import SIGNALS
+
+        names = [n for n, _ in SIGNALS]
+
+        class F:
+            def __init__(self, rel):
+                self.rel, self.is_test, self.is_binary, self.rows, self.is_doc, self.is_ruin = rel, False, False, None, False, False
+
+        baseline = {"signals": names, "files": {"a.py": [100, 1 << names.index("hotspot")], "b.py": [100, 0]}}
+        then = at_baseline([F("a.py"), F("b.py"), F("new.py")], baseline)
+        self.assertEqual(then["score"], 50.0)
+        self.assertIsNone(at_baseline([F("a.py")], None))
+
 class DeeperSignalTests(TempRepoCase):
     def _history_repo(self) -> str:
         """Six months of history: a fix-prone file, a rising one, a cooling one."""
@@ -301,6 +333,19 @@ class DeeperSignalTests(TempRepoCase):
         self.assertTrue(shared.many_cooks)
         self.assertFalse(solo.many_cooks)
         self.assertTrue(analysis.flags.teams)
+
+    def test_grades_are_emitted_for_city_folders_and_regions(self):
+        analysis, _layout, result = self.build_city(self._history_repo(), district_depth=1)
+        manifest = read_json(os.path.join(result.out_dir, "city.json"))
+        self.assertIn(manifest["grade"]["grade"], list("ABCDF"))
+        graded = [d for d in manifest["districts"] if d["grade"]]
+        self.assertTrue(graded)
+        for district in graded:
+            self.assertGreaterEqual(district["score"], 0)
+            self.assertEqual(district["baselineGrade"], "")  # first build: no baseline
+        legend = {entry["id"]: entry for entry in manifest["legend"]}
+        self.assertIn("grades", legend)
+        self.assertIn("plan_flows", legend)
 
     def test_gates_and_budgets(self):
         from analyzer.report import build_report, evaluate_gates, render_markdown

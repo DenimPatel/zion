@@ -59,6 +59,8 @@ export class MiniMap {
    *   mode()                 'fly' | 'walk' | 'orbit' | 'top' | 'interior'
    *   visibleRect()          [x, z, w, h] of the plan view, when mode is 'top'
    *   navigate(x, z, how)    how = 'fly' (animated) | 'scrub' (immediate) | {district}
+   *   gradesShown()          whether folder grade letters are drawn
+   *   flows()                the plan view's folder arrows [{from, to, weight, violates}]
    */
   constructor(root, host) {
     this.root = root;
@@ -272,6 +274,7 @@ export class MiniMap {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, t.width, t.height);
     ctx.drawImage(this.background, 0, 0);
+    this._drawFlows(ctx, t);
     this._drawCamera(ctx, t);
   }
 
@@ -373,6 +376,27 @@ export class MiniMap {
       }
     }
 
+    // Folder grades, where the plate is big enough to carry a letter.
+    if (host.gradesShown && host.gradesShown()) {
+      const GRADE = { A: '#3ddc84', B: '#a3d65c', C: '#e6c34a', D: '#ff9a2e', F: '#ff4d5e' };
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (const district of manifest.districts || []) {
+        if (!district.grade) continue;
+        const [x, z, w, h] = district.rect;
+        const size = Math.min(w, h) * t.scale;
+        if (size < 16 * ratio) continue;
+        const [cx, cz] = this.toCanvas(x + w / 2, z + h / 2, t);
+        const font = Math.min(18 * ratio, size * 0.45);
+        ctx.font = `700 ${font}px system-ui, sans-serif`;
+        ctx.lineWidth = 3 * ratio;
+        ctx.strokeStyle = 'rgba(7,10,18,0.85)';
+        ctx.strokeText(district.grade, cx, cz);
+        ctx.fillStyle = GRADE[district.grade] || '#ccc';
+        ctx.fillText(district.grade, cx, cz);
+      }
+    }
+
     // The reader's notes, as pins.
     const noted = host.notedIds();
     if (noted && noted.size) {
@@ -402,6 +426,41 @@ export class MiniMap {
           ctx.strokeRect(x, z, target.rect[2] * t.scale, target.rect[3] * t.scale);
         }
       }
+    }
+  }
+
+  _drawFlows(ctx, t) {
+    const flows = this.host.flows ? this.host.flows() : [];
+    if (!flows.length) return;
+    const ratio = t.width / Math.max(1, this.canvas.getBoundingClientRect().width || 1);
+    const heaviest = Math.max(1, ...flows.map((f) => f.weight));
+    for (const flow of flows) {
+      const [ax, az] = this.toCanvas(flow.from.x, flow.from.z, t);
+      const [bx, bz] = this.toCanvas(flow.to.x, flow.to.z, t);
+      const dx = bx - ax;
+      const dz = bz - az;
+      const length = Math.hypot(dx, dz);
+      if (length < 4) continue;
+      const nx = -dz / length;
+      const nz = dx / length;
+      const mx = (ax + bx) / 2 + nx * length * 0.18;
+      const mz = (az + bz) / 2 + nz * length * 0.18;
+      ctx.strokeStyle = flow.violates ? '#ff3b30' : '#4da3ff';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = (0.8 + 2 * Math.sqrt(flow.weight / heaviest)) * ratio;
+      ctx.beginPath();
+      ctx.moveTo(ax, az);
+      ctx.quadraticCurveTo(mx, mz, bx, bz);
+      ctx.stroke();
+      // Arrowhead along the curve's end tangent.
+      const angle = Math.atan2(bz - mz, bx - mx);
+      const head = 5 * ratio;
+      ctx.beginPath();
+      ctx.moveTo(bx, bz);
+      ctx.lineTo(bx - Math.cos(angle - 0.45) * head, bz - Math.sin(angle - 0.45) * head);
+      ctx.lineTo(bx - Math.cos(angle + 0.45) * head, bz - Math.sin(angle + 0.45) * head);
+      ctx.closePath();
+      ctx.fill();
     }
   }
 

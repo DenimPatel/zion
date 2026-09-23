@@ -60,6 +60,22 @@ export class CityHall {
       `${stats.districtsWithReadme} of ${stats.districtsTotal} districts have a README.`;
     this.body.append(summary);
 
+    // The whole city's grade, by the same rule as every folder's.
+    const cityGrade = manifest.grade;
+    if (cityGrade && cityGrade.grade) {
+      const p = document.createElement('p');
+      p.className = 'hall-grade';
+      const moved = cityGrade.baselineGrade ? cityGrade.score - cityGrade.baselineScore : 0;
+      const trend = cityGrade.baselineGrade
+        ? ` <span class="grade-trend ${moved > 0.5 ? 'better' : moved < -0.5 ? 'worse' : ''}">` +
+          `${moved > 0.5 ? '▲' : moved < -0.5 ? '▼' : '='} ${cityGrade.baselineGrade} at the baseline</span>`
+        : '';
+      const why = (cityGrade.gradeWhy || []).slice(0, 3).map(([sig, pts]) => `${escapeHtml(sig)} −${pts}`).join(', ');
+      p.innerHTML = `Health grade <span class="grade-badge grade-${cityGrade.grade}">${cityGrade.grade}</span> ` +
+        `${Math.round(cityGrade.score)} / 100${trend}${why ? ` · most points lost to ${why}` : ''}`;
+      this.body.append(p);
+    }
+
     for (const note of stats.notes || []) {
       const p = document.createElement('p');
       p.className = 'hall-note';
@@ -93,8 +109,16 @@ export class CityHall {
       const district = manifest.districts.find((d) => d.name === row.name);
       const tr = document.createElement('tr');
       tr.className = 'clickable';
+      const g = district && district.grade
+        ? `<span class="grade-badge grade-${district.grade}">${district.grade}</span>` +
+          (district.baselineGrade && district.baselineGrade !== district.grade
+            ? `<span class="grade-trend ${district.score > district.baselineScore ? 'better' : 'worse'}">` +
+              `${district.score > district.baselineScore ? '▲' : '▼'}${district.baselineGrade}</span>`
+            : '')
+        : '—';
       tr.innerHTML =
         `<td>${escapeHtml(s(row.name))}</td>` +
+        `<td>${g}</td>` +
         `<td class="num">${row.buildings}</td>` +
         `<td class="num">${row.loc.toLocaleString()}</td>` +
         `<td>${row.hasReadme ? 'README' : '—'}</td>`;
@@ -102,6 +126,18 @@ export class CityHall {
         if (district && this.onTeleport) this.onTeleport({ kind: 'district', district });
       });
       folderTable.append(tr);
+    }
+
+    // The main sequence: every folder with enough types to place, by its
+    // instability (x) and abstractness (y). Click a dot to fly there.
+    const placed = manifest.districts.filter((d) => d.abstractness >= 0 && d.instability >= 0);
+    if (placed.length) {
+      const h = document.createElement('h3');
+      h.textContent = 'The main sequence (click a folder to fly there)';
+      this.body.append(h);
+      this.body.append(mainSequenceChart(placed, (d) => source.districtLabel(d), (district) => {
+        if (this.onTeleport) this.onTeleport({ kind: 'district', district });
+      }));
     }
 
     // Largest files -> teleport
@@ -587,4 +623,49 @@ export class Tour {
     fly.yaw = Math.atan2(-forward.x, -forward.z);
     fly.pitch = Math.asin(Math.max(-1, Math.min(1, forward.y)));
   }
+}
+
+/**
+ * Martin's main-sequence chart as inline SVG: instability on x, abstractness
+ * on y, the ideal line A + I = 1 from top-left to bottom-right, and the two
+ * zones it warns about shaded in the corners it avoids.
+ */
+function mainSequenceChart(districts, labelOf, onPick) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const size = 260;
+  const pad = 30;
+  const inner = size - pad * 2;
+  const x = (i) => pad + i * inner;
+  const y = (a) => pad + (1 - a) * inner;
+  const make = (tag, attrs, text) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    if (text) node.textContent = text;
+    return node;
+  };
+  const svg = make('svg', { viewBox: `0 0 ${size} ${size}`, class: 'main-sequence', role: 'img', 'aria-label': 'abstractness against instability per folder' });
+  svg.append(make('rect', { x: pad, y: pad, width: inner, height: inner, class: 'ms-frame' }));
+  // Zone of pain: bottom-left (stable, concrete). Zone of uselessness: top-right.
+  svg.append(make('path', { d: `M${x(0)},${y(0)} L${x(0.35)},${y(0)} A${inner * 0.35},${inner * 0.35} 0 0 0 ${x(0)},${y(0.35)} Z`, class: 'ms-zone-pain' }));
+  svg.append(make('path', { d: `M${x(1)},${y(1)} L${x(0.65)},${y(1)} A${inner * 0.35},${inner * 0.35} 0 0 0 ${x(1)},${y(0.65)} Z`, class: 'ms-zone-useless' }));
+  svg.append(make('line', { x1: x(0), y1: y(1), x2: x(1), y2: y(0), class: 'ms-line' }));
+  svg.append(make('text', { x: x(0) + 4, y: y(0) - 6, class: 'ms-zone' }, 'zone of pain'));
+  svg.append(make('text', { x: x(1) - 4, y: y(1) + 14, class: 'ms-zone', 'text-anchor': 'end' }, 'zone of uselessness'));
+  svg.append(make('text', { x: size / 2, y: size - 6, class: 'ms-axis', 'text-anchor': 'middle' }, 'instability I →'));
+  const yLabel = make('text', { x: 10, y: size / 2, class: 'ms-axis', 'text-anchor': 'middle', transform: `rotate(-90 10 ${size / 2})` }, 'abstractness A →');
+  svg.append(yLabel);
+  const biggest = Math.max(1, ...districts.map((d) => d.logicalLoc || 1));
+  for (const d of districts) {
+    const r = 3 + 7 * Math.sqrt((d.logicalLoc || 1) / biggest);
+    const dot = make('circle', {
+      cx: x(d.instability), cy: y(d.abstractness), r,
+      class: `ms-dot ${d.zone ? `ms-${d.zone}` : d.distance > 0.5 ? 'ms-far' : 'ms-near'}`,
+      tabindex: 0,
+    });
+    dot.append(make('title', {}, `${labelOf(d)} · A ${d.abstractness.toFixed(2)} · I ${d.instability.toFixed(2)} · D ${d.distance.toFixed(2)}`));
+    dot.addEventListener('click', () => onPick(d));
+    dot.addEventListener('keydown', (event) => { if (event.key === 'Enter') onPick(d); });
+    svg.append(dot);
+  }
+  return svg;
 }

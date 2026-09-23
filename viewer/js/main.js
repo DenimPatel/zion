@@ -37,11 +37,12 @@ import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
 import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
-import { SelectionOverlay, LINK_COLOURS } from './selection.js';
+import { SelectionOverlay, PlanFlows, LINK_COLOURS } from './selection.js';
 import { Notes } from './notes.js';
 import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
 import { MapLabels } from './labels.js';
 import { MiniMap } from './minimap.js';
+import { GoToPalette } from './palette.js';
 import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
@@ -207,6 +208,8 @@ const LEGEND_KEYS = {
   clones: { kind: 'overlay', target: 'clone-links', short: 'Twin links — copied code', colour: LINK_COLOURS.clone, query: 'is:clone' },
   abstractness: { kind: null, short: 'Main sequence', colour: 0x2f9e6e, reason: 'City Hall charts it; Filter tab → main sequence' },
   teams: { kind: null, short: 'Coordination cost', colour: 0xb28ad6, reason: 'listed in the folder inspector, not drawn' },
+  grades: { kind: 'overlay', target: 'grade-badges', short: 'Grade badges — folder health', colour: 0x3ddc84 },
+  plan_flows: { kind: 'overlay', target: 'plan-flows', short: 'Folder arrows — plan view', colour: LINK_COLOURS.out },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
@@ -511,6 +514,10 @@ function applyHiddenLayers() {
       context.overlay.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
     }
   }
+  // Grades and the plan's folder arrows live outside the city mesh.
+  if (context.labels) context.labels.setGradesShown(!state.hiddenLayers.has('grades'));
+  if (context.planFlows) context.planFlows.setLayerVisible('plan-flows', !state.hiddenLayers.has('plan_flows'));
+  if (context.minimap) context.minimap.invalidate();
   // The History slider hides every prop while it replays the past; a switch
   // flipped meanwhile must not bring them back early.
   if (state.timeline !== null) context.city.hideProps();
@@ -643,6 +650,17 @@ function renderHealth() {
   intro.className = 'hint guide-intro';
   intro.textContent =
     'What an architect would look at first. Click a file to fly to it. Switch the colour lens to "health" to see all of these at once.';
+  const csv = document.createElement('button');
+  csv.type = 'button';
+  csv.id = 'health-csv';
+  csv.className = 'chip-btn';
+  csv.textContent = 'Download every file as CSV';
+  csv.title = state.source.locked
+    ? 'Unlock the city first: a locked city has no paths to export'
+    : 'Every file with its metrics and signals, for a spreadsheet or a ticket';
+  csv.disabled = state.source.locked;
+  csv.addEventListener('click', () => downloadCsv());
+  intro.append(document.createElement('br'), csv);
   panel.append(intro);
 
   for (const section of HEALTH_SECTIONS) {
@@ -707,6 +725,65 @@ function renderHealth() {
   panel.append(renderNotesCard());
 }
 
+/**
+ * Every file in the repository as CSV, from index.json: the whole city, not
+ * only what is resident. Flag bits are spelled out as signal names.
+ */
+function csvText() {
+  const manifest = state.source.manifest;
+  const col = columnIndex(manifest.indexColumns);
+  const names = [
+    ['hotspot', 9], ['oversized', 10], ['orphan', 11], ['cycle', 12], ['knowledge', 13], ['violation', 14],
+    ['untested', 15], ['untested-risk', 16], ['drift', 17], ['braced', 21], ['unowned', 22], ['defect', 23],
+    ['rising', 24], ['hub', 25], ['clone', 26], ['hidden-coupling', 27], ['test', 0], ['doc', 1], ['new', 6],
+    ['downtown', 7],
+  ];
+  const quote = (value) => {
+    const text = String(value === undefined || value === null ? '' : value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const header = ['path', 'folder', 'language', 'archetype', 'loc', 'age_days', 'heat', 'owner', 'max_complexity',
+    'fan_in', 'fan_out', 'fix_commits', 'trend', 'debt_markers', 'import_depth', 'loc_since_baseline', 'grade_of_folder', 'signals'];
+  const lines = [header.join(',')];
+  const get = (row, name) => (col[name] === undefined ? '' : row[col[name]]);
+  for (const row of context.facetIndex || []) {
+    const district = manifest.districts[row[col.district]];
+    const flags = row[col.flags] || 0;
+    const owner = get(row, 'owner');
+    lines.push([
+      state.source.s(row[col.path]),
+      district ? state.source.s(district.key) : '',
+      state.source.s(row[col.language]),
+      row[col.archetype],
+      get(row, 'loc'), get(row, 'age'), get(row, 'heat'),
+      owner !== '' && owner >= 0 ? state.source.s(owner) : '',
+      get(row, 'cx'), get(row, 'fanin'), get(row, 'fanout'), get(row, 'fixes'), get(row, 'trend'), get(row, 'debt'),
+      get(row, 'depth'), get(row, 'delta'),
+      district ? district.grade || '' : '',
+      names.filter(([, bit]) => flags & (1 << bit)).map(([name]) => name).join(' '),
+    ].map(quote).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function downloadCsv() {
+  if (state.source.locked) return;
+  const blob = new Blob([csvText()], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  const name = manifestName() || 'repository';
+  link.download = `${name.replace(/[^\w.-]+/g, '-')}-zion-files.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function manifestName() {
+  const meta = state.source.manifest.meta || {};
+  return meta.name >= 0 ? state.source.s(meta.name) : '';
+}
+
 function card(title, colour, count) {
   const node = document.createElement('div');
   node.className = 'health-card';
@@ -742,11 +819,16 @@ function renderDeltaCard(manifest) {
   const rows = [
     ['hotspots', 'Hotspots'], ['cycles', 'Import cycles'], ['violations', 'Layering violations'],
     ['untested', 'Untested risk'], ['oversized', 'Oversized'], ['knowledge', 'Knowledge risk'],
-    ['orphans', 'Possible dead code'], ['files', 'Files'], ['loc', 'Logical lines'],
+    ['orphans', 'Possible dead code'], ['defects', 'Defect-prone'], ['rising', 'Rising hotspots'],
+    ['hubs', 'Hubs'], ['clones', 'Clone pairs'], ['hiddenCoupling', 'Hidden coupling'], ['debt', 'Debt markers'],
+    ['zonePain', 'Folders in the zone of pain'], ['files', 'Files'], ['loc', 'Logical lines'],
   ];
   const table = document.createElement('table');
   table.className = 'delta-table';
   for (const [key, name] of rows) {
+    // A baseline from before a signal existed has no number for it: leave the
+    // row out rather than report the whole count as new.
+    if (!(key in (delta.before || {}))) continue;
     const before = (delta.before || {})[key] || 0;
     const after = (delta.after || {})[key] || 0;
     const change = after - before;
@@ -995,6 +1077,7 @@ function setupMapLabels() {
       level: region.level,
       kind: 'region',
       weight: region.logicalLoc || region.buildings || 0,
+      grade: region.grade || '',
     });
   }
   for (const district of manifest.districts || []) {
@@ -1007,11 +1090,59 @@ function setupMapLabels() {
       level: district.level || 0,
       kind: 'district',
       weight: district.logicalLoc || 0,
+      grade: district.grade || '',
     });
   }
   if (!context.labels) context.labels = new MapLabels(container, camera);
   const bounds = manifest.bounds;
   context.labels.setItems(items, Math.max(bounds[2], bounds[3]));
+}
+
+/** The go-to palette (palette.js): every file and folder, repository-wide. */
+function setupPalette() {
+  const root = document.getElementById('palette');
+  if (!root) return;
+  context.palette = new GoToPalette(root, {
+    locked: () => state.source.locked,
+    candidates: () => {
+      const manifest = state.source.manifest;
+      const items = [];
+      for (const district of manifest.districts) {
+        const label = state.source.locked
+          ? state.source.districtLabel(district)
+          : state.source.s(district.key) || state.source.districtLabel(district);
+        items.push({
+          kind: 'district', id: district.id, text: `${label}/`,
+          hint: `${district.buildings} files${district.grade ? ` · grade ${district.grade}` : ''}`,
+        });
+      }
+      if (!state.source.locked && context.facetIndex) {
+        const col = columnIndex(manifest.indexColumns);
+        for (const row of context.facetIndex) {
+          const path = state.source.s(row[col.path]);
+          if (path) items.push({ kind: 'building', id: row[col.id], text: path, hint: `${(row[col.loc] || 0).toLocaleString()} lines` });
+        }
+      }
+      return items;
+    },
+    pick: (item) => {
+      if (item.kind === 'district') {
+        const district = state.source.manifest.districts[item.id];
+        if (!district) return;
+        teleportTo({ kind: 'district', district });
+        context.inspector.showDistrict(district);
+      } else {
+        flyToBuilding(item.id);
+      }
+    },
+  });
+}
+
+/** The plan view's folder arrows (selection.js::PlanFlows). */
+function setupPlanFlows() {
+  if (!context.planFlows) context.planFlows = new PlanFlows(THREE, scene);
+  context.planFlows.build(state.source.manifest, districtCentre);
+  context.planFlows.setLayerVisible('plan-flows', !state.hiddenLayers.has('plan_flows'));
 }
 
 /** The minimap (minimap.js): the viewer's side of its contract. */
@@ -1038,6 +1169,8 @@ function setupMiniMap() {
     districtLabel: (district) => state.source.districtLabel(district),
     mode: () => state.mode,
     visibleRect: () => context.top.visibleRect(),
+    gradesShown: () => !state.hiddenLayers.has('grades'),
+    flows: () => (state.mode === 'top' && context.planFlows && context.planFlows.layerOn ? context.planFlows.flows : []),
     navigate: miniMapNavigate,
   });
 }
@@ -2501,7 +2634,15 @@ document.getElementById('lit').addEventListener('input', (event) => {
 
 window.addEventListener('keydown', async (event) => {
   const target = event.target;
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+  // Go to anything: Ctrl/Cmd+K from anywhere, or / when not typing.
+  const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+  if (context.palette && ((event.ctrlKey || event.metaKey) && event.code === 'KeyK' || (!typing && event.key === '/'))) {
+    event.preventDefault();
+    if (context.palette.isOpen) context.palette.close();
+    else context.palette.open();
+    return;
+  }
+  if (typing) return;
 
   // Any deliberate movement hands control back to the player.
   const MOVEMENT_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space']);
@@ -2817,6 +2958,7 @@ function frame(now) {
   }
 
   easeFov(dt);
+  if (context.planFlows) context.planFlows.sync(state.mode === 'top');
   refreshResident();
   refreshHover();
   renderer.render(scene, camera);
@@ -3757,6 +3899,7 @@ async function runSelfTest() {
       ['defect-lamps', flags.defects, (x) => x.isDefect],
       ['hub-collars', flags.hubs, (x) => x.isHub && (x.height || 0) > 6],
       ['debt-tags', flags.debt, (x) => x.debt && x.debt.length > 0],
+      ['survey-stakes-ghosts', flags.delta, (x) => Boolean(x.baselineHeight)],
     ];
     // Props stand only on the detailed (near) tier, so only a building drawn
     // there can be expected to carry one -- whichever files happen to sit near
@@ -3881,6 +4024,42 @@ async function runSelfTest() {
       await updateSelection(null);
     } else {
       check('overlay-clones', true, 'no clone twins in this city');
+    }
+
+    // The go-to palette finds a file by a fuzzy fragment and flies to it.
+    if (context.palette && !state.source.locked && context.facetIndex && context.facetIndex.length) {
+      const col = columnIndex(manifest.indexColumns);
+      const row = context.facetIndex.find((r) => (state.source.s(r[col.path]) || '').includes('/')) || context.facetIndex[0];
+      const path = state.source.s(row[col.path]);
+      const name = path.split('/').pop();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true }));
+      const opened = context.palette.isOpen;
+      const input = document.querySelector('#palette input');
+      input.value = name.slice(0, Math.max(3, name.length - 2));
+      input.dispatchEvent(new Event('input'));
+      const found = context.palette.results.some((item) => item.kind === 'building' && item.id === row[col.id]);
+      const pickIndex = context.palette.results.findIndex((item) => item.id === row[col.id] && item.kind === 'building');
+      context.palette.index = Math.max(0, pickIndex);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const flying = context.flight.active || !context.palette.isOpen;
+      check('palette-go-to', opened && found && flying && !context.palette.isOpen,
+        `"${input.value}" → ${found ? path : 'not found'}${flying ? ', flying' : ''}`);
+      context.flight.active = false;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      context.inspector.hide();
+    } else {
+      check('palette-go-to', true, 'locked or no index');
+    }
+
+    // The CSV export has a row per file and a signal column that agrees with the index.
+    if (!state.source.locked && context.facetIndex) {
+      const text = csvText();
+      const rows = text.trim().split('\n');
+      const hubs = rows.filter((line) => /(^|[ ,])hub( |$)/.test(line.split(',').pop())).length;
+      check('csv-export', rows.length === context.facetIndex.length + 1 && hubs === ((manifest.review || {}).totals || {}).hubs,
+        `${rows.length - 1} rows for ${context.facetIndex.length} files, ${hubs} hubs`);
+    } else {
+      check('csv-export', true, 'locked');
     }
 
     // Every new lens paints something, and its key counts every resident building.
@@ -4285,6 +4464,8 @@ async function boot() {
   renderGuide();
   setupMapLabels();
   setupMiniMap();
+  setupPlanFlows();
+  setupPalette();
   renderTitle();
   applyTime();
   setupHistory();

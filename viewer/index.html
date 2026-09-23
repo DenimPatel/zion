@@ -151,6 +151,16 @@
     <button type="button" class="minimap-pill" title="Show the map (M)" aria-label="Show the map">&#9638; Map</button>
   </section>
 
+  <!-- Go to anything (Ctrl+K or /): every file and folder, fuzzy-matched. -->
+  <div id="palette" hidden role="dialog" aria-label="Go to a file or folder">
+    <div class="palette-box">
+      <input type="text" placeholder="Go to a file or folder…" spellcheck="false" autocomplete="off"
+             aria-controls="palette-results">
+      <ol id="palette-results" role="listbox"></ol>
+      <p class="palette-note hint"></p>
+    </div>
+  </div>
+
   <div id="map-labels" aria-hidden="true"></div>
   <div id="prompt" hidden></div>
   <div id="crosshair" aria-hidden="true"></div>
@@ -202,6 +212,7 @@
       <span><kbd>O</kbd> orbit city</span>
       <span><kbd>P</kbd> plan view</span>
       <span><kbd>M</kbd> map</span>
+      <span><kbd>Ctrl</kbd><kbd>K</kbd> go to</span>
       <span><kbd>U</kbd> unlock</span>
       <span><kbd>Esc</kbd> release</span>
     </div>

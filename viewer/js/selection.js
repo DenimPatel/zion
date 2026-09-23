@@ -235,3 +235,103 @@ export class SelectionOverlay {
     this.summary = { kind: 'district', links: links.length };
   }
 }
+
+/**
+ * The plan view's folder arrows: the heaviest folder-to-folder imports, and
+ * every folder pair with an import against the layering, drawn flat over the
+ * map. Folder level and capped at `MAX_FLOWS`, so the plan shows the shape of
+ * the architecture rather than every file edge (the tangle skybridges were
+ * removed for). Shown only while the plan view is up; the viewer toggles
+ * `group.visible`.
+ */
+export const MAX_FLOWS = 15;
+
+export function planFlowList(manifest, centreOf) {
+  const deps = manifest.dependencies;
+  if (!deps || !deps.matrix) return [];
+  const violating = new Map((deps.violatingPairs || []).map(([a, b, n]) => [`${a}>${b}`, n]));
+  const rows = [...deps.matrix].sort((a, b) => b[2] - a[2]);
+  const chosen = rows.slice(0, MAX_FLOWS);
+  for (const row of rows.slice(MAX_FLOWS)) if (violating.has(`${row[0]}>${row[1]}`)) chosen.push(row);
+  const flows = [];
+  for (const [a, b, count] of chosen) {
+    const from = centreOf(manifest.districts[a]);
+    const to = centreOf(manifest.districts[b]);
+    if (!from || !to) continue;
+    flows.push({ from, to, weight: count, violates: violating.has(`${a}>${b}`), a, b });
+  }
+  return flows;
+}
+
+export class PlanFlows {
+  constructor(THREE, scene) {
+    this.THREE = THREE;
+    this.group = new THREE.Group();
+    this.group.name = 'plan-flows';
+    this.group.visible = false;
+    this.layerOn = true;
+    this.flows = [];
+    scene.add(this.group);
+  }
+
+  setLayerVisible(name, visible) {
+    if (name === 'plan-flows') this.layerOn = visible;
+  }
+
+  build(manifest, centreOf, height = 0.6) {
+    const THREE = this.THREE;
+    for (const child of [...this.group.children]) {
+      this.group.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    }
+    this.flows = planFlowList(manifest, centreOf);
+    if (!this.flows.length) return;
+    const heaviest = Math.max(1, ...this.flows.map((f) => f.weight));
+    const span = Math.max(manifest.bounds[2], manifest.bounds[3]);
+    const parts = { out: [], violation: [] };
+    for (const flow of this.flows) {
+      const { from, to } = flow;
+      const dx = to.x - from.x;
+      const dz = to.z - from.z;
+      const length = Math.hypot(dx, dz);
+      if (length < 1) continue;
+      // Bend to the right of the direction of travel: A->B and B->A separate.
+      const nx = -dz / length;
+      const nz = dx / length;
+      const bend = length * 0.18;
+      // On the ground, drawn over everything (depthTest off): lifted above
+      // the skyline instead, perspective would shift each arrow away from
+      // the folders it joins, the further from the plan's centre the more.
+      const y = Math.max(from.y || 0, to.y || 0) + height;
+      const radius = Math.max(0.6, span * 0.0025) * (0.6 + 1.6 * Math.sqrt(flow.weight / heaviest));
+      // Stop short of the centres so the arrowhead lands beside the label.
+      const trim = Math.min(length * 0.15, span * 0.03);
+      const start = new THREE.Vector3(from.x + (dx / length) * trim, y, from.z + (dz / length) * trim);
+      const end = new THREE.Vector3(to.x - (dx / length) * trim, y, to.z - (dz / length) * trim);
+      const mid = new THREE.Vector3((start.x + end.x) / 2 + nx * bend, y, (start.z + end.z) / 2 + nz * bend);
+      const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
+      const bucket = flow.violates ? parts.violation : parts.out;
+      bucket.push(tag(new THREE.TubeGeometry(curve, 24, radius, 6, false), PART_FIXED, 0, 1));
+      const tangent = curve.getTangent(1).normalize();
+      const head = new THREE.ConeGeometry(radius * 3.2, radius * 8, 10);
+      head.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent));
+      head.translate(end.x, end.y, end.z);
+      bucket.push(tag(head, PART_FIXED, 0, 1));
+    }
+    for (const [kind, colour] of [['out', LINK_COLOURS.out], ['violation', LINK_COLOURS.violation]]) {
+      if (!parts[kind].length) continue;
+      const material = new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.85, depthTest: false });
+      const mesh = new THREE.Mesh(mergeParts(THREE, parts[kind]), material);
+      mesh.name = `plan-flows-${kind}`;
+      mesh.raycast = () => {};
+      mesh.renderOrder = 5;
+      this.group.add(mesh);
+    }
+  }
+
+  /** Called every frame: only in the plan view, and only while switched on. */
+  sync(inPlan) {
+    this.group.visible = Boolean(inPlan && this.layerOn && this.group.children.length);
+  }
+}

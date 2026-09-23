@@ -191,6 +191,45 @@ function signsFor(b, flags) {
   return signs;
 }
 
+const SIGNAL_NAMES = {
+  hotspot: 'hotspots', defect: 'defect-prone', cycle: 'import cycles', violation: 'layering violations',
+  untested: 'untested risk', knowledge: 'owner gone', rising: 'rising hotspots', oversized: 'oversized',
+  hub: 'hubs', clone: 'copied code', hiddencoupling: 'hidden coupling', orphan: 'possible dead code',
+  drift: 'CODEOWNERS drift',
+};
+
+/**
+ * A folder's health grade (analyzer/grades.py): the letter, the score, which
+ * way it moved since the baseline, and which signals cost the points.
+ */
+export function gradeFact(target) {
+  if (!target || !target.grade) return null;
+  const badge = el('span', { className: `grade-badge grade-${target.grade}`, textContent: target.grade });
+  const moved = target.baselineGrade && target.baselineScore >= 0 ? target.score - target.baselineScore : 0;
+  const trend = target.baselineGrade
+    ? el('span', {
+      className: `grade-trend ${moved > 0.5 ? 'better' : moved < -0.5 ? 'worse' : ''}`,
+      textContent: moved > 0.5 ? `▲ from ${target.baselineGrade}` : moved < -0.5 ? `▼ from ${target.baselineGrade}` : `= ${target.baselineGrade} at the baseline`,
+    })
+    : null;
+  const item = el('div', { className: 'insp-fact' }, [
+    el('span', { className: 'insp-label', textContent: 'Health grade' }),
+    el('span', { className: 'insp-value' }, [badge, ` ${Math.round(target.score)} / 100`, trend]),
+    el('span', {
+      className: 'insp-gloss',
+      textContent: target.gradeWhy && target.gradeWhy.length
+        ? 'points lost to each signal, weighted by the square root of each file\'s lines:'
+        : 'none of its code carries a health signal',
+    }),
+  ]);
+  if (target.gradeWhy && target.gradeWhy.length) {
+    item.append(el('ul', { className: 'grade-why' }, target.gradeWhy.slice(0, 6).map(([signal, points]) =>
+      el('li', {}, [el('span', { textContent: SIGNAL_NAMES[signal] || signal }), el('span', { textContent: `−${points}` })])
+    )));
+  }
+  return item;
+}
+
 export class Inspector {
   constructor(source) {
     this.source = source;
@@ -868,6 +907,8 @@ export class Inspector {
     }
     if (people.length) this.metrics.append(section('People', people));
     const health = this._healthFacts([district], flags);
+    const graded = gradeFact(district);
+    if (graded) health.unshift(graded);
     if (flags.churn) health.unshift(fact('Heat', district.heat ? `${Math.round(district.heat * 100)}%` : 'quiet', 'mean recent activity of its files; the pavement warms with it'));
     if (flags.tests && district.sourceFiles) {
       health.push(fact('Tested', `${district.testedFiles} of ${district.sourceFiles}`, `source files with a linked test${district.untestedRisk ? ` · ${district.untestedRisk} risky ones without` : ''}`));
@@ -991,7 +1032,7 @@ export class Inspector {
       overview.push(fact('Sub-folders', children.map((c) => source.regionLabel(c)).join(', '), 'each on its own, higher plinth'));
     }
     this.metrics.append(section('What you’re looking at', overview));
-    this.metrics.append(section('Health', this._healthFacts(districts, flags)));
+    this.metrics.append(section('Health', [gradeFact(region), ...this._healthFacts(districts, flags)]));
     this.hint.textContent = 'Click a block inside it to inspect one district. Everything outside this folder is dimmed.';
     this.selected.districtIds = districts.map((d) => d.id);
     this._announce();

@@ -440,6 +440,8 @@ class RepoAnalysis:
     delta: dict | None = None  # history.apply_delta's result, when a baseline exists
     clones: list[tuple[str, str, float, int]] = field(default_factory=list)  # clones.py pairs
     hidden_couplings: list[tuple[str, str, int]] = field(default_factory=list)  # architecture.py
+    baseline_summary: dict | None = None  # the summary the delta was taken against (emit.py)
+    baseline_key: object = None  # how that summary keys files: path, or HMAC under --encrypt
 
     @property
     def total_logical_loc(self) -> int:

@@ -498,6 +498,7 @@ export class CityMesh {
     const stakeCandidates = [];
     const noticeCandidates = [];
     const pinCandidates = [];
+    const ghostCandidates = [];
     const lampCandidates = [];
     const collarCandidates = [];
     const tagCandidates = [];
@@ -677,6 +678,11 @@ export class CityMesh {
         if (detailed && deltaEligible && building.delta) {
           stakeCandidates.push({ x, z, width, depth, base, delta: building.delta });
         }
+        // A ghost of the building as it stood at the baseline: any tier, so
+        // the change reads from the plan view too.
+        if (deltaEligible && building.baselineHeight) {
+          ghostCandidates.push({ x, z, width, depth, height: building.baselineHeight * landmark, delta: building.delta });
+        }
         if (detailed && codeownersEligible && building.ownerDrift) {
           noticeCandidates.push({ x, z, width, depth, base });
         }
@@ -734,6 +740,7 @@ export class CityMesh {
     this._addBracing(braceCandidates);
     this._addSurveyStakes(stakeCandidates);
     this._addNotePins(pinCandidates);
+    this._addBaselineGhosts(ghostCandidates);
     this._addDefectLamps(lampCandidates);
     this._addHubCollars(collarCandidates);
     this._addDebtTags(tagCandidates);
@@ -1281,6 +1288,41 @@ export class CityMesh {
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * The baseline's outline around a building that grew or shrank: a
+   * wireframe box at the height it stood then. Grown buildings rise out of
+   * their ghost; shrunk ones stand inside it. Named under `survey-stakes`, so
+   * the delta switch and the History slider take it with the stakes.
+   */
+  _addBaselineGhosts(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS * 2);
+    const geometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, list.length);
+    mesh.name = 'survey-stakes-ghosts';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+    list.forEach((plot, index) => {
+      // A hair wider than the building, so the frame never z-fights a facade.
+      matrix.makeScale(plot.width * 1.04, Math.max(0.5, plot.height), plot.depth * 1.04);
+      matrix.setPosition(plot.x, 0, plot.z);
+      mesh.setMatrixAt(index, matrix);
+      mesh.setColorAt(index, colour.set(DELTA_COLOURS[plot.delta] || DELTA_COLOURS.grown));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     this.group.add(mesh);
   }
 
