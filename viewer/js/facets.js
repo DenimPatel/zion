@@ -21,6 +21,11 @@ const FLAG_BITS = {
   new: 1 << 6,
   downtown: 1 << 7,
   soletenant: 1 << 8,
+  hotspot: 1 << 9,
+  oversized: 1 << 10,
+  orphan: 1 << 11,
+  cycle: 1 << 12,
+  knowledge: 1 << 13,
 };
 
 /** Column-index lookup built once from the manifest's declared column order. */

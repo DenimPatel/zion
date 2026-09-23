@@ -53,6 +53,9 @@ class FileGit:
     last_ts: float = 0.0
     last_author: str = ""
     last_message: str = ""
+    # Who made the file: the author of its oldest commit in the history
+    # walked (renames are not followed, so a moved file is "made" by the move).
+    first_author: str = ""
     hashes: list[str] = field(default_factory=list)
     # (timestamp, added+deleted) for every commit touching this file. Kept
     # only long enough to derive `activity`/`recent_churn` below -- it is not
@@ -94,6 +97,9 @@ class GitIndex:
     last_ts: float = 0.0
     active_dates: int = 0
     coupling: dict[tuple[str, str], int] = field(default_factory=dict)
+    # author -> timestamp of their newest commit anywhere in the repo, so a
+    # file's owner can be told apart from an owner who has since moved on.
+    author_last_ts: dict[str, float] = field(default_factory=dict)
 
     # -- derived confidence signals -------------------------------------
     @property
@@ -202,6 +208,8 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
             index.first_ts = ts if not index.first_ts else min(index.first_ts, ts)
             index.last_ts = max(index.last_ts, ts)
             dates_seen.add(iso_date[:10])
+            if ts > index.author_last_ts.get(author, 0.0):
+                index.author_last_ts[author] = ts
 
         if len(entries) > eligible_limit:
             index.bulk_commits += 1
@@ -225,6 +233,8 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
             record.deleted += deleted
             record.hashes.append(commit_hash)
             if ts:
+                if not record.first_ts or ts <= record.first_ts:
+                    record.first_author = author
                 record.first_ts = ts if not record.first_ts else min(record.first_ts, ts)
                 record.commit_log.append((ts, added + deleted))
             if ts >= record.last_ts:

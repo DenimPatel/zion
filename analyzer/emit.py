@@ -18,32 +18,93 @@ import os
 from dataclasses import dataclass, field
 
 from . import parse as parse_pkg
-from .layout import ROOT_DISTRICT, CityLayout, DistrictLayout, build_layout
+from .health import review as health_review
+from .layout import ROAD_NAMES, ROOT_DISTRICT, CityLayout, DistrictLayout, build_layout
 from .metrics import FileMetrics, RepoAnalysis
 
 FORMAT = "zion-city"
 VERSION = 1
 STRING_MAGIC = b"ZIONSTR1"
 
-# Legend entries, in display order.  `enabled` is decided by RepoFlags.
+# Legend entries, in display order: (id, label, unit, group, description).
+# `enabled` is decided by RepoFlags. The label is the one-line encoding; the
+# description is the longer "what it means and the exact rule" the City Guide
+# shows when a row is expanded. Both are schema, not repository data.
 LEGEND_SPEC = [
-    ("height", "Logical source lines -> building height", "loc"),
-    ("footprint", "Lines per floor -> footprint; even floors -> square plan", "plate"),
-    ("floors", "Functions, classes, headings, cells -> floors", "count"),
-    ("district_area", "Folder content weight -> district area", "weight"),
-    ("author_tint", "Dominant author -> building tint and Mayor", "authors"),
-    ("churn", "Commits touching the file -> window traffic, cranes", "commits"),
-    ("weathering", "Days since last commit -> weathering", "days"),
-    ("lit_windows", "Docstring + comment ratio -> lit windows", "ratio"),
-    ("town_hall", "README in folder -> Town Hall", "bool"),
-    ("parks", "Test files -> parks", "bool"),
-    ("silos", "Data files -> silos (height = rows)", "rows"),
-    ("monuments", "Binary artefacts -> monuments", "bool"),
-    ("skybridges", "Files changed in one commit -> listed under “Changes together with” in the detail report", "pairs"),
-    ("new_construction", "First commit within the newest activity window -> scaffolding", "days"),
-    ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile"),
-    ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile"),
-    ("sole_tenant", "One author owns ≥ 90% of a file's lines -> a corner flag", "bool"),
+    ("height", "Logical source lines -> building height", "loc", "Size & shape",
+     "Height grows with the square root of logical lines -- code, not blank lines or comments, and "
+     "never bytes on disk. Data files use rows instead. A tower is a file with a lot of real code."),
+    ("footprint", "Lines per floor -> footprint; even floors -> square plan", "plate", "Size & shape",
+     "The ground a building covers grows with the average length of its definitions. Long functions give "
+     "a wide, heavy plan; many short ones give a slender tower. Evenly sized definitions give a square plan, "
+     "uneven ones a long slab."),
+    ("floors", "Functions, classes, headings, cells -> floors", "count", "Size & shape",
+     "Every top-level function, class, markdown heading or notebook cell is one floor, and each floor is one "
+     "row of windows. A building with 2 floors has 2 top-level definitions. Walk in to see them by name."),
+    ("lit_windows", "Docstring + comment ratio -> lit windows", "ratio", "Size & shape",
+     "The share of lit windows is the share of documentation: docstrings, comments and prose. A dark facade "
+     "is undocumented code."),
+    ("district_area", "Folder content weight -> district area", "weight", "Ground",
+     "Each folder at the chosen depth is a district. Its ground is sized by the code it holds, but never "
+     "smaller than its buildings need."),
+    ("roads", "Folder tree distance -> road class", "class", "Ground",
+     "Roads get narrower as you go deeper into the folder tree. Highways separate top-level folders and ring "
+     "City Hall, avenues split their sub-folders, then streets, then alleys. A wide road between two "
+     "neighbourhoods means they are far apart in the folder tree."),
+    ("regions", "Nested folders -> raised plinths", "level", "Ground",
+     "Every folder that splits into several neighbourhoods stands on its own plinth, one step higher per "
+     "level. Folders with a single sub-folder pass straight through. Click the plinth's edge to inspect the "
+     "folder."),
+    ("new_construction", "First commit within the newest activity window -> scaffolding", "days", "Construction & time",
+     "Scaffolding marks a building still going up: the file's first commit is within the newest 10% of the "
+     "repository's lifetime (at least 30 days)."),
+    ("churn", "Top 10% of recent change -> cranes", "commits", "Construction & time",
+     "A crane stands on files in the top 10% of recent, decay-weighted change. They are active construction "
+     "sites."),
+    ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile", "Construction & time",
+     "A rooftop beacon grades recent activity below the crane cut-off: grey is warm, amber busy, red very "
+     "busy. A commit from a month ago counts half as much as one today."),
+    ("weathering", "Days since last commit -> weathering", "days", "Construction & time",
+     "Facades weather with time since the last commit, measured back from the repository's newest commit. "
+     "Clean is fresh; grimy has not been touched in two years or more."),
+    ("author_tint", "Dominant author -> building tint and Mayor", "authors", "People",
+     "The building takes the colour of the author who added most of its lines. The author with the most lines "
+     "in a district is its Mayor."),
+    ("sole_tenant", "One author owns ≥ 90% of a file's lines -> a corner flag", "bool", "People",
+     "A corner flag means bus factor 1: a single author wrote at least 90% of the file across 3+ commits. The "
+     "flag turns red when that author has not committed anywhere in six months."),
+    ("town_hall", "README in folder -> Town Hall", "bool", "Civic",
+     "A folder with its own README gets a Town Hall. A neighbourhood without one has no public notice board."),
+    ("parks", "Test files -> parks", "bool", "Civic",
+     "Test code is green space: low parks, not towers."),
+    ("silos", "Data files -> silos (height = rows)", "rows", "Civic",
+     "CSV/TSV/JSONL and other data files are silos. Height is rows, streamed and counted, never loaded."),
+    ("monuments", "Binary artefacts -> monuments", "bool", "Civic",
+     "Images, archives and other binaries are monuments. They have no floors because there is no source to "
+     "read."),
+    ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile", "Civic",
+     "The most central 5% of files, by how many files change with them, import them, how hot they are and "
+     "how many people touch them. They get glass and an antenna. Changes here ripple furthest."),
+    ("skybridges", "Files changed in one commit -> listed under “Changes together with” in the detail report", "pairs",
+     "Civic",
+     "Files that keep changing in the same commits are coupled even if they never import each other. The pairs "
+     "are listed in a building's report, with pairs that cross district lines called out."),
+    ("hotspots", "Change frequency x size -> hazard barriers", "rank", "Health",
+     "Striped barriers ring a hotspot: a file in the top 5% by commit frequency times size. Large and "
+     "constantly changing is where refactoring pays back first."),
+    ("oversized", "Top 5% by lines and 400+ lines -> steel buttresses", "loc", "Health",
+     "Buttresses brace a building too heavy for its frame: in the top 5% of the repository by logical lines "
+     "and at least 400 of them. Its report names the longest definition, the first thing to split out."),
+    ("orphans", "No importers + untouched 6 months -> boarded up", "bool", "Health",
+     "Boarded windows and a vacancy sign: nothing in the repository imports this file, it is not an entry "
+     "point, and it has not changed in six months. Import resolution is best-effort (Python, relative JS/TS), "
+     "so treat this as a question, not a verdict."),
+    ("cycles", "Import cycle -> matching rooftop pennants", "size", "Health",
+     "Files that import each other in a loop fly pennants of the same colour. A cycle cannot be built, tested "
+     "or understood one piece at a time. Break one edge."),
+    ("knowledge", "Main owner inactive 6+ months -> red corner flag", "bool", "Health",
+     "The author who wrote most of this file has not committed anywhere in the repository for six months. "
+     "Whoever changes it next is on their own. Pair up or document it."),
 ]
 
 
@@ -128,6 +189,61 @@ def _camera(bounds_w: float, bounds_h: float, max_height: float) -> dict:
     }
 
 
+def _building_order(analysis: RepoAnalysis, layout: CityLayout) -> dict[str, int]:
+    """Building id for every path: districts in layout order, files by path."""
+    district_order = {d.key: i for i, d in enumerate(layout.districts)}
+    by_district: dict[str, list[str]] = {}
+    for record in analysis.files:
+        by_district.setdefault(record.district, []).append(record.rel)
+    order: dict[str, int] = {}
+    for key in sorted(by_district, key=lambda k: district_order.get(k, 0)):
+        for rel in sorted(by_district[key]):
+            order[rel] = len(order)
+    return order
+
+
+def _regions(layout: CityLayout, strings: StringTable) -> list[dict]:
+    """Every intermediate folder plinth, parents before children."""
+    index = {r.key: i for i, r in enumerate(layout.regions)}
+    return [
+        {
+            "id": i,
+            "key": strings.add(r.key),
+            "name": strings.add(r.name),
+            "level": r.level,
+            "parent": index.get(r.parent, -1),
+            "rect": [round(r.rect.x, 3), round(r.rect.y, 3), round(r.rect.w, 3), round(r.rect.h, 3)],
+            "districts": r.districts,
+            "buildings": r.buildings,
+            "logicalLoc": r.logical_loc,
+        }
+        for i, r in enumerate(layout.regions)
+    ]
+
+
+def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
+    """City Hall's Architect's review: ranked building ids per signal."""
+    lists = health_review(analysis)
+
+    def ids(paths):
+        return [order[p] for p in paths if p in order]
+
+    return {
+        "hotspots": ids(lists["hotspots"]),
+        "oversized": ids(lists["oversized"]),
+        "knowledge": ids(lists["knowledge"]),
+        "orphans": ids(lists["orphans"]),
+        "cycles": [ids(c) for c in lists["cycles"]],
+        "totals": {
+            "hotspots": sum(1 for f in analysis.files if f.is_hotspot),
+            "oversized": sum(1 for f in analysis.files if f.is_oversized),
+            "knowledge": sum(1 for f in analysis.files if f.knowledge_risk),
+            "orphans": sum(1 for f in analysis.files if f.is_orphan),
+            "cycles": len(analysis.cycles),
+        },
+    }
+
+
 def _subfolders_of(members: list[FileMetrics], district_key: str, depth: int) -> list[dict]:
     """One level of sub-folder structure below a district's own depth (S13).
 
@@ -164,6 +280,10 @@ def build_manifest(
     flags = analysis.flags
     legend = []
     enable_map = {
+        "hotspots": flags.hotspots,
+        "knowledge": flags.knowledge,
+        "orphans": flags.imports,
+        "cycles": flags.imports and bool(analysis.cycles),
         "author_tint": flags.authorship,
         "churn": flags.churn,
         "weathering": flags.recency,
@@ -173,7 +293,7 @@ def build_manifest(
         "downtown": flags.centrality,
         "sole_tenant": flags.authorship,
     }
-    for entry_id, label, unit in LEGEND_SPEC:
+    for entry_id, label, unit, group, description in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
         legend.append(
             {
@@ -184,6 +304,8 @@ def build_manifest(
                 # which do describe the repo, remain table indices.
                 "label": label,
                 "unit": unit,
+                "group": group,
+                "description": description,
                 "enabled": enabled,
             }
         )
@@ -240,6 +362,15 @@ def build_manifest(
                 "documented": district.documented,
                 "testFiles": district.test_files,
                 "dataFiles": district.data_files,
+                "level": district.level,
+                "region": strings.add(district.region) if district.region else -1,
+                "contributors": district.contributors,
+                "busFactor": district.bus_factor,
+                "hotspots": district.hotspots,
+                "oversized": district.oversized,
+                "orphans": district.orphans,
+                "knowledgeRisks": district.knowledge_risks,
+                "cycles": district.cycles,
                 # Mean heat over the district's own files, not a city-wide
                 # average -- "this neighbourhood is under active development"
                 # relative to the district's own population.
@@ -356,7 +487,13 @@ def build_manifest(
             round(layout.bounds.w, 3),
             round(layout.bounds.h, 3),
         ],
-        "streets": [[round(s.x, 2), round(s.y, 2), round(s.w, 2), round(s.h, 2)] for s in layout.streets],
+        # [x, y, w, h, class]: class 0 highway, 1 avenue, 2 street, 3 alley.
+        "streets": [
+            [round(s.x, 2), round(s.y, 2), round(s.w, 2), round(s.h, 2), s.cls] for s in layout.streets
+        ],
+        "roads": {"names": list(ROAD_NAMES), "widths": [round(w, 2) for w in layout.road_widths]},
+        "regions": _regions(layout, strings),
+        "review": _review(analysis, _building_order(analysis, layout)),
         "cityHall": layout.city_hall(),
         "camera": _camera(layout.bounds.w, layout.bounds.h, max_height),
         "districts": districts,
@@ -444,6 +581,11 @@ FLAG_TOP_CHURN = 1 << 5
 FLAG_IS_NEW = 1 << 6
 FLAG_IS_DOWNTOWN = 1 << 7
 FLAG_SOLE_TENANT = 1 << 8
+FLAG_HOTSPOT = 1 << 9
+FLAG_OVERSIZED = 1 << 10
+FLAG_ORPHAN = 1 << 11
+FLAG_CYCLE = 1 << 12
+FLAG_KNOWLEDGE = 1 << 13
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
@@ -529,6 +671,30 @@ def _building_record(
         "author": strings.add(record.primary_author) if record.primary_author else -1,
         "ownership": round(record.ownership_share, 3),
         "lastMessage": strings.add(record.last_message) if record.last_message else -1,
+        # People: who made it, who last touched it -- days are measured back
+        # from the repository's newest commit, so they are identical in a
+        # plain and an encrypted build of the same history.
+        "firstAuthor": strings.add(record.first_author) if record.first_author else -1,
+        "lastAuthor": strings.add(record.last_author) if record.last_author else -1,
+        "authorCount": record.author_count,
+        "busFactor": record.bus_factor,
+        "ownerAwayDays": round(record.owner_away_days, 1),
+        "ownerInactive": record.owner_inactive,
+        # Architect's signals (analyzer/health.py).
+        "hotspot": record.hotspot,
+        "hotspotRank": record.hotspot_rank,
+        "isHotspot": record.is_hotspot,
+        "sizePct": round(record.size_pct, 4),
+        "oversized": record.is_oversized,
+        "longestFloor": (
+            {"name": strings.add(record.longest_floor[0]), "loc": record.longest_floor[1]}
+            if record.longest_floor else None
+        ),
+        "maxComplexity": record.max_complexity,
+        "orphan": record.is_orphan,
+        "knowledgeRisk": record.knowledge_risk,
+        "cycle": record.cycle_id,
+        "cycleSize": record.cycle_size,
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
         "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
@@ -579,6 +745,16 @@ def _build_index(
             flags |= FLAG_IS_DOWNTOWN
         if record.sole_tenant:
             flags |= FLAG_SOLE_TENANT
+        if record.is_hotspot:
+            flags |= FLAG_HOTSPOT
+        if record.is_oversized:
+            flags |= FLAG_OVERSIZED
+        if record.is_orphan:
+            flags |= FLAG_ORPHAN
+        if record.cycle_id:
+            flags |= FLAG_CYCLE
+        if record.knowledge_risk:
+            flags |= FLAG_KNOWLEDGE
         rows.append(
             [
                 index,
@@ -791,12 +967,7 @@ def emit_city(
     placement = {
         b.rel: b for district in layout.districts for b in district.buildings
     }
-    building_index: dict[str, int] = {}
-    counter = 0
-    for key in sorted(by_district, key=lambda k: district_order.get(k, 0)):
-        for record in sorted(by_district[key], key=lambda f: f.rel):
-            building_index[record.rel] = counter
-            counter += 1
+    building_index = _building_order(analysis, layout)
 
     bytes_written = 0
     source_bytes = 0

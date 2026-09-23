@@ -51,7 +51,11 @@ def _backend():
             return AESGCM(key).encrypt(iv, data, aad)
 
         return encrypt, "cryptography"
-    except Exception:
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        # A broken binary wheel can raise pyo3's PanicException, which is a
+        # BaseException, not an Exception -- fall back rather than crash.
         pass
 
     from vendor.aes_gcm import gcm_encrypt

@@ -296,6 +296,24 @@ class FileMetrics:
     centrality: float = 0.0  # composite percentile rank, 0..1
     downtown: bool = False  # top slice of centrality
     sole_tenant: bool = False  # bus-factor-1: one author, most of the lines (S12)
+    # Architect's signals, filled by analyzer/health.py.
+    first_author: str = ""
+    imports_resolved: list[str] = field(default_factory=list)  # rel paths this file imports
+    author_count: int = 0
+    bus_factor: int = 0
+    owner_away_days: float = 0.0
+    owner_inactive: bool = False
+    knowledge_risk: bool = False
+    size_pct: float = 0.0
+    is_oversized: bool = False
+    longest_floor: tuple[str, int] | None = None
+    max_complexity: int = 0
+    hotspot: float = 0.0
+    hotspot_rank: int = 0
+    is_hotspot: bool = False
+    is_orphan: bool = False
+    cycle_id: int = 0
+    cycle_size: int = 0
 
     @property
     def weight(self) -> float:
@@ -317,6 +335,10 @@ class RepoFlags:
     coupling: bool = False
     age: bool = False
     centrality: bool = False
+    # Architect's signals (analyzer/health.py), each gated like the data under it.
+    hotspots: bool = False
+    knowledge: bool = False
+    imports: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -327,6 +349,9 @@ class RepoFlags:
             "coupling": self.coupling,
             "age": self.age,
             "centrality": self.centrality,
+            "hotspots": self.hotspots,
+            "knowledge": self.knowledge,
+            "imports": self.imports,
             "notes": list(self.notes),
         }
 
@@ -342,6 +367,7 @@ class RepoAnalysis:
     git: GitIndex | None = None
     languages: dict[str, int] = field(default_factory=dict)
     total_bytes: int = 0
+    cycles: list[list[str]] = field(default_factory=list)  # import cycles, largest first
 
     @property
     def total_logical_loc(self) -> int:
@@ -394,7 +420,9 @@ def analyze(
 ) -> RepoAnalysis:
     """Parse every file and assemble the metric set."""
     analysis = RepoAnalysis(root=root, git=git)
-    now = None
+    # Weathering is measured back from the repo's own newest commit, like age
+    # and heat: the same clone must build the same city on any day.
+    now = git.last_ts if git.available and git.last_ts else None
 
     for entry in entries:
         result = parse_pkg.parse_file(entry.abs, entry.name, entry.is_binary)
@@ -463,6 +491,7 @@ def analyze(
             record.churn = file_git.churn
             record.last_ts = file_git.last_ts
             record.last_author = file_git.last_author
+            record.first_author = file_git.first_author
             record.last_message = file_git.last_message
             record.primary_author = file_git.primary_author
             record.ownership_share = file_git.ownership_share()
@@ -490,6 +519,9 @@ def analyze(
         # once RepoFlags.authorship already says ownership means something.
         for record in analysis.files:
             record.sole_tenant = record.ownership_share >= SOLE_TENANT_SHARE and record.commits >= SOLE_TENANT_MIN_COMMITS
+    from .health import finalize_health
+
+    finalize_health(analysis, git)
     return analysis
 
 
@@ -649,6 +681,8 @@ def _finalize_downtown(analysis: "RepoAnalysis", git: GitIndex) -> None:
             if target:
                 in_degree[target] = in_degree.get(target, 0) + 1
                 edge_count += 1
+                if target not in record.imports_resolved:
+                    record.imports_resolved.append(target)
     for record in files:
         record.import_in_degree = in_degree.get(record.rel, 0)
 
