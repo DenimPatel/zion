@@ -45,6 +45,7 @@ Everything in the city is one of these, and nothing is decoration.
 | files changed together in one commit | skybridges |
 | first commit within the newest activity window | scaffolding |
 | recent, decay-weighted churn (percentile) | rooftop beacons feeding cranes; district ground heat |
+| co-change degree + import in-degree + heat + author count | downtown towers (glass tint, antenna) |
 
 ### Why height is never bytes on disk
 
@@ -179,6 +180,13 @@ without opening a diff. The colour lens also has an "age (era)" option
 (brick → concrete → glass, oldest to newest) and a "recent activity (heat)"
 option (grey → amber → red), both computed relative to the repo's own history,
 never wall-clock time.
+
+**Downtown** is the top slice of a composite centrality score -- co-change
+degree, import in-degree (best-effort, from Python's `ast` or a relative-path
+regex for JS/TS), recent activity and how many people have touched the file --
+rendered as a glass tint and an antenna. A district whose downtown density is
+at least twice the city's own average is a CBD, called out in its inspector
+and detail report.
 
 **"Open details"** on any building or district's inspector panel opens a report
 window (a new tab, or an in-page overlay in a `--single-file` build) with the

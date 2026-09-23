@@ -145,6 +145,23 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
     return "".join(out).splitlines(), depth_at_line, comment_only
 
 
+# Relative import/require specifiers only: `import x from 'react'` cannot
+# resolve to a file in this repo and is not worth carrying past this module.
+# Applied to the raw source rather than the masked one -- a heuristic on top
+# of a heuristic, medium confidence either way, and false positives from a
+# commented-out import are rare enough not to matter for a centrality score.
+_RE_RELATIVE_IMPORT = re.compile(
+    r"""(?:from|import)\s+['"](\.[^'"]+)['"]|require\(\s*['"](\.[^'"]+)['"]\s*\)"""
+)
+
+
+def _relative_imports(source: str) -> list[str]:
+    imports = []
+    for match in _RE_RELATIVE_IMPORT.finditer(source):
+        imports.append(match.group(1) or match.group(2))
+    return imports
+
+
 def parse_brace(source: str, language: str) -> ParseResult:
     masked_lines, depth_at_line, comment_only = _strip(source, language)
 
@@ -225,4 +242,5 @@ def parse_brace(source: str, language: str) -> ParseResult:
         comment_lines=comment_lines,
         doc_lines=comment_lines,
         confidence="medium",
+        imports=_relative_imports(source) if language in ("javascript", "typescript") else [],
     )

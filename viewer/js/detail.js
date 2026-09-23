@@ -103,6 +103,11 @@ export async function renderBuilding(source, id) {
     rows.push(['new construction', building.isNew ? 'yes' : 'no']);
   }
   if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((building.heat || 0) * 100)}th percentile`]);
+  if (flags.downtown) {
+    rows.push(['centrality', `${Math.round((building.centrality || 0) * 100)}th percentile`]);
+    rows.push(['downtown', building.downtown ? 'yes' : 'no']);
+    rows.push(['imported by', `${building.importInDegree || 0} other file(s) (best-effort)`]);
+  }
   if (flags.authorship && building.author >= 0) {
     rows.push(['author', source.s(building.author)]);
     rows.push(['ownership', `${Math.round((building.ownership || 0) * 100)}% of lines`]);
@@ -168,6 +173,8 @@ export async function renderDistrict(source, id) {
     return;
   }
   title.textContent = source.districtLabel(district);
+  const breadcrumb = (district.pathSegments || []).map((i) => source.s(i)).join(' / ');
+  if (breadcrumb && !source.locked) root.append(el('p', { className: 'hint', textContent: breadcrumb }));
   const flags = source.manifest.flags || {};
 
   const rows = [
@@ -183,6 +190,7 @@ export async function renderDistrict(source, id) {
   if (flags.authorship) rows.push(['mayor', source.locked ? '(locked)' : source.s(district.mayor) || 'unknown']);
   if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((district.heat || 0) * 100)}% of scale`]);
   if (flags.age) rows.push(['new files', `${district.newFiles || 0} of ${district.buildings}`]);
+  if (flags.downtown) rows.push(['central business district', district.isCbd ? 'yes' : 'no']);
   root.append(metricList(rows));
 
   const index = await source.index();
@@ -197,9 +205,7 @@ export async function renderDistrict(source, id) {
   }
   root.append(chipRow);
 
-  root.append(el('h2', { textContent: 'Largest files in this district' }));
-  const list = el('div', { className: 'floor-list' });
-  for (const row of members.slice(0, 20)) {
+  const fileButton = (row) => {
     const buildingId = row[cols.id];
     const button = el('button', {
       className: 'chip-btn',
@@ -217,9 +223,43 @@ export async function renderDistrict(source, id) {
       }
       renderBuilding(source, buildingId);
     });
-    list.append(button);
+    return button;
+  };
+
+  const filesHeading = el('h2', { textContent: 'Largest files in this district' });
+  const filesList = el('div', { className: 'floor-list' });
+  const renderFiles = (prefix) => {
+    filesHeading.textContent = prefix ? `Files under ${prefix}/` : 'Largest files in this district';
+    filesList.innerHTML = '';
+    const scoped = prefix ? members.filter((row) => source.s(row[cols.path]).startsWith(`${prefix}/`)) : members;
+    for (const row of scoped.slice(0, 20)) filesList.append(fileButton(row));
+  };
+
+  // Sub-folders (S13's "first version": a breakdown one level deeper than
+  // this district's own block, not a re-layout of the treemap itself -- see
+  // analyzer/emit.py::_subfolders_of). Clicking one narrows the file list
+  // below by path prefix, without touching the district's geometry at all.
+  if (district.subfolders && district.subfolders.length && !source.locked) {
+    root.append(el('h2', { textContent: 'Sub-folders' }));
+    const subRow = el('div', { className: 'floor-list' });
+    let activePrefix = null;
+    for (const sub of district.subfolders) {
+      const name = source.s(sub.name);
+      const chip = el('button', {
+        className: 'chip-btn',
+        textContent: `${name}/ (${sub.files} files, ${sub.loc} lines)`,
+      });
+      chip.addEventListener('click', () => {
+        activePrefix = activePrefix === name ? null : name;
+        renderFiles(activePrefix);
+      });
+      subRow.append(chip);
+    }
+    root.append(subRow);
   }
-  root.append(list);
+
+  root.append(filesHeading, filesList);
+  renderFiles(null);
 }
 
 async function unlockFlow(source) {

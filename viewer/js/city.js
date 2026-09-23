@@ -15,7 +15,14 @@
  * than sampled from one shared bitmap). Neither costs a draw call.
  */
 
-import { craneGeometry, farGeometry, nearGeometry, roofPropGeometry, scaffoldingGeometry } from './shapes.js';
+import {
+  antennaGeometry,
+  craneGeometry,
+  farGeometry,
+  nearGeometry,
+  roofPropGeometry,
+  scaffoldingGeometry,
+} from './shapes.js';
 import {
   makeMassingDepthMaterial,
   patchFacade,
@@ -220,8 +227,11 @@ export class CityMesh {
     const roofCandidates = [];
     const craneCandidates = [];
     const scaffoldCandidates = [];
+    const antennaCandidates = [];
     const churnEligible = Boolean(manifest.flags && manifest.flags.churn);
     const ageEligible = Boolean(manifest.flags && manifest.flags.age);
+    const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
+    const glass = new THREE.Color(0x8fd6ff);
 
     for (const [archetype, tiers] of byArchetype) {
       for (const tier of ['near', 'far']) {
@@ -268,6 +278,10 @@ export class CityMesh {
 
         const author = authorTint ? this.source.s(building.author) : '';
         colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+        // Downtown: a glass tint on top of whatever archetype/author colour
+        // already applies, so "this file is structurally central" reads
+        // alongside the existing tint rather than replacing it.
+        if (downtownEligible && building.downtown) colour.lerp(glass, 0.4);
         mesh.setColorAt(index, colour);
 
         // Parks and monuments carry no windows; everything else glows in
@@ -310,6 +324,10 @@ export class CityMesh {
         if (detailed && ageEligible && building.isNew) {
           scaffoldCandidates.push(matrix.clone());
         }
+
+        if (detailed && downtownEligible && building.downtown) {
+          antennaCandidates.push({ x, z, width, depth, height });
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
@@ -334,6 +352,7 @@ export class CityMesh {
     this._addRoofProps(roofCandidates);
     this._addCranes(craneCandidates);
     this._addScaffolding(scaffoldCandidates);
+    this._addAntennas(antennaCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
@@ -538,9 +557,14 @@ export class CityMesh {
           // decay-weighted churn, not lifetime totals (S4).
           const value = Math.max(0, Math.min(1, building.heat || 0));
           colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
+        } else if (lens === 'downtown') {
+          const centrality = Math.max(0, Math.min(1, building.centrality || 0));
+          colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
         } else {
           const author = authorTint ? this.source.s(building.author) : '';
           colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+          const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
+          if (downtownEligible && building.downtown) colour.lerp(new THREE.Color(0x8fd6ff), 0.4);
         }
         base[index * 3] = colour.r;
         base[index * 3 + 1] = colour.g;
@@ -641,6 +665,35 @@ export class CityMesh {
     // Scenery around the building, not a separate click target.
     mesh.raycast = () => {};
     matrices.forEach((matrix, index) => mesh.setMatrixAt(index, matrix));
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Antennas on downtown buildings -- the top slice of centrality (S8),
+   * placed at each building's own roofline, one instanced mesh regardless of
+   * how many towers the skyline's centre has.
+   */
+  _addAntennas(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xd8ecf5,
+      roughness: 0.3,
+      metalness: 0.6,
+      emissive: new THREE.Color(0xff5533),
+      emissiveIntensity: 0.4,
+    });
+    const mesh = new THREE.InstancedMesh(antennaGeometry(THREE), material, candidates.length);
+    mesh.name = 'antennas';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    candidates.forEach((tower, index) => {
+      const spread = Math.min(tower.width, tower.depth) * 0.5;
+      matrix.makeScale(spread, Math.max(4, spread * 3), spread);
+      matrix.setPosition(tower.x, tower.height, tower.z);
+      mesh.setMatrixAt(index, matrix);
+    });
     mesh.instanceMatrix.needsUpdate = true;
     this.group.add(mesh);
   }

@@ -94,10 +94,10 @@ function compileTerm(term, context) {
       const idx = context.col.name;
       predicate = (row) => idx !== undefined && context.resolveString(row[idx]).toLowerCase() === value;
     } else if (key === 'path') {
-      // path: supports a trailing `**` as a prefix wildcard; name-only
-      // matching otherwise, since index.json does not carry the full path
-      // (only building records do, fetched per resident district).
-      const idx = context.col.name;
+      // path: supports a trailing `**` as a prefix wildcard, matched against
+      // the full relative path column (falls back to the name column on an
+      // older index.json that predates it).
+      const idx = context.col.path !== undefined ? context.col.path : context.col.name;
       const prefix = value.replace(/\*+$/, '');
       predicate = (row) => idx !== undefined && context.resolveString(row[idx]).toLowerCase().startsWith(prefix);
     } else if (key === 'archetype') {

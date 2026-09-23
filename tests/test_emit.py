@@ -204,6 +204,39 @@ class EmitTests(TempRepoCase):
         ext_table = read_string_table(os.path.join(result.out_dir, "ext.bin"))
         self.assertIn(".py", ext_table)
 
+    def test_district_carries_path_segments_and_subfolders(self):
+        _analysis, _layout, result = self._build()
+        manifest = result.manifest
+        by_key = {}
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        for district in manifest["districts"]:
+            by_key[strings[district["key"]]] = district
+
+        root = by_key["(root)"]
+        self.assertEqual(root["pathSegments"], [])
+        beta = by_key.get("beta")
+        if beta is not None:
+            self.assertEqual([strings[i] for i in beta["pathSegments"]], ["beta"])
+            # beta/tests/test_pipeline.py sits one folder deeper than beta itself.
+            names = {strings[g["name"]] for g in beta["subfolders"]}
+            self.assertIn("tests", names)
+
+    def test_index_path_column_matches_building_path(self):
+        _analysis, _layout, result = self._build()
+        manifest = result.manifest
+        self.assertIn("path", manifest["indexColumns"])
+        cols = {name: i for i, name in enumerate(manifest["indexColumns"])}
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        index_rows = read_json(os.path.join(result.out_dir, "index.json"))
+        by_id = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_id[building["id"]] = building
+        for row in index_rows:
+            building = by_id[row[cols["id"]]]
+            self.assertEqual(strings[row[cols["path"]]], strings[building["path"]])
+
     def test_single_file_build_installs_detail_page_and_index(self):
         repo = make_repo(self.scratch())
         _analysis, _layout, result = self.build_city(

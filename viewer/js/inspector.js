@@ -183,7 +183,11 @@ export class Inspector {
     const source = this.source;
     this.panel.hidden = false;
     this.title.textContent = source.districtLabel(district);
-    this.pathEl.textContent = source.locked ? '(locked)' : source.s(district.key);
+    // A breadcrumb of ancestor folder names (S13/S14): the district itself is
+    // still one flat block in the treemap, but the path it sits at is real.
+    this.pathEl.textContent = source.locked
+      ? '(locked)'
+      : (district.pathSegments || []).map((i) => source.s(i)).join(' / ') || source.s(district.key);
     if (this.openDetail) this.openDetail.hidden = false;
 
     const rows = [

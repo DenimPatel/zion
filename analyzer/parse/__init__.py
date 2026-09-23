@@ -47,6 +47,13 @@ class ParseResult:
     rows: int | None = None   # data files only
     confidence: str = "high"  # high | medium | low
     parse_error: str = ""
+    # Raw import specifiers, resolved to repo paths later in metrics.py (which
+    # has the whole file list to resolve against, not just this one file).
+    # Python: dotted module names, relative ones kept as literal leading dots
+    # ("." + module, per import level). Brace languages: relative path
+    # specifiers only ("./foo", "../bar/baz") -- a bare package name like
+    # 'react' cannot resolve to a repo file and is not worth carrying.
+    imports: list[str] = field(default_factory=list)
 
 
 DOC_TRUNCATE = 160

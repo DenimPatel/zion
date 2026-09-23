@@ -302,6 +302,19 @@ export function scaffoldingGeometry(THREE) {
 }
 
 /**
+ * A downtown antenna/spire: a thin mast rising well above the roofline, the
+ * way a real skyline marks its tallest, most central towers. Marks a
+ * building in the top slice of centrality (S8): co-change degree, import
+ * in-degree, recent activity and ownership breadth combined.
+ */
+export function antennaGeometry(THREE) {
+  return mergeParts(THREE, [
+    cylinder(THREE, { rTop: 0.05, rBottom: 0.09, x: 0, z: 0, y0: 0, y1: 0.35, segments: 6, part: PART_PODIUM }),
+    cylinder(THREE, { rTop: 0.008, rBottom: 0.03, x: 0, z: 0, y0: 0.3, y1: 1.5, segments: 6, part: PART_CROWN }),
+  ]);
+}
+
+/**
  * A construction crane: a mast rising past the roofline with a long boom and a
  * short counter-jib. Marks the top decile of churn -- the file is being
  * actively worked, the way a crane on a roof means the building isn't

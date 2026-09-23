@@ -290,6 +290,11 @@ class FileMetrics:
     activity: list[int] = field(default_factory=list)
     recent_churn: float = 0.0
     heat: float = 0.0  # percentile rank of recent_churn across the repo, 0..1
+    # Downtown (S8 in docs/VISUALIZATION_ROADMAP.md).
+    raw_imports: list[str] = field(default_factory=list)  # as the parser saw them, unresolved
+    import_in_degree: int = 0  # how many other files resolve an import to this one
+    centrality: float = 0.0  # composite percentile rank, 0..1
+    downtown: bool = False  # top slice of centrality
 
     @property
     def weight(self) -> float:
@@ -310,6 +315,7 @@ class RepoFlags:
     churn: bool = False
     coupling: bool = False
     age: bool = False
+    centrality: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -319,6 +325,7 @@ class RepoFlags:
             "churn": self.churn,
             "coupling": self.coupling,
             "age": self.age,
+            "centrality": self.centrality,
             "notes": list(self.notes),
         }
 
@@ -447,6 +454,8 @@ def analyze(
             confidence={"size": "high", "symbols": result.confidence, "docs": result.confidence},
         )
 
+        record.raw_imports = result.imports
+
         file_git = git.files.get(entry.rel)
         if file_git is not None:
             record.commits = file_git.commits
@@ -473,6 +482,7 @@ def analyze(
         for record in analysis.files:
             record.recency_days = days_since(record.last_ts, now) if record.last_ts else 0.0
         _finalize_time_signals(analysis, git)
+    _finalize_downtown(analysis, git)
     return analysis
 
 
@@ -523,3 +533,141 @@ def _finalize_time_signals(analysis: "RepoAnalysis", git: GitIndex) -> None:
         total = len(churny)
         for rank, record in enumerate(churny):
             record.heat = (rank + 1) / total if total else 0.0
+
+
+# --------------------------------------------------------------------------
+# Downtown (S8): centrality from co-change degree, import in-degree, heat and
+# ownership breadth.
+# --------------------------------------------------------------------------
+
+DOWNTOWN_FRACTION = 0.05
+DOWNTOWN_MIN_FILES = 3
+CBD_DENSITY_MULTIPLE = 2.0
+
+
+def _python_module_map(files: list[FileMetrics]) -> dict[str, str]:
+    """Dotted module path -> rel path, for every Python file."""
+    mapping: dict[str, str] = {}
+    for record in files:
+        if record.language != "python" or not record.rel.endswith(".py"):
+            continue
+        rel = record.rel
+        if rel.endswith("/__init__.py"):
+            dotted = rel[: -len("/__init__.py")].replace("/", ".")
+        else:
+            dotted = rel[:-3].replace("/", ".")
+        mapping[dotted] = rel
+    return mapping
+
+
+def _resolve_python_import(spec: str, importer_rel: str, module_map: dict[str, str]) -> str | None:
+    """Best-effort: a dotted module or a name pulled from one, or a relative
+    import resolved against the importing file's own package directory."""
+    if spec.startswith("."):
+        level = len(spec) - len(spec.lstrip("."))
+        remainder = spec[level:]
+        base_parts = importer_rel.replace("\\", "/").split("/")[:-1]  # drop the filename
+        # Level 1 (`from . import x`) means "this package"; each extra dot
+        # climbs one more directory, matching Python's own semantics.
+        climb = max(0, level - 1)
+        base_parts = base_parts[: len(base_parts) - climb] if climb else base_parts
+        candidate = ".".join(base_parts + (remainder.split(".") if remainder else []))
+    else:
+        candidate = spec
+
+    parts = candidate.split(".")
+    for i in range(len(parts), 0, -1):
+        probe = ".".join(parts[:i])
+        if probe in module_map and module_map[probe] != importer_rel:
+            return module_map[probe]
+    return None
+
+
+_RELATIVE_PATH_SUFFIXES = ("", ".js", ".jsx", ".ts", ".tsx", "/index.js", "/index.ts", "/index.jsx", "/index.tsx")
+
+
+def _resolve_relative_path_import(spec: str, importer_rel: str, path_set: set[str]) -> str | None:
+    """A `./foo` or `../bar/baz` specifier, resolved against the importing
+    file's own directory and tried against a small set of common extensions
+    -- there is no module system to consult, only the file tree itself."""
+    import posixpath
+
+    base_dir = posixpath.dirname(importer_rel)
+    joined = posixpath.normpath(posixpath.join(base_dir, spec))
+    for suffix in _RELATIVE_PATH_SUFFIXES:
+        candidate = joined + suffix
+        if candidate in path_set and candidate != importer_rel:
+            return candidate
+    return None
+
+
+def _percentile_ranks(values: dict[str, float]) -> dict[str, float]:
+    """Rank-based percentile, 0..1, ties broken by stable sort order.
+
+    Rank rather than raw value, so one enormous outlier (a util file imported
+    everywhere) does not compress every other file's score toward zero.
+    """
+    positive = sorted((key for key, v in values.items() if v > 0), key=lambda k: values[k])
+    total = len(positive)
+    return {key: (rank + 1) / total for rank, key in enumerate(positive)}
+
+
+def _finalize_downtown(analysis: "RepoAnalysis", git: GitIndex) -> None:
+    """Score every file's centrality and mark the top slice as downtown.
+
+    Weights are dropped and the rest renormalised when a component has
+    nothing to say -- a single-author repo still gets a downtown from
+    coupling and imports alone, just not from ownership breadth.
+    """
+    files = analysis.files
+    if not files:
+        return
+
+    module_map = _python_module_map(files)
+    path_set = {f.rel for f in files}
+
+    in_degree: dict[str, int] = {}
+    edge_count = 0
+    for record in files:
+        for spec in record.raw_imports:
+            target = (
+                _resolve_python_import(spec, record.rel, module_map)
+                if record.language == "python"
+                else _resolve_relative_path_import(spec, record.rel, path_set)
+            )
+            if target:
+                in_degree[target] = in_degree.get(target, 0) + 1
+                edge_count += 1
+    for record in files:
+        record.import_in_degree = in_degree.get(record.rel, 0)
+
+    coupling_degree: dict[str, int] = {}
+    if analysis.flags.coupling and git.coupling:
+        for path_a, path_b in git.coupling:
+            coupling_degree[path_a] = coupling_degree.get(path_a, 0) + 1
+            coupling_degree[path_b] = coupling_degree.get(path_b, 0) + 1
+
+    components: list[tuple[float, dict[str, float]]] = []
+    if coupling_degree:
+        components.append((0.35, _percentile_ranks({f.rel: coupling_degree.get(f.rel, 0) for f in files})))
+    if edge_count:
+        components.append((0.35, _percentile_ranks({f.rel: float(in_degree.get(f.rel, 0)) for f in files})))
+    if analysis.flags.churn:
+        components.append((0.20, _percentile_ranks({f.rel: f.heat for f in files})))
+    if analysis.flags.authorship:
+        components.append((0.10, _percentile_ranks({f.rel: float(len(f.authors)) for f in files})))
+
+    analysis.flags.centrality = bool(coupling_degree) or bool(edge_count)
+    if not analysis.flags.centrality:
+        analysis.flags.notes.append("No coupling data or resolvable imports - downtown disabled.")
+        return
+
+    weight_total = sum(w for w, _ in components)
+    for record in files:
+        record.centrality = sum(w * ranks.get(record.rel, 0.0) for w, ranks in components) / weight_total
+
+    ranked = sorted(files, key=lambda f: -f.centrality)
+    cutoff = max(DOWNTOWN_MIN_FILES, round(len(files) * DOWNTOWN_FRACTION))
+    for record in ranked[:cutoff]:
+        if record.centrality > 0:
+            record.downtown = True

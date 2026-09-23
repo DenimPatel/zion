@@ -69,6 +69,40 @@ def _floor_from(node: ast.AST, kind: str, depth: int, docstring: str) -> Floor:
     )
 
 
+def _imports_from(tree: ast.AST) -> list[str]:
+    """Raw import specifiers, resolved to repo paths later (metrics.py).
+
+    ``import a.b.c`` yields ``"a.b.c"``. ``from a.b import c`` yields
+    ``"a.b"`` -- the module, not the names pulled from it, since a symbol
+    inside a module does not change which *file* the import points at.
+    A relative ``from . import x`` / ``from ..pkg import y`` yields the
+    literal leading dots plus whatever module followed them (``"."``,
+    ``"..pkg"``), which metrics.py resolves against the importing file's own
+    package directory.
+    """
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = "." * node.level + (node.module or "") if node.level else (node.module or "")
+            if not base:
+                continue
+            # `from pkg import utils` is ambiguous between "the submodule
+            # pkg.utils" and "the name utils inside pkg/__init__.py" without
+            # deeper resolution than this parser does. Trying base.name first
+            # (metrics.py's resolver falls back to shorter prefixes) covers
+            # the more common submodule case while still finding the package
+            # itself if that name is not actually a file.
+            names = [alias.name for alias in node.names if alias.name != "*"]
+            if names:
+                imports.extend(f"{base}.{name}" for name in names)
+            else:
+                imports.append(base)
+    return imports
+
+
 def parse_python(source: str) -> ParseResult:
     tree = ast.parse(source)
     comments = _comment_lines(source)
@@ -102,4 +136,5 @@ def parse_python(source: str) -> ParseResult:
         comment_lines=len(comments),
         doc_lines=len(comments | docstrings),
         confidence="high",
+        imports=_imports_from(tree),
     )

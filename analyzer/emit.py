@@ -18,7 +18,7 @@ import os
 from dataclasses import dataclass, field
 
 from . import parse as parse_pkg
-from .layout import CityLayout, DistrictLayout, build_layout
+from .layout import ROOT_DISTRICT, CityLayout, DistrictLayout, build_layout
 from .metrics import FileMetrics, RepoAnalysis
 
 FORMAT = "zion-city"
@@ -42,6 +42,7 @@ LEGEND_SPEC = [
     ("skybridges", "Files changed in one commit -> skybridges", "pairs"),
     ("new_construction", "First commit within the newest activity window -> scaffolding", "days"),
     ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile"),
+    ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile"),
 ]
 
 
@@ -126,6 +127,29 @@ def _camera(bounds_w: float, bounds_h: float, max_height: float) -> dict:
     }
 
 
+def _subfolders_of(members: list[FileMetrics], district_key: str, depth: int) -> list[dict]:
+    """One level of sub-folder structure below a district's own depth (S13).
+
+    Deliberately not a full recursive re-layout of the treemap -- that risks
+    the plaza reservation and street geometry every district's rect already
+    depends on (see `layout.build_layout`). This is purely additive metadata:
+    the district's own rect, buildings and chunk are completely unchanged: a
+    breakdown of what a district's *files* look like one folder deeper, for
+    the detail window's "sub-folders" section and the inspector's breadcrumb.
+    """
+    own_depth = 0 if district_key == ROOT_DISTRICT else district_key.count("/") + 1
+    groups: dict[str, dict] = {}
+    for record in members:
+        dirs = record.rel.split("/")[:-1]
+        if len(dirs) <= own_depth:
+            continue  # the file sits directly in this district, not deeper
+        name = dirs[own_depth]
+        bucket = groups.setdefault(name, {"name": name, "files": 0, "loc": 0})
+        bucket["files"] += 1
+        bucket["loc"] += record.logical_loc
+    return sorted(groups.values(), key=lambda g: -g["loc"])
+
+
 def build_manifest(
     analysis: RepoAnalysis,
     layout: CityLayout,
@@ -145,6 +169,7 @@ def build_manifest(
         "skybridges": flags.coupling,
         "new_construction": flags.age,
         "heat": flags.churn,
+        "downtown": flags.centrality,
     }
     for entry_id, label, unit in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -168,6 +193,14 @@ def build_manifest(
     for record in analysis.files:
         members_by_district.setdefault(record.district, []).append(record)
 
+    # City-wide mean downtown density, so a district needs the CBD_DENSITY_MULTIPLE
+    # rule imported from metrics.py rather than a magic number duplicated here.
+    from .metrics import CBD_DENSITY_MULTIPLE
+
+    city_downtown_share = (
+        sum(1 for f in analysis.files if f.downtown) / len(analysis.files) if analysis.files else 0.0
+    )
+
     districts = []
     for index, district in enumerate(layout.districts):
         members = members_by_district.get(district.key, [])
@@ -179,6 +212,16 @@ def build_manifest(
                 "id": index,
                 "key": strings.add(district.key),
                 "name": strings.add(district.name),
+                # Ancestor folder names, for a breadcrumb -- "repo / src /
+                # analyzer" -- even though only the leaf is its own district
+                # block (S13's "first version": metadata, not a re-layout).
+                "pathSegments": [strings.add(seg) for seg in district.key.split("/")]
+                if district.key != ROOT_DISTRICT
+                else [],
+                "subfolders": [
+                    {"name": strings.add(g["name"]), "files": g["files"], "loc": g["loc"]}
+                    for g in _subfolders_of(members, district.key, layout.depth)
+                ],
                 "rect": [
                     round(district.rect.x, 3),
                     round(district.rect.y, 3),
@@ -200,6 +243,12 @@ def build_manifest(
                 # relative to the district's own population.
                 "heat": round(sum(f.heat for f in members) / len(members), 4) if members and flags.churn else 0.0,
                 "newFiles": sum(1 for f in members if f.is_new) if flags.age else 0,
+                "isCbd": (
+                    flags.centrality
+                    and bool(members)
+                    and city_downtown_share > 0
+                    and (sum(1 for f in members if f.downtown) / len(members)) >= city_downtown_share * CBD_DENSITY_MULTIPLE
+                ),
                 "skyline": {
                     "maxHeight": round(max(heights), 2),
                     "avgHeight": round(sum(heights) / len(heights), 2),
@@ -390,7 +439,7 @@ FLAG_IS_DOWNTOWN = 1 << 7
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
 # the viewer reads it by name, not by index literal.
-INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat"]
+INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path"]
 
 
 def _ext_for(rel: str) -> str:
@@ -464,6 +513,9 @@ def _building_record(
         "era": record.era,
         "activity": list(record.activity),
         "heat": round(record.heat, 4),
+        "centrality": round(record.centrality, 4),
+        "downtown": record.downtown,
+        "importInDegree": record.import_in_degree,
         "author": strings.add(record.primary_author) if record.primary_author else -1,
         "ownership": round(record.ownership_share, 3),
         "lastMessage": strings.add(record.last_message) if record.last_message else -1,
@@ -513,6 +565,8 @@ def _build_index(
             flags |= FLAG_TOP_CHURN
         if record.is_new:
             flags |= FLAG_IS_NEW
+        if record.downtown:
+            flags |= FLAG_IS_DOWNTOWN
         rows.append(
             [
                 index,
@@ -525,6 +579,7 @@ def _build_index(
                 record.logical_loc,
                 round(record.age_days, 1),
                 round(record.heat, 4),
+                strings.add(record.rel),
             ]
         )
     rows.sort(key=lambda row: row[0])

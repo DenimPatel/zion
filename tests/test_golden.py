@@ -196,6 +196,44 @@ class GoldenCityTests(TempRepoCase):
         # but never in "new", the strictly-younger file's own bucket.
         self.assertNotEqual(by_path["alpha/main.py"]["era"], "new")
 
+    def test_downtown_marks_the_most_imported_file(self):
+        import support
+
+        repo = self.scratch()
+        os.makedirs(os.path.join(repo, "pkg"))
+        with open(os.path.join(repo, "pkg", "__init__.py"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(os.path.join(repo, "pkg", "utils.py"), "w", encoding="utf-8") as fh:
+            fh.write("def helper():\n    return 1\n")
+        with open(os.path.join(repo, "pkg", "a.py"), "w", encoding="utf-8") as fh:
+            fh.write("from pkg import utils\n\n\ndef use_a():\n    return utils.helper()\n")
+        with open(os.path.join(repo, "pkg", "b.py"), "w", encoding="utf-8") as fh:
+            fh.write("from pkg.utils import helper\n\n\ndef use_b():\n    return helper()\n")
+        for name in "cdef":
+            with open(os.path.join(repo, "pkg", f"{name}.py"), "w", encoding="utf-8") as fh:
+                fh.write(f"def {name}_fn():\n    return '{name}'\n")
+
+        support._run(["init", "-q"], repo)
+        support._run(["config", "user.email", "test@example.com"], repo)
+        support._run(["config", "user.name", "Test"], repo)
+        support.git_commit(repo, "initial", date="2024-01-01T10:00:00+00:00")
+
+        analysis, layout, result = self.build_city(repo)
+        manifest = load_manifest(result.out_dir)
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        self.assertTrue(manifest["flags"]["centrality"])
+
+        by_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_path[resolve(strings, building["path"])] = building
+
+        self.assertEqual(by_path["pkg/utils.py"]["importInDegree"], 2)
+        self.assertTrue(by_path["pkg/utils.py"]["downtown"])
+        self.assertFalse(by_path["pkg/c.py"]["downtown"])
+        self.assertFalse(by_path["pkg/a.py"]["downtown"])
+
     def test_include_noise_adds_ruins(self):
         repo = make_repo(self.scratch())
         _analysis, _layout, clean = self.build_city(repo, out_dir=os.path.join(self._tmp, "clean"))
