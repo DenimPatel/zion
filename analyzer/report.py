@@ -10,7 +10,14 @@ Gate conditions (comma-separated):
 
 - ``<signal>``: any file carries it now -- ``cycles``, ``violations``,
   ``hotspots``, ``oversized``, ``orphans``, ``knowledge``, ``untested``,
-  ``drift``;
+  ``drift``, ``defects``, ``rising-hotspots``, ``hubs``, ``clones``,
+  ``hidden-coupling``, ``debt``, ``zone-of-pain`` (a folder in it);
+- ``budgets``: a file is over a numeric budget from the rules file
+  (``.zion/rules.json`` / ``zion.rules.json``, read only)::
+
+      {"budgets": {"max_file_loc": 800, "max_function_cx": 20,
+                   "max_fanout": 15, "max_import_depth": 8}}
+
 - ``<signal>-up``: the repository-wide total rose against the baseline;
 - ``new-<signal>``: at least one file gained it since the baseline
   (``new-hotspot``, ``new-cycle``, ``new-violation``, ``new-untested`` ...).
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import os
 
+from .architecture import load_rules
 from .history import totals
 
 TOTAL_KEYS = {
@@ -35,14 +43,54 @@ TOTAL_KEYS = {
     "knowledge": "knowledge",
     "untested": "untested",
     "drift": "drift",
+    "defects": "defects", "defect": "defects",
+    "rising": "rising", "rising-hotspot": "rising", "rising-hotspots": "rising",
+    "hubs": "hubs", "hub": "hubs",
+    "clones": "clones", "clone": "clones",
+    "hidden-coupling": "hiddenCoupling", "hiddencoupling": "hiddenCoupling",
+    "debt": "debt",
+    "zone-of-pain": "zonePain", "pain": "zonePain",
+}
+# Budget keys a rules file may set, and how each is measured on a file.
+BUDGETS = {
+    "max_file_loc": ("logical lines", lambda f: f.logical_loc),
+    "max_function_cx": ("decision points in one definition", lambda f: max(f.max_complexity, f.brace_complexity)),
+    "max_fanout": ("resolved imports", lambda f: len(f.imports_resolved)),
+    "max_import_depth": ("import depth", lambda f: f.import_depth),
 }
 SIGNAL_ALIASES = {
     "hotspot": "hotspot", "hotspots": "hotspot", "cycle": "cycle", "cycles": "cycle",
     "violation": "violation", "violations": "violation", "oversized": "oversized",
     "orphan": "orphan", "orphans": "orphan", "knowledge": "knowledge", "untested": "untested",
     "drift": "drift",
+    "defect": "defect", "defects": "defect", "rising": "rising", "rising-hotspot": "rising",
+    "hub": "hub", "hubs": "hub", "clone": "clone", "clones": "clone",
+    "hidden-coupling": "hiddencoupling", "hiddencoupling": "hiddencoupling",
 }
 LIST_LIMIT = 15
+
+
+def over_budget(analysis) -> tuple[dict, list[dict], str]:
+    """(budgets, files over them, error) from the repository's rules file."""
+    from .health import is_vendored
+
+    data, _path, error = load_rules(analysis.root)
+    raw = (data or {}).get("budgets") or {}
+    budgets = {k: int(v) for k, v in raw.items() if k in BUDGETS and isinstance(v, (int, float)) and v > 0}
+    unknown = sorted(k for k in raw if k not in BUDGETS)
+    if unknown and not error:
+        error = f"unknown budget(s): {', '.join(unknown)}"
+    over = []
+    for record in analysis.files:
+        if record.is_binary or record.rows is not None or is_vendored(record.rel):
+            continue
+        for key, limit in budgets.items():
+            label, measure = BUDGETS[key]
+            value = measure(record)
+            if value > limit:
+                over.append({"path": record.rel, "budget": key, "what": label, "value": value, "limit": limit})
+    over.sort(key=lambda o: (-(o["value"] / max(1, o["limit"])), o["path"]))
+    return budgets, over, error
 
 
 def _pct(value: float) -> str:
@@ -80,7 +128,14 @@ def build_report(analysis, layout, delta: dict | None = None) -> dict:
             "hotspots": district.hotspots,
             "tested": f"{sum(1 for f in code if f.is_tested)}/{len(code)}" if code else "",
             "experts": [a for a, _ in sorted(scores.items(), key=lambda kv: -kv[1])[:3]] if flags.authorship else [],
+            "abstractness": deps.abstractness if deps else None,
+            "distance": deps.distance if deps else None,
+            "zone": deps.zone if deps else "",
+            "recentAuthors": deps.recent_authors if deps else 0,
+            "crossShare": deps.cross_share if deps else 0.0,
+            "manyCooks": bool(deps and deps.many_cooks),
         })
+    budgets, over, budget_error = over_budget(analysis)
 
     report = {
         "repo": os.path.basename(os.path.abspath(analysis.root)) or analysis.root,
@@ -126,6 +181,31 @@ def build_report(analysis, layout, delta: dict | None = None) -> dict:
         "coupling": [
             {"a": a, "b": b, "pairs": n, "commits": c} for a, b, n, c in (arch.coupling if arch is not None else [])
         ],
+        "defects": [
+            {"path": f.rel, "fixes": f.fix_commits, "commits": f.commits, "ratio": f.fix_ratio}
+            for f in top(lambda f: f.is_defect, lambda f: (-f.fix_ratio, -f.fix_commits, f.rel))
+        ] if flags.defects else [],
+        "rising": [
+            {"path": f.rel, "rank": f.hotspot_rank} for f in top(lambda f: f.is_rising_hotspot, lambda f: (f.hotspot_rank, f.rel))
+        ] if flags.trend else [],
+        "hubs": [
+            {"path": f.rel, "fanIn": f.import_in_degree, "fanOut": len(f.imports_resolved), "depth": f.import_depth}
+            for f in top(lambda f: f.is_hub, lambda f: (-(f.import_in_degree + len(f.imports_resolved)), f.rel))
+        ],
+        "clones": [
+            {"a": a, "b": b, "shared": ratio, "fingerprints": n} for a, b, ratio, n in analysis.clones[:LIST_LIMIT]
+        ],
+        "hiddenCoupling": [
+            {"a": a, "b": b, "commits": n} for a, b, n in analysis.hidden_couplings[:LIST_LIMIT]
+        ],
+        "debt": [
+            {"path": f.rel, "markers": len(f.debt), "first": f"{f.debt[0][1]} line {f.debt[0][0]}: {f.debt[0][2]}"}
+            for f in top(lambda f: bool(f.debt), lambda f: (-len(f.debt), f.rel))
+        ] if flags.debt else [],
+        "budgets": budgets,
+        "overBudget": over[: LIST_LIMIT * 2],
+        "overBudgetCount": len(over),
+        "budgetError": budget_error,
         "districtTable": sorted(districts, key=lambda d: (-(d["ca"] + d["ce"]), d["folder"])),
         "delta": None,
     }
@@ -153,6 +233,16 @@ def evaluate_gates(report: dict, conditions: list[str]) -> tuple[list[str], list
     for raw in conditions:
         cond = raw.strip().lower()
         if not cond:
+            continue
+        if cond in ("budgets", "budget"):
+            if not report.get("budgets"):
+                skipped.append(f"{raw}: no budgets in the rules file (.zion/rules.json or zion.rules.json)")
+            elif report.get("overBudgetCount"):
+                first = report["overBudget"][0]
+                failures.append(
+                    f"{raw}: {report['overBudgetCount']} over budget, e.g. {first['path']} has "
+                    f"{first['value']} {first['what']} (limit {first['limit']})"
+                )
             continue
         if cond.startswith("new-"):
             signal = SIGNAL_ALIASES.get(cond[4:])
@@ -194,7 +284,10 @@ def render_markdown(report: dict) -> str:
     for key, label in (
         ("hotspots", "Hotspots"), ("oversized", "Oversized files"), ("cycles", "Import cycles"),
         ("violations", "Layering violations"), ("untested", "Untested risky files"), ("knowledge", "Knowledge risks"),
-        ("orphans", "Possible dead code"), ("drift", "CODEOWNERS drift"), ("files", "Files"), ("loc", "Logical lines"),
+        ("orphans", "Possible dead code"), ("drift", "CODEOWNERS drift"), ("defects", "Defect-prone files"),
+        ("rising", "Rising hotspots"), ("hubs", "Hubs"), ("clones", "Clone pairs"),
+        ("hiddenCoupling", "Hidden coupling pairs"), ("debt", "Debt markers"), ("zonePain", "Folders in the zone of pain"),
+        ("files", "Files"), ("loc", "Logical lines"),
     ):
         row = f"| {label} | {t.get(key, 0):,} |"
         if report["delta"]:
@@ -248,18 +341,41 @@ def render_markdown(report: dict) -> str:
         section("CODEOWNERS drift", report["drift"],
                 lambda d: f"`{d['path']}` — declared {', '.join(d['declared'])}, written by {d['actual']}")
     section("Possible dead code", report["orphans"], lambda p: f"`{p}`")
+    section("Defect-prone files (share of fix commits)", report["defects"],
+            lambda d: f"`{d['path']}` — {d['fixes']} of {d['commits']} commits are fixes ({_pct(d['ratio'])})",
+            "Disabled: too few commit subjects read as fixes." if not flags.get("defects") else "None found.")
+    section("Rising hotspots (busier this quarter than the last)", report["rising"],
+            lambda r: f"#{r['rank']} `{r['path']}`",
+            "Disabled: needs 10+ commits over five months." if not flags.get("trend") else "None found.")
+    section("Hubs (top tenth of both importers and imports)", report["hubs"],
+            lambda h: f"`{h['path']}` — imported by {h['fanIn']}, imports {h['fanOut']}, depth {h['depth']}")
+    section("Copied code (clone twins)", report["clones"],
+            lambda c: f"`{c['a']}` ≈ `{c['b']}` — {_pct(c['shared'])} of the smaller file's fingerprints shared")
+    section("Hidden coupling (change together, no import)", report["hiddenCoupling"],
+            lambda h: f"`{h['a']}` ↔ `{h['b']}` — {h['commits']} shared commits",
+            "Disabled: too little history or no resolved imports." if not flags.get("coupling") else "None found.")
+    section("Written-down debt (TODO / FIXME / HACK)", report["debt"],
+            lambda d: f"`{d['path']}` — {d['markers']} marker(s); {d['first']}")
+    if report.get("budgets") or report.get("budgetError"):
+        limits = ", ".join(f"{k} {v}" for k, v in report["budgets"].items())
+        section(f"Over budget ({limits or 'no valid budgets'})", report["overBudget"],
+                lambda o: f"`{o['path']}` — {o['value']} {o['what']} (limit {o['limit']})",
+                report.get("budgetError") or "Every file is within budget.")
     section("Folders that change together", report["coupling"],
             lambda c: f"`{c['a']}` ↔ `{c['b']}` — {c['pairs']} file pairs, {c['commits']} shared commits",
             "Disabled: too little history." if not flags.get("coupling") else "None found.")
 
     add("## Folders")
     add("")
-    add("| Folder | Files | Lines | Ca | Ce | Instability | Violations | Bus factor | Tested | Ask |")
-    add("|---|---|---|---|---|---|---|---|---|---|")
+    add("| Folder | Files | Lines | Ca | Ce | Instability | A | D | Violations | Bus factor | Recent people | Tested | Ask |")
+    add("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for d in report["districtTable"]:
         inst = "—" if d["instability"] is None else f"{d['instability']:.2f}"
-        add(f"| `{d['folder']}` | {d['files']} | {d['loc']:,} | {d['ca']} | {d['ce']} | {inst} | {d['violations']} | "
-            f"{d['busFactor']} | {d['tested'] or '—'} | {', '.join(d['experts']) or '—'} |")
+        a = "—" if d.get("abstractness") is None else f"{d['abstractness']:.2f}"
+        dist = "—" if d.get("distance") is None else f"{d['distance']:.2f}" + (f" ({d['zone']})" if d.get("zone") else "")
+        people = str(d.get("recentAuthors", 0)) + (" (many cooks)" if d.get("manyCooks") else "")
+        add(f"| `{d['folder']}` | {d['files']} | {d['loc']:,} | {d['ca']} | {d['ce']} | {inst} | {a} | {dist} | "
+            f"{d['violations']} | {d['busFactor']} | {people} | {d['tested'] or '—'} | {', '.join(d['experts']) or '—'} |")
     add("")
     if report["notes"]:
         add("## Notes")

@@ -409,7 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="compare against a summary.json written by an earlier build")
     p_report.add_argument("--fail-on", default="", metavar="LIST",
                           help="exit 1 when any condition holds: cycles, violations, hotspots, untested, drift, "
-                               "<signal>-up, new-<signal> (comma-separated)")
+                               "defects, rising-hotspots, hubs, clones, hidden-coupling, debt, zone-of-pain, "
+                               "budgets (from zion.rules.json), <signal>-up, new-<signal> (comma-separated)")
     p_report.set_defaults(func=cmd_report)
 
     p_bench = sub.add_parser("bench", help="synthetic scale benchmark")

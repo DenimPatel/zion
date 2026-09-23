@@ -302,6 +302,43 @@ class DeeperSignalTests(TempRepoCase):
         self.assertFalse(solo.many_cooks)
         self.assertTrue(analysis.flags.teams)
 
+    def test_gates_and_budgets(self):
+        from analyzer.report import build_report, evaluate_gates, render_markdown
+
+        repo = self.scratch()
+        _init(repo)
+        _write(repo, "lib/__init__.py", "")
+        big = "def big(v):\n" + "".join(f"    v = v * {i} + {i}\n" for i in range(60)) + "    return v\n"
+        _write(repo, "lib/big.py", big + "# TODO: split this module\n")
+        _write(repo, "lib/small.py", _body("small", 3))
+        _write(repo, "zion.rules.json", '{"budgets": {"max_file_loc": 40, "max_fanout": 5, "bogus": 1}}')
+        git_commit(repo, "initial")
+        analysis, layout, _result = self.build_city(repo, district_depth=1)
+        report = build_report(analysis, layout)
+        self.assertEqual(report["budgets"], {"max_file_loc": 40, "max_fanout": 5})
+        self.assertIn("bogus", report["budgetError"])
+        self.assertEqual([o["path"] for o in report["overBudget"]], ["lib/big.py"])
+        failures, skipped = evaluate_gates(report, ["budgets", "debt", "hubs", "zone-of-pain"])
+        self.assertEqual(len(failures), 2, failures)  # budgets and debt
+        self.assertTrue(any(f.startswith("budgets:") for f in failures))
+        self.assertTrue(any(f.startswith("debt:") for f in failures))
+        text = render_markdown(report)
+        for heading in ("Over budget", "Written-down debt", "Hubs", "Copied code", "Hidden coupling"):
+            self.assertIn(heading, text)
+
+    def test_old_baseline_does_not_report_new_signals_as_gained(self):
+        from analyzer import history
+
+        analysis, _layout, _result = self.build_city(self._history_repo(), district_depth=1)
+        summary = history.summarize(analysis)
+        # A summary written before the defect/rising/hub/clone signals existed.
+        old_names = summary["signals"][:8]
+        summary["signals"] = old_names
+        summary["files"] = {k: [loc, bits & 0xFF] for k, (loc, bits) in summary["files"].items()}
+        delta = history.apply_delta(analysis, summary)
+        self.assertFalse(delta["became"].get("defect"))
+        self.assertTrue(any(f.is_defect for f in analysis.files))
+
     def test_encrypted_build_leaks_no_debt_text(self):
         repo = self.scratch()
         _init(repo)
