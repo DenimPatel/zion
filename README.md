@@ -50,6 +50,14 @@ Everything in the city is one of these, and nothing is decoration.
 | decision points per function/class (exact for Python, heuristic elsewhere) | floor complexity, shown in the detail report |
 | a `__main__` guard or a function named `main`/`run` | a ⭐ next to that floor in the detail report |
 
+The **Keys** panel lists the eight building forms. Each row is a switch: click it
+(or focus it and press `Enter`) to hide every building of that form, so the city
+can be read one archetype at a time — ruins only, or ruins and silos — while the
+district plates and streets stay for context. *Show every form* restores them
+all. The filter is applied when the city is built, so a hidden form takes its
+rooftop clutter and its collision box with it and cannot be hovered or walked
+into.
+
 ### Why height is never bytes on disk
 
 Because bytes on disk lie about code, in both directions.
@@ -120,7 +128,7 @@ that one is the repository root in each case.
 | `T` | guided tour: one continuous route, holding at each district with a caption |
 | `N` | skip to the next stop during the tour |
 | `C` | City Hall |
-| `L` | hide the legend |
+| `L` | toggle the legend and keys (same as the title-bar button) |
 | drag | look around (the cursor stays visible) |
 | click | inspect the building you are pointing at |
 | `F` | capture the mouse for continuous flying (crosshair appears); `Esc` releases |

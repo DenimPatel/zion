@@ -52,7 +52,12 @@ html, body {
   grid-column: 1 / 3;
   grid-row: 1;
   align-self: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
 }
+#titlebar-text { min-width: 0; }
 #titlebar h1 {
   margin: 0;
   font-size: 20px;
@@ -64,6 +69,40 @@ html, body {
   font-family: var(--mono);
   font-size: 11.5px;
 }
+
+/* The legend and the key table are reference material, not context, so they can
+   be dismissed. The button owns that (the same toggle as `L`); a dark surface
+   keeps it legible over bright geometry instead of dissolving into the city. */
+#panels-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  background: var(--panel-solid);
+  color: var(--ink-dim);
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+#panels-toggle::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px rgba(255, 179, 71, 0.7);
+}
+#panels-toggle:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#panels-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#panels-toggle[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+#panels-toggle[aria-pressed="true"]::before { background: #64748b; box-shadow: none; }
 
 /* ---------- panels ---------- */
 section, footer#controls {
@@ -199,6 +238,43 @@ h2 {
 #xray-table td { padding: 2px 0 2px 9px; }
 #xray-table td:first-child { padding-left: 0; color: var(--ink-dim); }
 /*
+ * Each key is its own switch: a row is a button that hides every building of
+ * that form, so the city can be read one archetype at a time (ruins only, or
+ * ruins and silos) without hiding the district plates that give it context.
+ */
+#xray-table tr.key-row { cursor: pointer; }
+#xray-table tr.key-row td { padding-top: 3px; padding-bottom: 3px; }
+#xray-table tr.key-row:hover td { background: rgba(255, 179, 71, 0.12); }
+#xray-table tr.key-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#xray-table tr.key-row:focus-visible td { background: rgba(255, 179, 71, 0.16); }
+#xray-table tr.key-row.off td { color: #64748b; }
+#xray-table tr.key-row.off .key-state { background: transparent; border-color: #64748b; }
+#xray-table tr.key-row.off .chip { opacity: 0.35; }
+.key-state {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  vertical-align: -1px;
+}
+#xray-reset {
+  margin-top: 8px;
+  padding: 4px 9px;
+  background: var(--panel-solid);
+  color: var(--ink-dim);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+#xray-reset:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#xray-reset[hidden] { display: none; }
+#xray-hint { margin: 8px 0 0; }
+/*
  * The chip is the building's own colour, so the fill cannot be brightened to
  * make it show up -- a legend that lies about the colour is worse than a dim
  * one. `ruin` (#4a4d55) is at 2.1:1 against this panel, under the 3:1 floor
@@ -241,7 +317,8 @@ kbd {
   margin-right: 1px;
   color: var(--ink);
 }
-body.legend-hidden #legend { display: none; }
+body.panels-hidden #legend,
+body.panels-hidden #xray { display: none; }
 
 /* ---------- loading ---------- */
 #loading {

@@ -50,6 +50,10 @@ const state = {
   maxResident: Number(params.get('maxres')) || null,
   shadows: params.get('shadows') !== '0',
   filterText: '',
+  // Archetypes the user has switched off in the Keys panel. Empty means the
+  // whole repository is on screen, which is the default and the only state a
+  // benchmark or self-test ever sees.
+  hiddenArchetypes: new Set(),
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -144,17 +148,113 @@ function renderXray() {
   table.innerHTML = '';
   for (const [name, colour] of Object.entries(ARCHETYPE_COLORS)) {
     const row = document.createElement('tr');
+    row.className = 'key-row';
+    row.dataset.archetype = name;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+
+    const stateCell = document.createElement('td');
+    const box = document.createElement('span');
+    box.className = 'key-state';
+    box.setAttribute('aria-hidden', 'true');
+    stateCell.append(box);
+
     const label = document.createElement('td');
     label.textContent = archetypeLabel(name);
+
     const chipCell = document.createElement('td');
     const chip = document.createElement('span');
     chip.className = 'chip';
     chip.style.background = `#${colour.toString(16).padStart(6, '0')}`;
     chipCell.append(chip);
-    row.append(label, chipCell);
+
+    row.append(stateCell, label, chipCell);
     table.append(row);
   }
+  syncKeyRows();
 }
+
+/** Reflect the current filter on every key row and the reset control. */
+function syncKeyRows() {
+  const table = document.getElementById('xray-table');
+  if (!table) return;
+  for (const row of table.querySelectorAll('tr.key-row')) {
+    const name = row.dataset.archetype;
+    const hidden = state.hiddenArchetypes.has(name);
+    row.classList.toggle('off', hidden);
+    row.setAttribute('aria-pressed', String(!hidden));
+    row.title = `${hidden ? 'Show' : 'Hide'} ${archetypeLabel(name)}`;
+  }
+  const reset = document.getElementById('xray-reset');
+  if (reset) reset.hidden = state.hiddenArchetypes.size === 0;
+}
+
+/**
+ * Switch one archetype on or off.
+ *
+ * The city is rebuilt from the resident set with the hidden forms dropped, so
+ * the change reaches everything at once -- the massing, the rooftop clutter,
+ * the walk-mode collision, hover and click -- rather than leaving invisible
+ * walls or tanks floating over a building that is no longer drawn.
+ */
+function toggleArchetype(name) {
+  if (!name) return;
+  if (state.hiddenArchetypes.has(name)) state.hiddenArchetypes.delete(name);
+  else state.hiddenArchetypes.add(name);
+  syncKeyRows();
+  scheduleRebuild();
+}
+
+let rebuildScheduled = false;
+
+/** Coalesce rapid key clicks into one rebuild on the next frame. */
+function scheduleRebuild() {
+  if (rebuildScheduled || !context.city) return;
+  rebuildScheduled = true;
+  requestAnimationFrame(() => {
+    rebuildScheduled = false;
+    if (context.city) rebuildCity(context.resident);
+  });
+}
+
+function resetArchetypes() {
+  state.hiddenArchetypes.clear();
+  syncKeyRows();
+  scheduleRebuild();
+}
+
+function setPanelsHidden(hidden) {
+  document.body.classList.toggle('panels-hidden', hidden);
+  const button = document.getElementById('panels-toggle');
+  if (!button) return;
+  button.setAttribute('aria-pressed', String(hidden));
+  const label = document.getElementById('panels-toggle-label');
+  if (label) label.textContent = hidden ? 'Show legend & keys' : 'Hide legend & keys';
+}
+
+function togglePanels() {
+  setPanelsHidden(!document.body.classList.contains('panels-hidden'));
+}
+
+document.getElementById('panels-toggle').addEventListener('click', togglePanels);
+
+// A key row is the whole switch, so the label, the state box and the colour
+// chip all act on the same archetype. Stop propagation on the keyboard path:
+// Enter would otherwise also reach the global handler and enter a building.
+const xrayTable = document.getElementById('xray-table');
+xrayTable.addEventListener('click', (event) => {
+  const row = event.target.closest('tr.key-row');
+  if (row) toggleArchetype(row.dataset.archetype);
+});
+xrayTable.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest('tr.key-row');
+  if (!row) return;
+  event.preventDefault();
+  event.stopPropagation();
+  toggleArchetype(row.dataset.archetype);
+});
+document.getElementById('xray-reset').addEventListener('click', resetArchetypes);
 
 function renderTitle() {
   const manifest = state.source.manifest;
@@ -205,14 +305,26 @@ function disposeGroup(group) {
 function rebuildCity(buildings) {
   const previous = context.city;
   const mesh = new CityMesh(THREE, state.source);
-  mesh.build(buildings, {
+  // The Keys panel filters at build time rather than by hiding meshes: one
+  // instanced mesh holds a whole archetype, so dropping the form here also
+  // drops its rooftop clutter and its collision box, and nothing invisible
+  // survives to be hovered or walked into.
+  const shown = state.hiddenArchetypes.size
+    ? buildings.filter((b) => !state.hiddenArchetypes.has(b.archetype || 'warehouse'))
+    : buildings;
+  mesh.build(shown, {
     cameraXZ: { x: camera.position.x, z: camera.position.z },
   });
   // Stand-in massing for districts that are not resident, so streaming does not
-  // leave a hard edge at the horizon.
+  // leave a hard edge at the horizon. Impostors have no archetype of their own,
+  // so under a filter they would draw every form back into the distance; hide
+  // them while one is active so "ruins only" means ruins only.
   const residentIds = new Set(context.streamer ? context.streamer.resident.keys() : []);
   const impostors = createImpostors(THREE, state.source.manifest, residentIds);
-  if (impostors) mesh.group.add(impostors);
+  if (impostors) {
+    impostors.visible = state.hiddenArchetypes.size === 0;
+    mesh.group.add(impostors);
+  }
   scene.add(mesh.group);
   if (previous) {
     scene.remove(previous.group);
@@ -222,7 +334,7 @@ function rebuildCity(buildings) {
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
 
-  context.grid = new CollisionGrid(buildings);
+  context.grid = new CollisionGrid(shown);
   if (context.hall) context.grid.addBox(context.hall.userData.box);
   if (context.walk) context.walk.grid = context.grid;
   applyTime();
@@ -1048,7 +1160,7 @@ window.addEventListener('keydown', async (event) => {
       document.body.classList.toggle('hall-open', context.cityHall.open);
       break;
     case 'KeyL':
-      document.body.classList.toggle('legend-hidden');
+      togglePanels();
       break;
     case 'KeyF':
       setCapture(!pointerLocked());
