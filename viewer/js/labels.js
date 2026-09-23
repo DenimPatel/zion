@@ -10,7 +10,10 @@
  *
  * DOM rather than sprites, because text drawn into a texture blurs at every
  * distance but one, and the label count is capped so the page never lays out
- * thousands of elements. Updated at ~10 Hz rather than every frame.
+ * thousands of elements. Which labels are shown is re-decided at ~10 Hz, but
+ * the chosen ones are re-projected every frame: at 10 Hz a fast fly-through
+ * left the names stepping behind the buildings they sit on, which read as
+ * jitter.
  */
 
 const MAX_LABELS = 48;
@@ -22,6 +25,7 @@ export class MapLabels {
     this.camera = camera;
     this.items = [];
     this.pool = [];
+    this.active = [];
     this.lastUpdate = 0;
     this.enabled = true;
     this.span = 1000;
@@ -34,12 +38,16 @@ export class MapLabels {
   setItems(items, span) {
     this.items = items;
     this.span = Math.max(200, span || 1000);
+    this.active = [];
     this.lastUpdate = 0;
   }
 
   setEnabled(enabled) {
     this.enabled = enabled;
-    if (!enabled) for (const el of this.pool) el.hidden = true;
+    if (!enabled) {
+      this.active = [];
+      for (const el of this.pool) el.hidden = true;
+    }
   }
 
   /** How close the camera must be before an item of this depth is named. */
@@ -52,10 +60,23 @@ export class MapLabels {
   }
 
   update(now, width, height) {
-    if (!this.enabled || now - this.lastUpdate < UPDATE_MS) return;
-    this.lastUpdate = now;
+    if (!this.enabled) return;
+    // Deciding *which* labels are shown is the costly part (sorting, collision,
+    // text and class writes), and folder names do not change meaning over a
+    // few metres, so it stays at ~10 Hz. Their *positions*, though, follow the
+    // camera every frame -- otherwise a fast fly-through leaves the names
+    // stepping behind the buildings they sit on.
+    if (now - this.lastUpdate >= UPDATE_MS) {
+      this.lastUpdate = now;
+      this.choose(width, height);
+    }
+    this.place(width, height);
+  }
+
+  /** Rebuild the visible set: distance, culling, collisions, text and class. */
+  choose(width, height) {
     const camera = this.camera;
-    const THREE_VECTOR = this._v || (this._v = { x: 0, y: 0, z: 0 });
+    const v = this._v || (this._v = { x: 0, y: 0, z: 0 });
     const visible = [];
     for (const item of this.items) {
       const dx = item.x - camera.position.x;
@@ -63,9 +84,9 @@ export class MapLabels {
       const dy = (item.y || 0) - camera.position.y;
       const distance = Math.sqrt(dx * dx + dz * dz + dy * dy);
       if (distance > this.reach(item)) continue;
-      const p = project(camera, item.x, item.y || 0, item.z, THREE_VECTOR);
+      const p = project(camera, item.x, item.y || 0, item.z, v);
       if (!p || p.x < -0.1 || p.x > 1.1 || p.y < -0.1 || p.y > 1.1) continue;
-      visible.push({ item, distance, sx: p.x * width, sy: p.y * height });
+      visible.push({ item, distance });
     }
     // Shallow folders first; among regions of one level the bigger borough
     // wins a collision (its name says more about the map), among blocks the
@@ -78,21 +99,47 @@ export class MapLabels {
       return a.distance - b.distance;
     });
     const placed = [];
+    const active = [];
     let used = 0;
     for (const entry of visible) {
       if (used >= MAX_LABELS) break;
+      const p = project(camera, entry.item.x, entry.item.y || 0, entry.item.z, v);
+      if (!p) continue;
+      const sx = p.x * width;
+      const sy = p.y * height;
       // Skip a label that would sit on top of one already placed.
       const w = Math.min(220, 8 + entry.item.text.length * 7.5);
-      const box = { x0: entry.sx - w / 2, x1: entry.sx + w / 2, y0: entry.sy - 11, y1: entry.sy + 11 };
+      const box = { x0: sx - w / 2, x1: sx + w / 2, y0: sy - 11, y1: sy + 11 };
       if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
       placed.push(box);
       const el = this.element(used++);
-      el.textContent = entry.item.text;
-      el.className = `map-label ${entry.item.kind} level-${Math.min(3, entry.item.level || 0)}`;
-      el.style.transform = `translate(${Math.round(entry.sx)}px, ${Math.round(entry.sy)}px) translate(-50%, -50%)`;
+      if (el.textContent !== entry.item.text) el.textContent = entry.item.text;
+      const cls = `map-label ${entry.item.kind} level-${Math.min(3, entry.item.level || 0)}`;
+      if (el.className !== cls) el.className = cls;
       el.hidden = false;
+      active.push({ item: entry.item, el });
     }
     for (let i = used; i < this.pool.length; i++) this.pool[i].hidden = true;
+    this.active = active;
+  }
+
+  /** Weld the chosen labels to their world points, once per rendered frame. */
+  place(width, height) {
+    const camera = this.camera;
+    const v = this._v || (this._v = { x: 0, y: 0, z: 0 });
+    for (const entry of this.active) {
+      const item = entry.item;
+      const p = project(camera, item.x, item.y || 0, item.z, v);
+      if (!p || p.x < -0.1 || p.x > 1.1 || p.y < -0.1 || p.y > 1.1) {
+        entry.el.hidden = true;
+        continue;
+      }
+      entry.el.hidden = false;
+      // Subpixel, not rounded: integer steps are what made a moving label
+      // shiver even when its anchor had not moved a whole pixel.
+      entry.el.style.transform =
+        `translate(${p.x * width}px, ${p.y * height}px) translate(-50%, -50%)`;
+    }
   }
 
   element(index) {
