@@ -50,13 +50,22 @@ Everything in the city is one of these, and nothing is decoration.
 | decision points per function/class (exact for Python, heuristic elsewhere) | floor complexity, shown in the detail report |
 | a `__main__` guard or a function named `main`/`run` | a ⭐ next to that floor in the detail report |
 
-The **Keys** panel lists the eight building forms. Each row is a switch: click it
-(or focus it and press `Enter`) to hide every building of that form, so the city
-can be read one archetype at a time — ruins only, or ruins and silos — while the
-district plates and streets stay for context. *Show every form* restores them
-all. The filter is applied when the city is built, so a hidden form takes its
-rooftop clutter and its collision box with it and cannot be hovered or walked
-into.
+The **Keys** panel is the legend, made switchable. Its *Signals* group lists every
+entry the analyzer emitted — height, footprint, floors, district area, author
+tint, cranes, weathering, lit windows, town halls, parks, silos, monuments,
+changes together with, scaffolding, rooftop beacons, downtown towers, corner
+flags — and its *Forms* group lists the building forms the legend does not name
+(tower, slab, warehouse, ruin). Every row with a layer of its own is a switch:
+click it (or focus it and press `Enter`) to hide that layer, so the city can be
+read one signal at a time — cranes only, or ruins and silos — while the district
+plates and streets stay for context. A form is dropped when the city is built, so
+it takes its rooftop clutter and its collision box with it and cannot be hovered
+or walked into; a prop cluster (cranes, beacons, scaffolding, corner flags) is its
+own instanced mesh and is simply hidden; an encoding baked into the buildings —
+author tint, weathering, lit windows, downtown glass — rebuilds the city with that
+option off. The five entries that are pure encodings or live in the detail report
+are listed but inert, because there is no separate layer to switch, and the row
+says so rather than pretending otherwise. *Show every layer* restores them all.
 
 ### Why height is never bytes on disk
 
@@ -269,14 +278,14 @@ and the seed that decides the roofline — ride in the instance matrix, the
 instance colour, and six instanced attributes.
 
 **Detail does not grow them either.** Buildings are unique in three ways, none
-of which costs a call. Each archetype has its own massing (`viewer/js/shapes.js`)
-— podium, shaft, setback, crown — and the vertex shader moves the ornament of
-that massing per instance, so a district of towers is a skyline rather than a
-comb. Each wall is computed per fragment from the building's own metrics
-(`viewer/js/facade.js`) rather than sampled from one shared bitmap, so window
-rows *are* the floors the parser found: a three-function module gets three rows
-and a forty-class one gets forty. And the whole city's rooftop plant, tanks and
-masts are a single extra instanced cluster.
+of which costs a call. Each archetype has its own massing (`viewer/js/shapes.js`,
+its assemblies under `viewer/js/parts/`) — podium, shaft, setback, crown — and
+the vertex shader moves the ornament of that massing per instance, so a district
+of towers is a skyline rather than a comb. Each wall is computed per fragment from
+the building's own metrics (`viewer/js/facade.js`) rather than sampled from one
+shared bitmap, so window rows *are* the floors the parser found: a three-function
+module gets three rows and a forty-class one gets forty. And the whole city's
+rooftop plant, tanks and masts are a single extra instanced cluster.
 
 The facade antialiases itself with screen-space derivatives, dissolving into the
 average it would have integrated to once a window cell drops below a pixel —
@@ -429,7 +438,7 @@ because "it renders" is not the same as "it works":
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-which returns `ZION_SELFTEST {…}` containing 40 checks: walk gravity (simulated
+which returns `ZION_SELFTEST {…}` containing 47 checks: walk gravity (simulated
 until the player actually comes to rest on a surface), a collision test that
 drives the player into a building and asserts they stop outside it, drag-to-look
 rotating the camera without capturing the pointer or opening the inspector, a
@@ -437,14 +446,17 @@ click on a building's projected position opening it, hover reporting the same
 building that the click then acts on, interior floors and source, an interior
 wall texture confirmed to contain rendered text, City Hall's clickable rows,
 teleport, the tour and its caption, hover/click agreement, district hover and
-district click, the tour's dwell share and district highlight, and the draw-call
+district click, the tour's dwell share and district highlight, the Keys panel
+covering every legend entry with its switches actually reaching the geometry, and
+that the level of detail follows the camera (fly past the LOD radius and the
+nearest building must be in the near tier, not a far-tier box), and the draw-call
 budget.
 
 `--enable-unsafe-swiftshader` is required. Without it, headless Chrome reports
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.
 
 **The HUD itself** needs eyes, not assertions: contrast is the one property none
-of those 40 checks measures. Chrome's `--screenshot` flag cannot capture this
+of those 47 checks measures. Chrome's `--screenshot` flag cannot capture this
 viewer at all — the frame loop never lets `--virtual-time-budget` expire, so the
 process hangs — so `tests/capture.py` drives Chrome over the DevTools Protocol,
 waits on wall-clock time, and runs a snippet before capturing (opening the

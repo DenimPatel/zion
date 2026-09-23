@@ -28,7 +28,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (40 interactive checks, dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (47 interactive checks, dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -71,12 +71,15 @@ for `stats`/`build`/`serve`/`bench`.
 **Viewer (`viewer/js/`, no framework):** `main.js` is the entry point/orchestrator; `loader.js`/`stream.js`
 handle fetching and camera-centred chunk streaming (bounded by radius then building count); `city.js`
 builds the instanced meshes (one `InstancedMesh` per archetype per LOD tier — draw calls don't scale with
-building count); `shapes.js` defines per-archetype massing (podium/shaft/setback/crown), `facade.js` renders
-windows per-fragment from a building's own metrics (not a shared texture) so window rows equal parsed
-floor counts; `interior.js` builds/destroys building interiors on enter/leave (max 2 cached), slicing source
-by byte offset so displayed text matches exactly what was measured; `cityhall/`, `tour.js`, `cameras.js`,
-`collision.js`, `inspector.js`, `sky.js` are self-explanatory; `vault.js` handles client-side WebCrypto
-decryption of encrypted cities.
+building count); `shapes.js` is the registry of unit-normalised geometry, built from the shared
+`primitives.js` kit and, for anything elaborate, an assembly under `viewer/js/parts/` (`massing.js`,
+`civic.js`, `construction.js`, `parks.js`, `beacons.js`) — every form is a unit-space geometry with
+podium/shaft/setback/crown part tags, so layout, collision and picking never learn which file it came
+from; `facade.js` renders windows per-fragment from a building's own metrics (not a shared texture) so
+window rows equal parsed floor counts; `interior.js` builds/destroys building interiors on enter/leave
+(max 2 cached), slicing source by byte offset so displayed text matches exactly what was measured;
+`cityhall/`, `tour.js`, `cameras.js`, `collision.js`, `inspector.js`, `sky.js` are self-explanatory;
+`vault.js` handles client-side WebCrypto decryption of encrypted cities.
 
 ## Key invariants to preserve
 
@@ -86,6 +89,20 @@ decryption of encrypted cities.
 - Degeneration rules in `metrics.py` must stay in sync with what `layout.py`/the viewer actually disable —
   a legend entry that is turned off must also stop rendering the related geometry (e.g. no cranes without
   churn eligibility).
+- Level of detail is a function of the camera, not only of the resident working set. `refreshResident`
+  in `viewer/js/main.js` must rebuild when the camera travels a fraction of `city.lodRadius`, because a
+  repository under the resident cap keeps every district resident and the streamer then never reports a
+  change — without that rebuild the near/far ranking would stay frozen around the opening camera and
+  everything past it would keep its far-tier box (`lod-follows-camera` guards this).
+- Vertex colours are only valid on the detailed tier. `farGeometry` is a plain box with no colour
+  attribute, so a material with `vertexColors: true` renders it black — enable vertex colours as
+  `detailed && …` (see the town hall material in `viewer/js/city.js`).
+- Drawn size is not measured size. `LANDMARK_SCALE` enlarges a civic form's massing on screen, so
+  anything placed on it (props, cranes, beacons) must be positioned from the scaled dimensions, while
+  collision, hover and the detail report keep the real footprint.
+- The Keys panel is the legend made switchable: `LEGEND_KEYS` in `viewer/js/main.js` maps each manifest
+  legend id to the layer it draws (`archetype`, `mesh` or `option`). A new legend entry needs a row there;
+  an entry with no separate layer is shown inert, never as a dead switch.
 - Geometry must stay byte-identical between plain and encrypted builds; only labels/text change under
   `--encrypt`. Don't let `crypto.py` changes touch coordinates, sizes, or IDs.
 - `analyzer/` must never write into the analyzed repo; output goes to `-o DIR` or the cache dir computed

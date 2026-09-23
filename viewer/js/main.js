@@ -54,6 +54,10 @@ const state = {
   // whole repository is on screen, which is the default and the only state a
   // benchmark or self-test ever sees.
   hiddenArchetypes: new Set(),
+  // Legend entries the user has switched off. Keyed by the manifest legend id
+  // so the panel is driven by the analyzer's own list rather than a second one
+  // kept here by hand.
+  hiddenLayers: new Set(),
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -93,6 +97,10 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let hallNear = false;
 let rebuilding = false;
+// Where the city was last built for, and when: the near/far split is only valid
+// around that point (see `refreshResident`).
+let lodCentre = null;
+let lodRebuiltAt = 0;
 
 function resize() {
   const width = window.innerWidth;
@@ -143,66 +151,232 @@ function renderLegend() {
   }
 }
 
+/**
+ * The Keys panel is the legend, made switchable.
+ *
+ * The manifest's `legend` owns what each entry *means*: it is emitted by the
+ * analyzer and describes the repository, not the viewer. This table is the
+ * viewer's half of the same contract the degeneration flags already use
+ * (`flags.churn` -> cranes) -- it says which layer an entry draws and how to
+ * switch that layer off. There are three mechanisms because they cost different
+ * things:
+ *
+ *   archetype  the form is dropped from the resident set and the city rebuilt,
+ *              so collision and hover follow it (the path a form row takes)
+ *   mesh       a separate InstancedMesh is toggled by visibility -- no rebuild
+ *   option     the encoding is baked into the building instances (tint,
+ *              weathering, lit windows, downtown glass), so the city is rebuilt
+ *              with that option off
+ *
+ * An entry with `kind: null` has no layer of its own: it is either a pure
+ * encoding -- height, footprint, floors, district area -- or it lives in the
+ * detail report (skybridges). Those rows are listed, because the panel is the
+ * whole legend, but they are not switches and say so.
+ */
+const LEGEND_KEYS = {
+  height: { kind: null, short: 'Height', reason: 'building height is the city itself' },
+  footprint: { kind: null, short: 'Footprint', reason: 'the footprint is the plan itself' },
+  floors: { kind: null, short: 'Floors', reason: 'floors are the window rows themselves' },
+  district_area: { kind: null, short: 'District area', reason: 'district area is the layout itself' },
+  author_tint: { kind: 'option', short: 'Author tint', colour: 0xb28ad6 },
+  churn: { kind: 'mesh', target: 'cranes', short: 'Cranes', colour: 0xd98a3a },
+  weathering: { kind: 'option', short: 'Weathering', colour: 0x7a6a5a },
+  lit_windows: { kind: 'option', short: 'Lit windows', colour: 0xffd479 },
+  town_hall: { kind: 'archetype', target: 'town_hall', short: 'Town halls', colour: ARCHETYPE_COLORS.town_hall },
+  parks: { kind: 'archetype', target: 'park', short: 'Parks', colour: ARCHETYPE_COLORS.park },
+  silos: { kind: 'archetype', target: 'silo', short: 'Silos', colour: ARCHETYPE_COLORS.silo },
+  monuments: { kind: 'archetype', target: 'monument', short: 'Monuments', colour: ARCHETYPE_COLORS.monument },
+  skybridges: { kind: null, short: 'Changes together with', reason: 'listed in the detail report, not drawn' },
+  new_construction: { kind: 'mesh', target: 'scaffolding', short: 'Scaffolding', colour: 0x9aa7b4 },
+  heat: { kind: 'mesh', target: 'heat-beacons', short: 'Rooftop beacons', colour: 0xff9d5c },
+  downtown: { kind: 'option', short: 'Downtown towers', colour: 0x8fd6ff },
+  sole_tenant: { kind: 'mesh', target: 'sole-tenant-markers', short: 'Corner flags', colour: 0xe4e0a0 },
+};
+
+// Forms the legend does not name, so every archetype still has a switch. The
+// four that *are* legend entries (town hall, park, silo, monument) appear in the
+// Signals group and are not repeated here.
+const FORM_KEYS = ['tower', 'slab', 'warehouse', 'ruin'];
+
+/** Is one legend entry currently switched off? */
+function layerOff(id) {
+  const spec = LEGEND_KEYS[id];
+  if (!spec || !spec.kind) return false;
+  if (spec.kind === 'archetype') return state.hiddenArchetypes.has(spec.target);
+  return state.hiddenLayers.has(id);
+}
+
+/** Is the switch for a legend entry available at all in this repository? */
+function layerToggleable(id) {
+  const spec = LEGEND_KEYS[id];
+  return Boolean(spec && spec.kind);
+}
+
+function keyRow({ key, label, colour, kind, target, legend, reason }) {
+  const row = document.createElement('tr');
+  row.className = 'key-row';
+  row.dataset.key = key;
+  if (legend) row.dataset.legend = legend;
+  if (kind) {
+    row.dataset.kind = kind;
+    if (target) row.dataset.target = target;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
+  } else {
+    row.classList.add('inert');
+    row.title = reason || 'no separate layer to switch';
+  }
+
+  const stateCell = document.createElement('td');
+  const box = document.createElement('span');
+  box.className = 'key-state';
+  box.setAttribute('aria-hidden', 'true');
+  stateCell.append(box);
+
+  const labelCell = document.createElement('td');
+  labelCell.textContent = label;
+
+  const chipCell = document.createElement('td');
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.style.background = `#${(colour === undefined ? 0x777777 : colour).toString(16).padStart(6, '0')}`;
+  chipCell.append(chip);
+
+  row.append(stateCell, labelCell, chipCell);
+  return row;
+}
+
+function groupRow(text) {
+  const row = document.createElement('tr');
+  row.className = 'key-group';
+  const cell = document.createElement('th');
+  cell.colSpan = 3;
+  cell.textContent = text;
+  row.append(cell);
+  return row;
+}
+
 function renderXray() {
   const table = document.getElementById('xray-table');
   table.innerHTML = '';
-  for (const [name, colour] of Object.entries(ARCHETYPE_COLORS)) {
-    const row = document.createElement('tr');
-    row.className = 'key-row';
-    row.dataset.archetype = name;
-    row.tabIndex = 0;
-    row.setAttribute('role', 'button');
 
-    const stateCell = document.createElement('td');
-    const box = document.createElement('span');
-    box.className = 'key-state';
-    box.setAttribute('aria-hidden', 'true');
-    stateCell.append(box);
-
-    const label = document.createElement('td');
-    label.textContent = archetypeLabel(name);
-
-    const chipCell = document.createElement('td');
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.style.background = `#${colour.toString(16).padStart(6, '0')}`;
-    chipCell.append(chip);
-
-    row.append(stateCell, label, chipCell);
-    table.append(row);
+  table.append(groupRow('Signals'));
+  for (const entry of state.source.manifest.legend || []) {
+    const spec = LEGEND_KEYS[entry.id] || {
+      kind: null,
+      short: entry.id,
+      reason: 'no layer to switch',
+    };
+    // A degeneration flag that is off means the geometry was never drawn, so
+    // there is nothing for the reader to switch: say so rather than offer a
+    // dead control. Same rule the legend panel already shows as "off".
+    const disabled = entry.enabled === false;
+    table.append(
+      keyRow({
+        key: `legend:${entry.id}`,
+        label: spec.short,
+        colour: spec.colour,
+        kind: disabled ? null : spec.kind,
+        target: spec.target,
+        legend: entry.id,
+        reason: disabled
+          ? 'not drawn for this repository (see the legend notes)'
+          : spec.reason,
+      })
+    );
   }
+
+  table.append(groupRow('Forms'));
+  for (const name of FORM_KEYS) {
+    table.append(
+      keyRow({
+        key: `form:${name}`,
+        label: archetypeLabel(name),
+        colour: ARCHETYPE_COLORS[name],
+        kind: 'archetype',
+        target: name,
+      })
+    );
+  }
+
   syncKeyRows();
 }
 
-/** Reflect the current filter on every key row and the reset control. */
+/** Reflect every switch on its row, the reset control, and the legend panel. */
 function syncKeyRows() {
   const table = document.getElementById('xray-table');
   if (!table) return;
   for (const row of table.querySelectorAll('tr.key-row')) {
-    const name = row.dataset.archetype;
-    const hidden = state.hiddenArchetypes.has(name);
-    row.classList.toggle('off', hidden);
-    row.setAttribute('aria-pressed', String(!hidden));
-    row.title = `${hidden ? 'Show' : 'Hide'} ${archetypeLabel(name)}`;
+    const kind = row.dataset.kind;
+    if (!kind) continue;
+    const off = kind === 'archetype'
+      ? state.hiddenArchetypes.has(row.dataset.target)
+      : state.hiddenLayers.has(row.dataset.legend);
+    row.classList.toggle('off', off);
+    row.setAttribute('aria-pressed', String(!off));
+    row.title = `${off ? 'Show' : 'Hide'} ${row.children[1].textContent}`;
   }
   const reset = document.getElementById('xray-reset');
-  if (reset) reset.hidden = state.hiddenArchetypes.size === 0;
+  if (reset) {
+    reset.hidden = state.hiddenArchetypes.size === 0 && state.hiddenLayers.size === 0;
+  }
+  updateLegendDimming();
 }
 
 /**
- * Switch one archetype on or off.
- *
- * The city is rebuilt from the resident set with the hidden forms dropped, so
- * the change reaches everything at once -- the massing, the rooftop clutter,
- * the walk-mode collision, hover and click -- rather than leaving invisible
- * walls or tanks floating over a building that is no longer drawn.
+ * Dim the legend entry for anything switched off in the Keys, so the two panels
+ * cannot disagree about what is on screen.
  */
-function toggleArchetype(name) {
-  if (!name) return;
-  if (state.hiddenArchetypes.has(name)) state.hiddenArchetypes.delete(name);
-  else state.hiddenArchetypes.add(name);
+function updateLegendDimming() {
+  const list = document.getElementById('legend-list');
+  if (!list) return;
+  const legend = state.source.manifest.legend || [];
+  [...list.children].forEach((item, index) => {
+    const entry = legend[index];
+    if (!entry) return;
+    item.classList.toggle('disabled', entry.enabled === false || layerOff(entry.id));
+    const unit = item.querySelector('.legend-unit');
+    if (unit) {
+      unit.textContent = entry.enabled === false ? 'off' : layerOff(entry.id) ? 'hidden' : '';
+    }
+  });
+}
+
+/**
+ * Switch one row on or off.
+ *
+ * A form is dropped from the resident set and the city rebuilt, so the change
+ * reaches the massing, the rooftop clutter, walk-mode collision and hover at
+ * once rather than leaving invisible walls behind. A prop cluster is its own
+ * InstancedMesh, so it only needs its visibility flipped. An encoding baked
+ * into the instances forces a rebuild with that option off.
+ */
+function toggleRow(row) {
+  const kind = row.dataset.kind;
+  if (!kind) return;
+  if (kind === 'archetype') {
+    const name = row.dataset.target;
+    if (state.hiddenArchetypes.has(name)) state.hiddenArchetypes.delete(name);
+    else state.hiddenArchetypes.add(name);
+    syncKeyRows();
+    scheduleRebuild();
+    return;
+  }
+  const key = row.dataset.legend;
+  if (state.hiddenLayers.has(key)) state.hiddenLayers.delete(key);
+  else state.hiddenLayers.add(key);
   syncKeyRows();
-  scheduleRebuild();
+  if (kind === 'mesh') applyHiddenLayers();
+  else scheduleRebuild();
+}
+
+/** Re-apply every prop-cluster switch to the mesh that is on screen now. */
+function applyHiddenLayers() {
+  if (!context.city) return;
+  for (const [id, spec] of Object.entries(LEGEND_KEYS)) {
+    if (spec.kind !== 'mesh') continue;
+    context.city.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+  }
 }
 
 let rebuildScheduled = false;
@@ -217,8 +391,9 @@ function scheduleRebuild() {
   });
 }
 
-function resetArchetypes() {
+function resetKeys() {
   state.hiddenArchetypes.clear();
+  state.hiddenLayers.clear();
   syncKeyRows();
   scheduleRebuild();
 }
@@ -239,12 +414,12 @@ function togglePanels() {
 document.getElementById('panels-toggle').addEventListener('click', togglePanels);
 
 // A key row is the whole switch, so the label, the state box and the colour
-// chip all act on the same archetype. Stop propagation on the keyboard path:
-// Enter would otherwise also reach the global handler and enter a building.
+// chip all act on the same layer. Stop propagation on the keyboard path: Enter
+// would otherwise also reach the global handler and enter a building.
 const xrayTable = document.getElementById('xray-table');
 xrayTable.addEventListener('click', (event) => {
   const row = event.target.closest('tr.key-row');
-  if (row) toggleArchetype(row.dataset.archetype);
+  if (row) toggleRow(row);
 });
 xrayTable.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -252,9 +427,9 @@ xrayTable.addEventListener('keydown', (event) => {
   if (!row) return;
   event.preventDefault();
   event.stopPropagation();
-  toggleArchetype(row.dataset.archetype);
+  toggleRow(row);
 });
-document.getElementById('xray-reset').addEventListener('click', resetArchetypes);
+document.getElementById('xray-reset').addEventListener('click', resetKeys);
 
 function renderTitle() {
   const manifest = state.source.manifest;
@@ -314,6 +489,12 @@ function rebuildCity(buildings) {
     : buildings;
   mesh.build(shown, {
     cameraXZ: { x: camera.position.x, z: camera.position.z },
+    // The Keys panel's encoding switches, resolved here so a rebuild -- whoever
+    // asked for it -- cannot drop them back to the manifest default.
+    authorTint: !state.hiddenLayers.has('author_tint'),
+    weathering: !state.hiddenLayers.has('weathering'),
+    downtown: !state.hiddenLayers.has('downtown'),
+    litCap: state.hiddenLayers.has('lit_windows') ? 0 : 1,
   });
   // Stand-in massing for districts that are not resident, so streaming does not
   // leave a hard edge at the horizon. Impostors have no archetype of their own,
@@ -331,6 +512,7 @@ function rebuildCity(buildings) {
     disposeGroup(previous.group);
   }
   context.city = mesh;
+  applyHiddenLayers();
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
 
@@ -455,10 +637,33 @@ async function refreshResident(force = false) {
   rebuilding = true;
   try {
     const changed = await context.streamer.update(camera.position.x, camera.position.z, force);
+    // Detail follows the camera, not just the working set.
+    //
+    // When the whole city is already resident -- any repository under the
+    // resident cap, which is every repository a person is likely to open -- the
+    // streamer never reports a change, so an early return here left the LOD
+    // ranking frozen around wherever the camera first stood. Everything past
+    // that radius kept its far-tier box for the rest of the session: fly to a
+    // park and it was still a cube. Rebuilding when the camera has travelled a
+    // fraction of the LOD radius keeps the near tier where the eye actually is.
+    const radius = (context.city && context.city.lodRadius) || 600;
+    const travel = Math.max(400, radius * 0.6);
+    const moved =
+      !lodCentre ||
+      Math.hypot(lodCentre.x - camera.position.x, lodCentre.z - camera.position.z) > travel;
+    const now = performance.now();
     if (changed) {
       context.resident = context.streamer.buildings();
       state.source.buildings = context.resident;
       rebuildCity(context.resident);
+      lodCentre = { x: camera.position.x, z: camera.position.z };
+      lodRebuiltAt = now;
+    } else if (moved && !state.tourFrozen && now - lodRebuiltAt > 600) {
+      // Rate-limited so flying at speed cannot rebuild every frame; a rebuild
+      // is synchronous and touches every instance in the city.
+      rebuildCity(context.resident);
+      lodCentre = { x: camera.position.x, z: camera.position.z };
+      lodRebuiltAt = now;
     }
   } finally {
     rebuilding = false;
@@ -1370,10 +1575,16 @@ function runBench(frames = 60) {
 // ---------------------------------------------------------------------------
 
 let last = performance.now();
+let beaconClock = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+
+  // Rooftop obstruction lights blink on their own clock. Held still while a
+  // capture freezes the tour, so a scripted screenshot is deterministic.
+  if (!state.tourFrozen) beaconClock += dt;
+  if (context.city) context.city.setBeaconPulse(beaconClock);
 
   if (state.mode === 'interior' && context.interior.active) {
     driveInterior(dt);
@@ -2017,6 +2228,142 @@ async function runSelfTest() {
     `camera moved ${handbackJump.toFixed(3)}m after the tour ended`
   );
 
+  // 5d. The Keys panel is the whole legend, and a switch that exists must
+  //     actually reach the geometry rather than only recolour a row.
+  {
+    const legend = state.source.manifest.legend || [];
+    const legendRows = document.querySelectorAll(
+      '#xray-table tr.key-row[data-key^="legend:"]'
+    );
+    check(
+      'keys-covers-legend',
+      legendRows.length === legend.length,
+      `${legendRows.length} rows for ${legend.length} legend entries`
+    );
+
+    const inert = [...document.querySelectorAll('#xray-table tr.key-row.inert')];
+    check(
+      'keys-inert-encodings',
+      inert.length > 0 && inert.every((row) => !row.hasAttribute('aria-pressed')),
+      `${inert.length} encoding row(s) listed without a switch`
+    );
+
+    const craneRow = document.querySelector('#xray-table tr.key-row[data-key="legend:churn"]');
+    const cranes = context.city.group.getObjectByName('cranes');
+    if (craneRow && craneRow.dataset.kind === 'mesh' && cranes) {
+      toggleRow(craneRow);
+      check('keys-hides-layer', cranes.visible === false, 'crane layer hidden');
+      toggleRow(craneRow);
+      check('keys-restores-layer', cranes.visible === true, 'crane layer shown again');
+    } else {
+      check('keys-hides-layer', true, 'no crane layer in this city');
+      check('keys-restores-layer', true, 'no crane layer in this city');
+    }
+
+    const formRow = [...document.querySelectorAll('#xray-table tr.key-row[data-kind="archetype"]')].find(
+      (row) => context.resident.some((b) => (b.archetype || 'warehouse') === row.dataset.target)
+    );
+    if (formRow) {
+      const archetype = formRow.dataset.target;
+      toggleRow(formRow);
+      rebuildCity(context.resident);
+      const drawn = [...context.city.records.values()]
+        .flat()
+        .filter((b) => (b.archetype || 'warehouse') === archetype).length;
+      check('keys-form-switch', drawn === 0, `${archetype} dropped from the resident set`);
+      toggleRow(formRow);
+      rebuildCity(context.resident);
+    } else {
+      check('keys-form-switch', true, 'no resident form to switch');
+    }
+
+    // An encoding switch rebuilds with that option off; downtown is the easiest
+    // one to see, because its antennas are their own cluster and must vanish.
+    const downtownRow = document.querySelector('#xray-table tr.key-row[data-key="legend:downtown"]');
+    if (downtownRow && downtownRow.dataset.kind === 'option') {
+      const before = context.city.group.getObjectByName('antennas');
+      toggleRow(downtownRow);
+      rebuildCity(context.resident);
+      const after = context.city.group.getObjectByName('antennas');
+      const cleared = !before || before.count === 0 || !after || after.count === 0;
+      check(
+        'keys-option-switch',
+        cleared,
+        `${before ? before.count : 0} antennas -> ${after ? after.count : 0}`
+      );
+      toggleRow(downtownRow);
+      rebuildCity(context.resident);
+    } else {
+      check('keys-option-switch', true, 'no downtown encoding in this city');
+    }
+  }
+
+  // 5e. Detail follows the camera. A building beyond the opening camera's LOD
+  //     radius must move into the near-tier mesh once the camera goes to it.
+  //     Without this the ranking stayed frozen around wherever the camera first
+  //     stood, so flying anywhere kept far-tier boxes -- a park stayed a cube no
+  //     matter how close it was inspected.
+  {
+    const startPosition = camera.position.clone();
+    const startYaw = context.fly.yaw;
+    const startPitch = context.fly.pitch;
+    let target = null;
+    let farthest = 0;
+    for (const building of context.resident) {
+      const distance = Math.hypot(
+        building.x + building.width / 2 - startPosition.x,
+        building.y + building.depth / 2 - startPosition.z
+      );
+      if (distance > farthest) {
+        farthest = distance;
+        target = building;
+      }
+    }
+    const radius = context.city.lodRadius || 600;
+    if (target && farthest > radius) {
+      const archetype = target.archetype || 'warehouse';
+      setMode('fly');
+      context.fly.position.set(
+        target.x + target.width / 2,
+        Math.max(60, (target.height || 4) * 2),
+        target.y + target.depth / 2
+      );
+      context.fly.yaw = 0;
+      context.fly.pitch = -1.0;
+      context.fly.apply();
+      lodRebuiltAt = 0; // the check is not subject to the flight rate limit
+      await refreshResident();
+      const nearMesh = context.city.group.children.find(
+        (child) => child.name === `buildings-${archetype}`
+      );
+      let nearest = Infinity;
+      if (nearMesh) {
+        const matrix = new THREE.Matrix4();
+        for (let i = 0; i < nearMesh.count; i++) {
+          nearMesh.getMatrixAt(i, matrix);
+          const elements = matrix.elements;
+          nearest = Math.min(
+            nearest,
+            Math.hypot(elements[12] - camera.position.x, elements[14] - camera.position.z)
+          );
+        }
+      }
+      check(
+        'lod-follows-camera',
+        Boolean(nearMesh) && nearest < radius,
+        nearMesh
+          ? `nearest ${archetype} at ${nearest.toFixed(0)}m, LOD radius ${radius.toFixed(0)}m`
+          : `no near-tier mesh for ${archetype}`
+      );
+    } else {
+      check('lod-follows-camera', true, 'city fits inside one LOD radius');
+    }
+    context.fly.position.copy(startPosition);
+    context.fly.yaw = startYaw;
+    context.fly.pitch = startPitch;
+    context.fly.apply();
+  }
+
   // 6. Renderer still healthy after all of that.
   const payload = runBench(12);
   check('draw-calls', payload.drawCalls <= 60, `${payload.drawCalls} draw calls`);
@@ -2199,6 +2546,10 @@ async function boot() {
   setupFilterAndLens();
   renderChips();
   rebuildCity(context.resident);
+  // The first build is valid around the opening camera, so a later rebuild is
+  // only due once the camera has actually travelled from here.
+  lodCentre = { x: camera.position.x, z: camera.position.z };
+  lodRebuiltAt = performance.now();
 
   context.fly = new FlyCamera(THREE, camera, bounds);
   context.orbit = new OrbitCamera(THREE, camera, bounds);

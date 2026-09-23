@@ -539,6 +539,12 @@ Copied from `CLAUDE.md` and made concrete for this roadmap:
   dates=(...,))` with a degenerate fixture (one author, one date, few commits) must assert the flag is
   false, the note is present, and the viewer-visible effect (self-test check) is that the geometry does
   not appear.
+- **A legend entry with a layer of its own also gets a Keys switch.** The `LEGEND_KEYS` table in
+  `viewer/js/main.js` is the viewer's half of the same contract: it names the layer each entry draws
+  (`archetype`, `mesh` or `option`) so the reader can switch it off by hand. An entry with no separate
+  layer is listed as inert, never given a dead control. Adding a legend entry without a `LEGEND_KEYS`
+  row leaves the Keys panel incomplete; the `keys-covers-legend` self-test check fails if the two lists
+  drift apart.
 - **`analyzer/` never writes into the analyzed repo.** All new emitted files (`index.json`,
   `bridges.json`, `detail.html`) go into `-o DIR` / the cache dir, same as everything else.
 - **No generated demo city gets committed.** Building any of these locally for testing must not add

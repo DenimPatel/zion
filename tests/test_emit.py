@@ -245,6 +245,18 @@ class EmitTests(TempRepoCase):
         self.assertTrue(os.path.exists(os.path.join(result.out_dir, "detail.html")))
         self.assertTrue(os.path.exists(os.path.join(result.out_dir, "js", "facets.js")))
         self.assertTrue(os.path.exists(os.path.join(result.out_dir, "js", "detail.js")))
+        # The geometry assemblies live in a subdirectory, and the import graph
+        # reaches them: a build that flattened or skipped `js/parts/` would serve
+        # a viewer whose modules 404.
+        self.assertTrue(
+            os.path.exists(os.path.join(result.out_dir, "js", "primitives.js"))
+        )
+        self.assertTrue(
+            os.path.exists(os.path.join(result.out_dir, "js", "parts", "beacons.js"))
+        )
+        self.assertTrue(
+            os.path.exists(os.path.join(result.out_dir, "js", "parts", "parks.js"))
+        )
 
 
 class SingleFileTests(TempRepoCase):
@@ -281,6 +293,12 @@ class SingleFileTests(TempRepoCase):
         self.assertIn("ext.bin", payload)
         self.assertIn("zion/facets", html)
         self.assertIn("zion/detail", html)
+        # Nested modules are inlined under their own path, and a nested import
+        # is rewritten to that key rather than to a basename that could belong
+        # to any file.
+        self.assertIn("zion/primitives", html)
+        self.assertIn("zion/parts/beacons", html)
+        self.assertIn("zion/parts/parks", html)
 
     def test_module_specifiers_are_rewritten_to_import_map_keys(self):
         from analyzer.emit import _rewrite_module_specifiers
@@ -289,6 +307,14 @@ class SingleFileTests(TempRepoCase):
         rewritten = _rewrite_module_specifiers(source)
         self.assertIn("from 'zion/loader'", rewritten)
         self.assertIn("from 'three'", rewritten)
+
+        nested = "import { x } from './parts/beacons.js';\nimport { y } from '../primitives.js';\n"
+        self.assertIn(
+            "from 'zion/parts/beacons'", _rewrite_module_specifiers(nested, "")
+        )
+        self.assertIn(
+            "from 'zion/primitives'", _rewrite_module_specifiers(nested, "parts")
+        )
 
     def test_oversized_cities_are_refused_with_a_reason(self):
         from analyzer.emit import SINGLE_FILE_MAX_BUILDINGS

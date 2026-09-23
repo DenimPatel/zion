@@ -238,9 +238,11 @@ h2 {
 #xray-table td { padding: 2px 0 2px 9px; }
 #xray-table td:first-child { padding-left: 0; color: var(--ink-dim); }
 /*
- * Each key is its own switch: a row is a button that hides every building of
- * that form, so the city can be read one archetype at a time (ruins only, or
- * ruins and silos) without hiding the district plates that give it context.
+ * Each key is its own switch. The panel is the whole legend: a row is a button
+ * that hides one layer -- an archetype, a prop cluster, or an encoding baked
+ * into the buildings -- so the city can be read one signal at a time (cranes
+ * only, or ruins and silos) without hiding the district plates that give it
+ * context. Rows with no separate layer are listed but inert.
  */
 #xray-table tr.key-row { cursor: pointer; }
 #xray-table tr.key-row td { padding-top: 3px; padding-bottom: 3px; }
@@ -250,6 +252,24 @@ h2 {
 #xray-table tr.key-row.off td { color: #64748b; }
 #xray-table tr.key-row.off .key-state { background: transparent; border-color: #64748b; }
 #xray-table tr.key-row.off .chip { opacity: 0.35; }
+#xray-table tr.key-group th {
+  padding: 9px 0 2px;
+  text-align: left;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+#xray-table tr.key-group:first-child th { padding-top: 0; }
+/*
+ * A row with no separate layer to switch: listed because the panel is the whole
+ * legend, but it is not a control and must not look like one.
+ */
+#xray-table tr.key-row.inert { cursor: default; }
+#xray-table tr.key-row.inert:hover td { background: none; }
+#xray-table tr.key-row.inert .key-state { background: transparent; border-color: #475569; }
+#xray-table tr.key-row.inert .chip { opacity: 0.3; }
 .key-state {
   display: inline-block;
   box-sizing: border-box;
@@ -607,6 +627,9 @@ body.detail-page {
 .sparkline { display: flex; align-items: flex-end; gap: 2px; height: 30px; margin: 8px 0; }
 .spark-bar { width: 4px; background: var(--accent); border-radius: 1px; }
 #detail-vault { margin: 14px 0; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+/* An id selector outranks the UA `[hidden]` rule, so the attribute alone does
+   not hide these; without this the unlock form shows on a plaintext city. */
+#detail-vault[hidden] { display: none; }
 
 /* ---------- detail-window open button ---------- */
 #inspector-open-detail {
@@ -622,3 +645,4 @@ body.detail-page {
   cursor: pointer;
 }
 #inspector-open-detail:hover { background: rgba(255, 179, 71, 0.28); }
+#inspector-open-detail[hidden] { display: none; }

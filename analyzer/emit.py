@@ -405,12 +405,18 @@ def install_viewer(out_dir: str) -> int:
         shutil.copyfile(os.path.join(viewer, rel), destination)
         written += os.path.getsize(destination)
 
-    for name in sorted(os.listdir(os.path.join(viewer, "js"))):
-        if not name.endswith(".js"):
-            continue
-        destination = os.path.join(out_dir, "js", name)
-        shutil.copyfile(os.path.join(viewer, "js", name), destination)
-        written += os.path.getsize(destination)
+    # The viewer's modules are copied as a tree, not as a flat folder: the
+    # geometry assemblies live under `js/parts/`, and a build that dropped them
+    # would serve a viewer whose import graph 404s.
+    for root, _dirs, files in os.walk(os.path.join(viewer, "js")):
+        for name in sorted(files):
+            if not name.endswith(".js"):
+                continue
+            source = os.path.join(root, name)
+            destination = os.path.join(out_dir, os.path.relpath(source, viewer))
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            shutil.copyfile(source, destination)
+            written += os.path.getsize(destination)
 
     three = os.path.join(vendor, "three.module.js")
     if os.path.exists(three):
@@ -923,19 +929,33 @@ SINGLE_FILE_MAX_BYTES = 32 * 1024 * 1024
 SINGLE_FILE_MAX_BUILDINGS = 5000
 
 
-def _rewrite_module_specifiers(source: str) -> str:
+def _rewrite_module_specifiers(source: str, rel_dir: str = "") -> str:
     """Point relative viewer imports at import-map keys.
 
     Inlined modules have no URL to resolve `./loader.js` against, so each
-    module is registered under a bare `zion/<name>` key instead.
+    module is registered under a bare `zion/<path>` key instead. `rel_dir` is
+    the module's own directory inside `js/`, so a nested module's `../` still
+    resolves to the right key rather than to whichever file happens to share
+    its basename.
     """
     import re
+
+    def key_for(specifier: str) -> str:
+        parts: list[str] = []
+        for piece in f"{rel_dir}/{specifier}".split("/"):
+            if piece in ("", "."):
+                continue
+            if piece == "..":
+                if parts:
+                    parts.pop()
+                continue
+            parts.append(piece)
+        return "zion/" + "/".join(parts)[:-3]  # drop the ".js"
 
     def replace(match: re.Match) -> str:
         prefix, specifier, suffix = match.group(1), match.group(2), match.group(3)
         if specifier.startswith("."):
-            name = specifier.rsplit("/", 1)[-1]
-            return f"{prefix}zion/{name[:-3]}{suffix}"
+            return f"{prefix}{key_for(specifier)}{suffix}"
         return match.group(0)
 
     return re.sub(
@@ -988,14 +1008,21 @@ def build_single_file(out_dir: str, manifest: dict, result: "EmitResult") -> tup
             "by a further third)."
         )
 
-    # Viewer modules, rewritten and registered under import-map keys.
+    # Viewer modules, rewritten and registered under import-map keys. Walked as
+    # a tree so `js/parts/*.js` is inlined under `zion/parts/*`, matching the
+    # keys `_rewrite_module_specifiers` produces for nested imports.
     modules: dict[str, str] = {}
-    js_dir = os.path.join(out_dir, "js")
-    for name in sorted(os.listdir(js_dir)):
-        if not name.endswith(".js"):
-            continue
-        source = open(os.path.join(js_dir, name), encoding="utf-8").read()
-        modules[f"zion/{name[:-3]}"] = _data_url(_rewrite_module_specifiers(source).encode("utf-8"))
+    js_root = os.path.join(out_dir, "js")
+    for root, _dirs, files in os.walk(js_root):
+        for name in sorted(files):
+            if not name.endswith(".js"):
+                continue
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, js_root)[:-3].replace(os.sep, "/")
+            source = open(path, encoding="utf-8").read()
+            modules[f"zion/{rel}"] = _data_url(
+                _rewrite_module_specifiers(source, os.path.dirname(rel)).encode("utf-8")
+            )
 
     three_path = os.path.join(out_dir, "vendor", "three.module.js")
     if os.path.exists(three_path):

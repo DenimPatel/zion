@@ -17,7 +17,6 @@
 
 import {
   antennaGeometry,
-  beaconGeometry,
   craneGeometry,
   farGeometry,
   nearGeometry,
@@ -25,6 +24,7 @@ import {
   scaffoldingGeometry,
   soleTenantMarkerGeometry,
 } from './shapes.js';
+import { beaconGeometry, beaconTiers } from './parts/beacons.js';
 import {
   makeMassingDepthMaterial,
   patchFacade,
@@ -35,6 +35,11 @@ import {
 
 /** Archetypes whose walls are walls. Parks and monuments get stone, not glass. */
 const WINDOWED = new Set(['tower', 'slab', 'warehouse', 'silo', 'town_hall', 'ruin']);
+
+const LANDMARK_SCALE = { town_hall: 1.15 };
+
+/** Archetypes whose geometry carries its own per-vertex colour zones. */
+const VERTEX_COLOURED = new Set(['town_hall']);
 
 /**
  * Where a flat roof actually is, as a fraction of the building's height.
@@ -119,6 +124,29 @@ function storeyHeight(building, seed) {
   return 2.9 + seed * 1.4;
 }
 
+/**
+ * A soft round glow, drawn once and reused by every beacon.
+ *
+ * The lamp's halo cannot be geometry: an additive icosahedron shows its own
+ * facets and reads as a red ball bolted to the mast. A camera-facing point with
+ * a radial falloff is a glow at any distance and any angle, and one `Points`
+ * object carries every beacon in the city in a single draw call.
+ */
+function makeGlowTexture(THREE) {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.25, 'rgba(255,255,255,0.5)');
+  gradient.addColorStop(0.6, 'rgba(255,255,255,0.12)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+
 /** Ground: dark asphalt with a faint grid so motion reads at low altitude. */
 export function makeGroundTexture(THREE) {
   const size = 256;
@@ -188,7 +216,16 @@ export class CityMesh {
     const [bx, bz, bw, bh] = manifest.bounds;
     this.maxHeight = Math.max(1, ...buildings.map((b) => b.height || 0));
 
-    const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
+    // The manifest's degeneration flags decide whether a legend entry *can*
+    // mean anything in this repository; the Keys panel decides whether the
+    // reader wants it on screen. Each layer is therefore resolved as an
+    // explicit option first, falling back to the flag, so switching one off by
+    // hand is the same code path the flag already takes rather than a second
+    // way of hiding geometry.
+    const flag = (name) => Boolean(manifest.flags && manifest.flags[name]);
+    const option = (name, fallback) =>
+      options[name] === undefined ? fallback : Boolean(options[name]);
+    const authorTint = option('authorTint', flag('authorship'));
     const litCap = options.litCap === undefined ? 1 : options.litCap;
 
     // Level of detail: one instanced mesh per archetype per tier, so draw calls
@@ -199,6 +236,11 @@ export class CityMesh {
     const lodNear = options.lodNear !== undefined
       ? options.lodNear
       : Math.min(1800, Math.max(240, Math.max(bw, bh) * 0.75));
+    // Remembered so the caller can tell when the camera has travelled far
+    // enough that the near/far split is stale: detail is a function of where
+    // the camera is, and nothing else recomputes it when the whole city is
+    // resident (see `refreshResident` in main.js).
+    this.lodRadius = lodNear;
     const cameraXZ = options.cameraXZ || null;
 
     // Detail is budgeted twice: by radius, and then by count. The radius alone
@@ -222,7 +264,7 @@ export class CityMesh {
     });
 
     const far = farGeometry(THREE);
-    const weathering = Boolean(manifest.flags && manifest.flags.recency);
+    const weathering = option('weathering', flag('recency'));
 
     const matrix = new THREE.Matrix4();
     const colour = new THREE.Color();
@@ -232,9 +274,9 @@ export class CityMesh {
     const scaffoldCandidates = [];
     const antennaCandidates = [];
     const soleTenantCandidates = [];
-    const churnEligible = Boolean(manifest.flags && manifest.flags.churn);
-    const ageEligible = Boolean(manifest.flags && manifest.flags.age);
-    const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
+    const churnEligible = option('churn', flag('churn'));
+    const ageEligible = option('age', flag('age'));
+    const downtownEligible = option('downtown', flag('downtown'));
     const glass = new THREE.Color(0x8fd6ff);
 
     for (const [archetype, tiers] of byArchetype) {
@@ -244,10 +286,16 @@ export class CityMesh {
       const detailed = tier === 'near';
       const material = new THREE.MeshStandardMaterial({
         color: 0xffffff,
-        roughness: archetype === 'park' ? 0.95 : archetype === 'monument' ? 0.32 : 0.72,
+        roughness: archetype === 'park' ? 0.95 : archetype === 'monument' ? 0.32 : archetype === 'town_hall' ? 0.68 : 0.72,
         metalness: archetype === 'monument' ? 0.5 : 0.08,
         emissive: new THREE.Color(0xffffff),
         emissiveIntensity: 0,
+        // A town hall paints its own stone, trim, roof and glazing in vertex
+        // colours -- see `civic.js` -- so one material can carry the material
+        // separation that makes City Hall read as built rather than extruded.
+        // Only the detailed tier: the far tier is a plain box with no colour
+        // attribute, and a material that expects one renders it black.
+        vertexColors: detailed && VERTEX_COLOURED.has(archetype),
       });
       patchFacade(material, { hasWindows: WINDOWED.has(archetype), detail: detailed });
 
@@ -271,11 +319,23 @@ export class CityMesh {
       const lit = new Float32Array(members.length);
 
       members.forEach((building, index) => {
-        const width = building.width || 4;
-        const depth = building.depth || 4;
-        const height = building.height || 3;
-        const x = (building.x || 0) + width / 2;
-        const z = (building.y || 0) + depth / 2;
+        const x = (building.x || 0) + (building.width || 4) / 2;
+        const z = (building.y || 0) + (building.depth || 4) / 2;
+        // Civic forms are drawn a little larger than their plot. City Hall has a
+        // reserved plaza; a town hall is one README among the blocks around it,
+        // and at city scale a faithful footprint leaves it looking like any
+        // other one of them. Scaling about the footprint centre keeps it on its
+        // plot, and collision, hover and the detail report all still measure the
+        // real footprint -- only the drawn massing is exaggerated.
+        //
+        // Everything downstream of the footprint -- the massing, and the props
+        // that stand on it -- is measured from the *drawn* dimensions, or a
+        // crane would be planted at the data height and sink into a roof that is
+        // drawn fifteen percent higher.
+        const landmark = LANDMARK_SCALE[archetype] || 1;
+        const width = (building.width || 4) * landmark;
+        const depth = (building.depth || 4) * landmark;
+        const height = (building.height || 3) * landmark;
         matrix.makeScale(width, height, depth);
         matrix.setPosition(x, 0, z);
         mesh.setMatrixAt(index, matrix);
@@ -485,16 +545,21 @@ export class CityMesh {
   _addHeatBeacons(candidates) {
     if (!candidates.length) return;
     const THREE = this.THREE;
-    const TIERS = [
-      { max: 0.65, color: 0x6b7686, emissive: 0x3a4552, intensity: 0.5 },
-      { max: 0.85, color: 0xe0a63a, emissive: 0xe0a63a, intensity: 1.1 },
-      { max: Infinity, color: 0xe0503a, emissive: 0xff5533, intensity: 1.6 },
-    ];
+    const TIERS = beaconTiers();
     const buckets = TIERS.map(() => []);
     for (const candidate of candidates) {
       const tier = TIERS.findIndex((t) => candidate.heat <= t.max);
       buckets[Math.max(0, tier)].push(candidate);
     }
+
+    // The glow is collected across every tier and drawn as two point clouds
+    // rather than as one shell per tier: one steady for the dim band, one that
+    // blinks for the amber and red warning bands. A camera-facing point is a
+    // soft glow from any angle, where an additive icosahedron showed its facets.
+    const steady = { positions: [], colours: [] };
+    const warning = { positions: [], colours: [] };
+    const glowColour = new THREE.Color();
+    this._beaconGlow = [];
 
     buckets.forEach((bucket, tierIndex) => {
       if (!bucket.length) return;
@@ -503,26 +568,84 @@ export class CityMesh {
           ? bucket.sort((a, b) => b.heat - a.heat).slice(0, MAX_ROOF_PROPS)
           : bucket;
       const tier = TIERS[tierIndex];
+      // A muted tier tint, not the tier colour itself: a real obstruction light
+      // is galvanised metal with a coloured lamp, so painting the whole fixture
+      // amber or red made it read as a toy. The vertex colours keep the housing
+      // dark, the steel colder and the lens near-white; the tier is carried by
+      // the glow, which is where a lamp's colour actually is.
+      const tint = new THREE.Color(0xffffff).lerp(new THREE.Color(tier.colour), 0.4);
+      // No emissive here on purpose. three adds `emissive * emissiveIntensity`
+      // uniformly across a material, so an emissive housing would glow as hard
+      // as the lens and the fixture would read as one hot blob.
       const material = new THREE.MeshStandardMaterial({
-        color: tier.color,
-        roughness: 0.4,
-        metalness: 0.2,
-        emissive: new THREE.Color(tier.emissive),
-        emissiveIntensity: tier.intensity,
+        color: tint,
+        vertexColors: true,
+        roughness: 0.42,
+        metalness: 0.3,
       });
       const mesh = new THREE.InstancedMesh(beaconGeometry(THREE), material, limited.length);
       mesh.name = `heat-beacons-${tierIndex}`;
       mesh.raycast = () => {};
+
       const matrix = new THREE.Matrix4();
       limited.forEach((beacon, index) => {
         const spread = Math.min(2.2, Math.max(0.7, Math.min(beacon.width, beacon.depth) * 0.35));
+        const x = beacon.x + beacon.width * 0.18;
+        const z = beacon.z + beacon.depth * 0.18;
         matrix.makeScale(spread, spread, spread);
-        matrix.setPosition(beacon.x + beacon.width * 0.18, beacon.height, beacon.z + beacon.depth * 0.18);
+        matrix.setPosition(x, beacon.height, z);
         mesh.setMatrixAt(index, matrix);
+        // The lamp sits at y = 0.915 in the beacon's own unit space.
+        const target = tierIndex === 0 ? steady : warning;
+        glowColour.set(tier.emissive);
+        target.positions.push(x, beacon.height + 0.915 * spread, z);
+        target.colours.push(glowColour.r, glowColour.g, glowColour.b);
       });
       mesh.instanceMatrix.needsUpdate = true;
       this.group.add(mesh);
     });
+
+    for (const [target, blinking] of [[steady, false], [warning, true]]) {
+      if (!target.positions.length) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(target.positions, 3));
+      geometry.setAttribute('color', new THREE.Float32BufferAttribute(target.colours, 3));
+      const material = new THREE.PointsMaterial({
+        size: 2.6,
+        map: makeGlowTexture(THREE),
+        vertexColors: true,
+        transparent: true,
+        opacity: blinking ? 0.85 : 0.5,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        sizeAttenuation: true,
+        toneMapped: false,
+      });
+      const glow = new THREE.Points(geometry, material);
+      // Named under `heat-beacons` so the Keys layer switch takes the glow with
+      // the fixtures -- a glow left burning over a hidden beacon would lie.
+      glow.name = blinking ? 'heat-beacons-glow-warning' : 'heat-beacons-glow-steady';
+      glow.raycast = () => {};
+      this.group.add(glow);
+      this._beaconGlow.push({ material, opacity: material.opacity, blinking });
+    }
+  }
+
+  /**
+   * Blink the obstruction lights, the way the real ones blink.
+   *
+   * `seconds` is any monotonic render clock. The dim band stays lit -- a steady
+   * grey beacon is the "somewhat active" signal -- while the amber and red
+   * warning bands breathe, which is what separates them from one another.
+   */
+  setBeaconPulse(seconds) {
+    if (!this._beaconGlow) return;
+    const wave = 0.5 + 0.5 * Math.sin(seconds * 2.2);
+    for (const entry of this._beaconGlow) {
+      entry.material.opacity = entry.blinking
+        ? entry.opacity * (0.3 + 0.7 * wave)
+        : entry.opacity;
+    }
   }
 
   /**
@@ -965,6 +1088,25 @@ export class CityMesh {
     this.group.children.forEach((child) => {
       if (child.isInstancedMesh && child.name.startsWith('buildings-')) {
         child.material.emissiveIntensity = value;
+      }
+    });
+  }
+
+  /**
+   * Show or hide one named prop cluster -- `cranes`, `heat-beacons`,
+   * `scaffolding`, `sole-tenant-markers`.
+   *
+   * Each of those is its own InstancedMesh, so switching one off by hand is a
+   * visibility change rather than a rebuild: only the encodings baked into the
+   * building instances (tint, weathering, lit windows, downtown glass) need the
+   * city rebuilt. Matching is by name prefix because the beacons are split into
+   * one mesh per tier.
+   */
+  setLayerVisible(target, visible) {
+    this.group.traverse((node) => {
+      const drawable = node.isMesh || node.isPoints;
+      if (drawable && typeof node.name === 'string' && node.name.startsWith(target)) {
+        node.visible = visible;
       }
     });
   }
