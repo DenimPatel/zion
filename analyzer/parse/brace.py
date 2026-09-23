@@ -162,6 +162,23 @@ def _relative_imports(source: str) -> list[str]:
     return imports
 
 
+# Keyword-count complexity heuristic, applied to a floor's own masked line
+# range. Not an AST, so this over- or under-counts (a `case` inside a string
+# is already stripped by `_strip`, but a `for` inside a comment slipping past
+# it would not be); confidence for brace languages is "medium" everywhere
+# else in this file for the same reason.
+_RE_COMPLEXITY_KEYWORD = re.compile(r"\b(?:if|for|foreach|while|catch|case)\b")
+_RE_COMPLEXITY_OPERATOR = re.compile(r"&&|\|\||\?\?")
+
+
+def _complexity_of_lines(masked_lines: list[str], start: int, end: int) -> int:
+    span = masked_lines[max(0, start - 1) : max(0, end - 1)]
+    return sum(
+        len(_RE_COMPLEXITY_KEYWORD.findall(line)) + len(_RE_COMPLEXITY_OPERATOR.findall(line))
+        for line in span
+    )
+
+
 def parse_brace(source: str, language: str) -> ParseResult:
     masked_lines, depth_at_line, comment_only = _strip(source, language)
 
@@ -233,6 +250,8 @@ def parse_brace(source: str, language: str) -> ParseResult:
                 continue
             floor.end_line = block_end(floor.line)
             floor.loc = max(1, floor.end_line - floor.line)
+            floor.complexity = _complexity_of_lines(masked_lines, floor.line, floor.end_line)
+            floor.is_entrypoint = floor.name in ("main", "run")
             floors.append(floor)
 
     return ParseResult(

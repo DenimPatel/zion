@@ -295,6 +295,7 @@ class FileMetrics:
     import_in_degree: int = 0  # how many other files resolve an import to this one
     centrality: float = 0.0  # composite percentile rank, 0..1
     downtown: bool = False  # top slice of centrality
+    sole_tenant: bool = False  # bus-factor-1: one author, most of the lines (S12)
 
     @property
     def weight(self) -> float:
@@ -483,7 +484,17 @@ def analyze(
             record.recency_days = days_since(record.last_ts, now) if record.last_ts else 0.0
         _finalize_time_signals(analysis, git)
     _finalize_downtown(analysis, git)
+    if analysis.flags.authorship:
+        # Bus-factor-1 (S12): one author owns almost all of a file's lines, in
+        # a repo where "one author" is not just everyone -- only meaningful
+        # once RepoFlags.authorship already says ownership means something.
+        for record in analysis.files:
+            record.sole_tenant = record.ownership_share >= SOLE_TENANT_SHARE and record.commits >= SOLE_TENANT_MIN_COMMITS
     return analysis
+
+
+SOLE_TENANT_SHARE = 0.9
+SOLE_TENANT_MIN_COMMITS = 3
 
 
 # New-construction window: the newest slice of the repo's own lifetime, floored

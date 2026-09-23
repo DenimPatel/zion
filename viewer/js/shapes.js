@@ -302,6 +302,19 @@ export function scaffoldingGeometry(THREE) {
 }
 
 /**
+ * A bus-factor-1 marker: a small post with a flag, planted at one corner of
+ * the plot -- "for sale" the day the one person who understands this file
+ * leaves (S12). Ground-level, unlike the roof props above, since ownership is
+ * a property of the whole file rather than something happening on the roof.
+ */
+export function soleTenantMarkerGeometry(THREE) {
+  return mergeParts(THREE, [
+    cylinder(THREE, { rTop: 0.02, rBottom: 0.02, x: 0, z: 0, y0: 0, y1: 0.6, segments: 5, part: PART_FIXED }),
+    box(THREE, { w: 0.22, d: 0.02, x: 0.11, z: 0, y0: 0.45, y1: 0.6, part: PART_CROWN }),
+  ]);
+}
+
+/**
  * A downtown antenna/spire: a thin mast rising well above the roofline, the
  * way a real skyline marks its tallest, most central towers. Marks a
  * building in the top slice of centrality (S8): co-change degree, import

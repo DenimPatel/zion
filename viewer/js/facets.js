@@ -20,6 +20,7 @@ const FLAG_BITS = {
   hot: 1 << 5, // topChurn
   new: 1 << 6,
   downtown: 1 << 7,
+  soletenant: 1 << 8,
 };
 
 /** Column-index lookup built once from the manifest's declared column order. */

@@ -43,6 +43,7 @@ LEGEND_SPEC = [
     ("new_construction", "First commit within the newest activity window -> scaffolding", "days"),
     ("heat", "Recent, decay-weighted churn -> rooftop beacons, cranes", "percentile"),
     ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile"),
+    ("sole_tenant", "One author owns ≥ 90% of a file's lines -> a corner flag", "bool"),
 ]
 
 
@@ -170,6 +171,7 @@ def build_manifest(
         "new_construction": flags.age,
         "heat": flags.churn,
         "downtown": flags.centrality,
+        "sole_tenant": flags.authorship,
     }
     for entry_id, label, unit in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -435,6 +437,7 @@ FLAG_IS_DATA = 1 << 4
 FLAG_TOP_CHURN = 1 << 5
 FLAG_IS_NEW = 1 << 6
 FLAG_IS_DOWNTOWN = 1 << 7
+FLAG_SOLE_TENANT = 1 << 8
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
@@ -516,6 +519,7 @@ def _building_record(
         "centrality": round(record.centrality, 4),
         "downtown": record.downtown,
         "importInDegree": record.import_in_degree,
+        "soleTenant": record.sole_tenant,
         "author": strings.add(record.primary_author) if record.primary_author else -1,
         "ownership": round(record.ownership_share, 3),
         "lastMessage": strings.add(record.last_message) if record.last_message else -1,
@@ -567,6 +571,8 @@ def _build_index(
             flags |= FLAG_IS_NEW
         if record.downtown:
             flags |= FLAG_IS_DOWNTOWN
+        if record.sole_tenant:
+            flags |= FLAG_SOLE_TENANT
         rows.append(
             [
                 index,
@@ -647,6 +653,8 @@ def _floor_payload(record: FileMetrics, strings: StringTable) -> tuple[dict, byt
                 "endLine": floor.end_line,
                 "loc": floor.loc,
                 "depth": floor.depth,
+                "complexity": floor.complexity,
+                "isEntrypoint": floor.is_entrypoint,
                 "srcOffset": start,
                 "srcLength": max(0, end - start),
             }

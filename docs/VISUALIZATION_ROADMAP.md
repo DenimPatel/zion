@@ -1,5 +1,34 @@
 # Visualization roadmap: reading more of a repo from the skyline alone
 
+## Implementation status
+Phases 0–3, and the cheap/high-value parts of Phase 4, have since been implemented on
+`claude/city-repo-visualization-5293bc` (S1–S6, S8, S9's data + entrypoint marker, S10's complexity
+data, S12, S13's metadata-only "first version", S14, S15–S18, S19's report view). What follows is a
+plain status per item; the rest of this document is the original plan and is kept as-is below.
+
+| Item | Status |
+|---|---|
+| S1 age, S2 scaffolding, S3 era, S4 heat, S5 district heat, S6 skybridges | **Shipped** |
+| S8 downtown/centrality | **Shipped** (import resolution is best-effort: exact-ish for Python via `ast`, a relative-path regex for JS/TS) |
+| S9 floors that mean something | **Partly shipped**: entrypoint marker and complexity are computed and shown in the detail report; floor-band tinting inside the 3D interior itself is not done |
+| S10 complexity bracing | **Data only**: `Floor.complexity` is computed and shown in the detail report; the 3D cross-bracing geometry on the facade is not built |
+| S11 underground utilities | **Not implemented** — needs the import edge list (only in-degree counts were kept) plus a new toggle and tunnel geometry; real remaining work |
+| S12 bus-factor-1 | **Shipped** |
+| S13 nested districts | **Metadata only, not a re-layout**: `district.pathSegments` (breadcrumb) and `district.subfolders` (one level deeper) are emitted from existing file paths; `analyzer/layout.py`'s treemap, plaza reservation and street geometry are untouched. A true recursive treemap with raised plinths per level remains future work, flagged in the original plan below as the highest-risk item — deliberately not risked in this pass |
+| S14 drill-down/breadcrumb | **Shipped** as a breadcrumb + clickable sub-folder narrowing in the inspector/detail report; camera zoom-to-region and a fade-outside-the-region effect are not built |
+| S15 facet index, S16 filter bar, S17 colour lens, S18 chips | **Shipped** |
+| S19 detail window | **Shipped as a report**, not a second orbiting 3D render of the selected building — a text/table report with metrics, floors, activity, co-changed files and (for a district) sub-folders and largest files. The lasso/rectangle-select extension in overview mode is not built |
+| S7 time-lapse | **Not implemented** — the monthly `activity` data it needs exists (S4), but the scrub slider and per-instance appear-at-birth animation are not built |
+
+**Why the gaps**: this session has no browser, so nothing in `viewer/` could be verified visually —
+every shipped viewer change was checked with `node --check` (syntax) and by tracing it against an
+existing, already-correct pattern in the same file (e.g. new instanced props mirror `_addRoofProps`;
+new colour lenses mirror `highlightDistrict`'s revertible-`baseColors` technique). S11, S7 and the full
+S13 re-layout are each a genuinely new interactive mechanism (a toggle-driven tunnel view, a frame-loop
+animation driven by a new slider, a recursive rewrite of `build_layout`'s treemap) that would be
+irresponsible to ship unverified at that level of novelty. They remain accurately described below as
+not-yet-built, with everything the next session needs to build them.
+
 This is a plan, not shipped functionality. Nothing in this document changes the analyzer, the layout,
 the emitter, or the viewer. It exists so an implementing agent (or the next session) can pick up any
 item and build it without re-deriving the codebase first.

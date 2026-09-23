@@ -34,6 +34,9 @@ class Floor:
     end_line: int = 0
     loc: int = 0              # lines of source this floor spans
     depth: int = 0            # 0 = top level, 1 = nested (methods inside a class)
+    is_entrypoint: bool = False  # a __main__ guard or a function literally named main
+    complexity: int = 0       # decision points: If/For/While/Try/BoolOp/comprehension (exact
+                              # for Python; a keyword count for brace languages, medium confidence)
 
 
 @dataclass

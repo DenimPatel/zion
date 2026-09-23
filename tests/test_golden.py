@@ -234,6 +234,38 @@ class GoldenCityTests(TempRepoCase):
         self.assertFalse(by_path["pkg/c.py"]["downtown"])
         self.assertFalse(by_path["pkg/a.py"]["downtown"])
 
+    def test_sole_tenant_flags_a_single_owner_with_enough_commits(self):
+        import support
+
+        repo = self.scratch()
+        support.make_repo(repo, commit=False)
+        support.git_commit(repo, "initial", author="Ada Lovelace", date="2024-01-01T10:00:00+00:00")
+        for i in range(2):
+            with open(os.path.join(repo, "alpha", "main.py"), "a", encoding="utf-8") as fh:
+                fh.write(f"\n# revision {i}\n")
+            support.git_commit(repo, f"solo revision {i}", author="Ada Lovelace", date=f"2024-0{i + 2}-01T10:00:00+00:00")
+        for i in range(2):
+            with open(os.path.join(repo, "README.md"), "a", encoding="utf-8") as fh:
+                fh.write(f"\nshared revision {i}\n")
+            support.git_commit(
+                repo, f"shared revision {i}",
+                author="Ada Lovelace" if i % 2 else "Grace Hopper",
+                date=f"2024-0{i + 4}-01T10:00:00+00:00",
+            )
+
+        analysis, layout, result = self.build_city(repo)
+        manifest = load_manifest(result.out_dir)
+        strings = read_string_table(os.path.join(result.out_dir, "strings.bin"))
+        self.assertTrue(manifest["flags"]["authorship"])
+
+        by_path = {}
+        for district in manifest["districts"]:
+            chunk = read_json(os.path.join(result.out_dir, district["chunk"]))
+            for building in chunk["buildings"]:
+                by_path[resolve(strings, building["path"])] = building
+
+        self.assertTrue(by_path["alpha/main.py"]["soleTenant"])
+
     def test_include_noise_adds_ruins(self):
         repo = make_repo(self.scratch())
         _analysis, _layout, clean = self.build_city(repo, out_dir=os.path.join(self._tmp, "clean"))

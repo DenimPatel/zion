@@ -108,6 +108,7 @@ export async function renderBuilding(source, id) {
     rows.push(['downtown', building.downtown ? 'yes' : 'no']);
     rows.push(['imported by', `${building.importInDegree || 0} other file(s) (best-effort)`]);
   }
+  if (flags.sole_tenant) rows.push(['bus factor', building.soleTenant ? '1 (one author owns almost all of it)' : 'shared']);
   if (flags.authorship && building.author >= 0) {
     rows.push(['author', source.s(building.author)]);
     rows.push(['ownership', `${Math.round((building.ownership || 0) * 100)}% of lines`]);
@@ -129,11 +130,16 @@ export async function renderBuilding(source, id) {
       root.append(el('h2', { textContent: 'Floors' }));
       const list = el('div', { className: 'floor-list' });
       for (const floor of detail.floors) {
+        const name = (source.s(floor.name) || '(anonymous)') + (floor.isEntrypoint ? ' ⭐' : '');
         list.append(
           el('div', { className: 'floor-row' }, [
-            el('span', { className: 'floor-name', textContent: source.s(floor.name) || '(anonymous)' }),
+            el('span', { className: 'floor-name', textContent: name }),
             el('span', { className: 'floor-kind', textContent: floor.kind }),
             el('span', { className: 'floor-loc', textContent: `${floor.loc} lines` }),
+            el('span', {
+              className: 'floor-kind',
+              textContent: floor.complexity ? `complexity ${floor.complexity}` : '',
+            }),
           ])
         );
       }

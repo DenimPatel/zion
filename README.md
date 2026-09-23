@@ -46,6 +46,9 @@ Everything in the city is one of these, and nothing is decoration.
 | first commit within the newest activity window | scaffolding |
 | recent, decay-weighted churn (percentile) | rooftop beacons feeding cranes; district ground heat |
 | co-change degree + import in-degree + heat + author count | downtown towers (glass tint, antenna) |
+| one author owns ≥ 90% of a file's lines | a corner flag (bus factor 1) |
+| decision points per function/class (exact for Python, heuristic elsewhere) | floor complexity, shown in the detail report |
+| a `__main__` guard or a function named `main`/`run` | a ⭐ next to that floor in the detail report |
 
 ### Why height is never bytes on disk
 

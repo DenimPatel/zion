@@ -22,6 +22,7 @@ import {
   nearGeometry,
   roofPropGeometry,
   scaffoldingGeometry,
+  soleTenantMarkerGeometry,
 } from './shapes.js';
 import {
   makeMassingDepthMaterial,
@@ -228,6 +229,7 @@ export class CityMesh {
     const craneCandidates = [];
     const scaffoldCandidates = [];
     const antennaCandidates = [];
+    const soleTenantCandidates = [];
     const churnEligible = Boolean(manifest.flags && manifest.flags.churn);
     const ageEligible = Boolean(manifest.flags && manifest.flags.age);
     const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
@@ -328,6 +330,10 @@ export class CityMesh {
         if (detailed && downtownEligible && building.downtown) {
           antennaCandidates.push({ x, z, width, depth, height });
         }
+
+        if (detailed && authorTint && building.soleTenant) {
+          soleTenantCandidates.push({ x, z, width, depth });
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
@@ -353,6 +359,7 @@ export class CityMesh {
     this._addCranes(craneCandidates);
     this._addScaffolding(scaffoldCandidates);
     this._addAntennas(antennaCandidates);
+    this._addSoleTenantMarkers(soleTenantCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
@@ -692,6 +699,29 @@ export class CityMesh {
       const spread = Math.min(tower.width, tower.depth) * 0.5;
       matrix.makeScale(spread, Math.max(4, spread * 3), spread);
       matrix.setPosition(tower.x, tower.height, tower.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * A small flag at one corner of every bus-factor-1 building's plot (S12):
+   * one author owns almost all of it, and enough commits that it is not just
+   * a file nobody else happened to touch yet.
+   */
+  _addSoleTenantMarkers(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const material = new THREE.MeshStandardMaterial({ color: 0xd44b4b, roughness: 0.7, metalness: 0.1 });
+    const mesh = new THREE.InstancedMesh(soleTenantMarkerGeometry(THREE), material, candidates.length);
+    mesh.name = 'sole-tenant-markers';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    candidates.forEach((plot, index) => {
+      const scale = Math.min(2.2, Math.max(0.9, Math.min(plot.width, plot.depth) * 0.3));
+      matrix.makeScale(scale, scale, scale);
+      matrix.setPosition(plot.x + 0.6, 0, plot.z + 0.6);
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
