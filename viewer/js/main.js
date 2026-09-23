@@ -3458,6 +3458,10 @@ async function runSelfTest() {
   const rows = document.querySelectorAll('#cityhall-body tr.clickable').length;
   check('city-hall-open', context.cityHall.open);
   check('city-hall-rows', rows > 0, `${rows} clickable rows`);
+  const folderRows = [...document.querySelectorAll('#cityhall-body tr[data-folder-row]')];
+  const unresolved = folderRows.filter((tr) => tr.dataset.folderRow === '').length;
+  check('city-hall-folders-resolve', state.source.locked || (folderRows.length > 0 && unresolved === 0),
+    `${folderRows.length - unresolved} of ${folderRows.length} folder rows fly to their district`);
 
   // 4. Teleport works from a City Hall row.
   const firstDistrict = state.source.manifest.districts[0];

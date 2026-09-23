@@ -106,9 +106,14 @@ export class CityHall {
     // Folders -> teleport
     const folderTable = section('Districts (click to fly there)');
     for (const row of stats.folders) {
-      const district = manifest.districts.find((d) => d.name === row.name);
+      // Rows carry the district's key (its full folder path), not its short
+      // name: matching on the name missed every nested folder, so those rows
+      // neither flew anywhere nor showed a grade.
+      const district = manifest.districts.find((d) => d.key === row.name) ||
+        manifest.districts.find((d) => d.name === row.name);
       const tr = document.createElement('tr');
       tr.className = 'clickable';
+      tr.dataset.folderRow = district ? String(district.id) : '';
       const g = district && district.grade
         ? `<span class="grade-badge grade-${district.grade}">${district.grade}</span>` +
           (district.baselineGrade && district.baselineGrade !== district.grade
