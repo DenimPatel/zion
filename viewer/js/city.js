@@ -26,6 +26,12 @@ import {
 } from './shapes.js';
 import { beaconGeometry, beaconTiers } from './parts/beacons.js';
 import {
+  cyclePennantGeometry,
+  hazardBarrierGeometry,
+  rakingShoreGeometry,
+  vacantBoardGeometry,
+} from './parts/health.js';
+import {
   makeMassingDepthMaterial,
   patchFacade,
   patchRoofProps,
@@ -66,6 +72,49 @@ const MAX_DETAILED = 6000;
 /** Rooftop clutter, tallest buildings first, in one extra draw call. */
 const MAX_ROOF_PROPS = 3000;
 const MAX_CRANES = 1500;
+const MAX_HEALTH_PROPS = 2000;
+
+// Road classes, as `analyzer/layout.py` emits them in each street's fifth
+// field: 0 highway, 1 avenue, 2 street, 3 alley. Surface colour lightens and
+// the surface rises a hair per class, so a narrower road never z-fights the
+// wider one it meets. Plinths rise `PLINTH_STEP` per region level (capped at
+// three) and every road sits on the plinth of the region it runs through.
+export const ROAD_STYLE = [
+  { name: 'Highway', colour: 0x1b1f28, marking: 0xf2c14e, edge: 0xd9dde4 },
+  { name: 'Avenue', colour: 0x2a303c, marking: 0xe8ebef },
+  { name: 'Street', colour: 0x394150 },
+  { name: 'Alley', colour: 0x4d5566 },
+];
+export const PLINTH_STEP = 0.14;
+const PLINTH_LEVELS = 3;
+export function plinthTop(level) {
+  return PLINTH_STEP * Math.min(PLINTH_LEVELS, Math.max(0, level || 0));
+}
+
+/** One colour per import cycle, stable across rebuilds and far apart in hue. */
+export function cycleColour(THREE, cycleId) {
+  const hue = ((cycleId || 0) * 0.61803398875) % 1;
+  return new THREE.Color().setHSL(hue, 0.75, 0.55);
+}
+
+// The health lens: each building takes the colour of its most pressing signal,
+// in the order an architect would triage them.
+export const HEALTH_COLOURS = {
+  hotspot: 0xff4d2e,
+  cycle: 0xb36bff,
+  oversized: 0xff9a2e,
+  knowledge: 0xffd23f,
+  orphan: 0x8a8f99,
+  healthy: 0x56657a,
+};
+export function healthSignal(building, flags = {}) {
+  if (flags.hotspots && building.isHotspot) return 'hotspot';
+  if (flags.imports && building.cycle) return 'cycle';
+  if (building.oversized) return 'oversized';
+  if (flags.knowledge && building.knowledgeRisk) return 'knowledge';
+  if (flags.imports && building.orphan) return 'orphan';
+  return 'healthy';
+}
 
 /**
  * The eight massing geometries, built once for the life of the page.
@@ -274,6 +323,16 @@ export class CityMesh {
     const scaffoldCandidates = [];
     const antennaCandidates = [];
     const soleTenantCandidates = [];
+    const knowledgeCandidates = [];
+    const barrierCandidates = [];
+    const shoreCandidates = [];
+    const vacantCandidates = [];
+    const pennantCandidates = [];
+    const hotspotEligible = option('hotspots', flag('hotspots'));
+    const oversizedEligible = option('oversized', true);
+    const orphanEligible = option('orphans', flag('imports'));
+    const cycleEligible = option('cycles', flag('imports'));
+    const knowledgeEligible = option('knowledge', flag('knowledge'));
     const churnEligible = option('churn', flag('churn'));
     const ageEligible = option('age', flag('age'));
     const downtownEligible = option('downtown', flag('downtown'));
@@ -319,6 +378,9 @@ export class CityMesh {
       const lit = new Float32Array(members.length);
 
       members.forEach((building, index) => {
+        // Ground props stand on the district's plinth, not inside it.
+        const districtRecord = manifest.districts && manifest.districts[building.district];
+        const base = plinthTop(districtRecord ? districtRecord.level : 0);
         const x = (building.x || 0) + (building.width || 4) / 2;
         const z = (building.y || 0) + (building.depth || 4) / 2;
         // Civic forms are drawn a little larger than their plot. City Hall has a
@@ -353,7 +415,10 @@ export class CityMesh {
         const value = building.lit === null || building.lit === undefined
           ? (archetype === 'park' ? 0 : 0.18)
           : building.lit;
-        lit[index] = Math.min(litCap, Math.max(0, value));
+        // A vacant building is boarded up: its windows go dark whatever its
+        // documentation says, which is what makes a vacancy read from the air.
+        const vacant = orphanEligible && building.orphan;
+        lit[index] = vacant ? 0 : Math.min(litCap, Math.max(0, value));
         traits[index * 4] = lit[index];
         traits[index * 4 + 1] = styleFor(building);
 
@@ -398,8 +463,25 @@ export class CityMesh {
           antennaCandidates.push({ x, z, width, depth, height });
         }
 
-        if (detailed && authorTint && building.soleTenant) {
-          soleTenantCandidates.push({ x, z, width, depth });
+        // The owner has moved out: a red flag replaces the sole-tenant one, so
+        // one corner never carries two flags that say nearly the same thing.
+        if (detailed && knowledgeEligible && building.knowledgeRisk) {
+          knowledgeCandidates.push({ x, z, width, depth, base });
+        } else if (detailed && authorTint && building.soleTenant) {
+          soleTenantCandidates.push({ x, z, width, depth, base });
+        }
+
+        if (detailed && hotspotEligible && building.isHotspot) {
+          barrierCandidates.push({ x, z, width, depth, height, base });
+        }
+        if (detailed && oversizedEligible && building.oversized) {
+          shoreCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && vacant) {
+          vacantCandidates.push({ x, z, width, depth, height, base });
+        }
+        if (detailed && cycleEligible && building.cycle) {
+          pennantCandidates.push({ x, z, width, depth, height, cycle: building.cycle });
         }
       });
 
@@ -428,7 +510,13 @@ export class CityMesh {
     this._addScaffolding(scaffoldCandidates);
     this._addAntennas(antennaCandidates);
     this._addSoleTenantMarkers(soleTenantCandidates);
+    this._addSoleTenantMarkers(knowledgeCandidates, 'knowledge-flags', 0xe8332a);
+    this._addBarriers(barrierCandidates);
+    this._addShores(shoreCandidates);
+    this._addVacantBoards(vacantCandidates);
+    this._addCyclePennants(pennantCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
+    this._addRegions(manifest.regions || []);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
     return this.group;
@@ -651,7 +739,7 @@ export class CityMesh {
   /**
    * Re-tint every building by a different lens: archetype (the default,
    * matching how `build()` colours things), language, or author. The legend
-   * panel is expected to switch its key to match (see main.js::renderLegend).
+   * guide shows a key for the health lens (see main.js::renderLensKey).
    *
    * Rewrites `baseColors` itself, not just the live instance colour, so a
    * hover highlight or an active filter reverts to the *new* lens rather than
@@ -685,6 +773,8 @@ export class CityMesh {
           // decay-weighted churn, not lifetime totals (S4).
           const value = Math.max(0, Math.min(1, building.heat || 0));
           colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
+        } else if (lens === 'health') {
+          colour.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
         } else if (lens === 'downtown') {
           const centrality = Math.max(0, Math.min(1, building.centrality || 0));
           colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
@@ -823,17 +913,17 @@ export class CityMesh {
    * one author owns almost all of it, and enough commits that it is not just
    * a file nobody else happened to touch yet.
    */
-  _addSoleTenantMarkers(candidates) {
+  _addSoleTenantMarkers(candidates, name = 'sole-tenant-markers', colour = 0xe4c85a) {
     if (!candidates.length) return;
     const THREE = this.THREE;
     const material = new THREE.MeshStandardMaterial({
-      color: 0xd44b4b,
+      color: colour,
       roughness: 0.7,
       metalness: 0.1,
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.InstancedMesh(soleTenantMarkerGeometry(THREE), material, candidates.length);
-    mesh.name = 'sole-tenant-markers';
+    mesh.name = name;
     mesh.raycast = () => {};
     const matrix = new THREE.Matrix4();
     const rotation = new THREE.Matrix4();
@@ -847,7 +937,7 @@ export class CityMesh {
       // way real flags on real poles do not all point one direction.
       rotation.makeRotationY(seedOffset(plot.width + plot.depth + index) * Math.PI * 2);
       matrix.multiplyMatrices(rotation, scaleMatrix);
-      matrix.setPosition(plot.x + 0.6, 0, plot.z + 0.6);
+      matrix.setPosition(plot.x + 0.6, plot.base || 0, plot.z + 0.6);
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
@@ -870,26 +960,239 @@ export class CityMesh {
     this.group.add(ground);
   }
 
-  _addStreets(streets) {
-    if (!streets.length) return;
+  /**
+   * Striped barriers around every hotspot: large and constantly dug up.
+   * Unit X/Z is the footprint, Y is metres, so a barrier is waist-high on a
+   * bungalow and on a skyscraper alike.
+   */
+  _addBarriers(candidates) {
+    if (!candidates.length) return;
     const THREE = this.THREE;
-    const geometry = new THREE.PlaneGeometry(1, 1);
-    geometry.rotateX(-Math.PI / 2);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x2b3140,
-      roughness: 0.9,
-      metalness: 0.05,
-    });
-    const mesh = new THREE.InstancedMesh(geometry, material, streets.length);
-    mesh.name = 'streets';
-    mesh.receiveShadow = true;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.05 });
+    const mesh = new THREE.InstancedMesh(hazardBarrierGeometry(THREE), material, list.length);
+    mesh.name = 'hazard-barriers';
+    mesh.raycast = () => {};
     const matrix = new THREE.Matrix4();
-    streets.forEach(([x, z, w, h], index) => {
-      matrix.makeScale(w, 1, h);
-      matrix.setPosition(x + w / 2, 0.06, z + h / 2);
+    list.forEach((plot, index) => {
+      matrix.makeScale(plot.width + 1.2, 1, plot.depth + 1.2);
+      matrix.setPosition(plot.x, plot.base || 0, plot.z);
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Raking shores braced against every oversized building: a wall that can no
+   * longer carry itself. Scaled by the building's drawn footprint so the
+   * braces meet the facade, but capped at a few storeys: a shore is a prop
+   * at the base of a wall, not a second skeleton up the whole tower.
+   */
+  _addShores(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const matrix = new THREE.Matrix4();
+    const list = candidates.slice(0, MAX_HEALTH_PROPS).map((plot) => {
+      const tall = Math.min(plot.height, 14 + Math.min(plot.width, plot.depth) * 1.2);
+      return matrix.clone().makeScale(plot.width, tall, plot.depth).setPosition(plot.x, 0, plot.z);
+    });
+    const material = new THREE.MeshStandardMaterial({ color: 0x8a6a45, roughness: 0.8, metalness: 0.15 });
+    const mesh = new THREE.InstancedMesh(rakingShoreGeometry(THREE), material, list.length);
+    mesh.name = 'raking-shores';
+    mesh.castShadow = true;
+    mesh.raycast = () => {};
+    list.forEach((matrix, index) => mesh.setMatrixAt(index, matrix));
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A boarded entrance and a vacancy sign on every orphan candidate. */
+  _addVacantBoards(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 });
+    const mesh = new THREE.InstancedMesh(vacantBoardGeometry(THREE), material, list.length);
+    mesh.name = 'vacant-boards';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      matrix.makeScale(plot.width, 1, plot.depth);
+      matrix.setPosition(plot.x, plot.base || 0, plot.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * A pennant on the roof of every file in an import cycle, the same colour
+   * for every member of one cycle -- so a loop reads as a set of matching
+   * flags across the skyline instead of as arcs, which at any real scale
+   * turned into an unreadable tangle.
+   */
+  _addCyclePennants(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.6,
+      metalness: 0.1,
+      side: THREE.DoubleSide,
+      emissive: new THREE.Color(0x222222),
+    });
+    const mesh = new THREE.InstancedMesh(cyclePennantGeometry(THREE), material, list.length);
+    mesh.name = 'cycle-pennants';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Matrix4();
+    list.forEach((roof, index) => {
+      const size = Math.min(9, Math.max(3, Math.min(roof.width, roof.depth) * 0.55));
+      matrix.makeScale(size, size, size);
+      rotation.makeRotationY(seedOffset(roof.cycle * 7.13) * Math.PI * 2);
+      matrix.premultiply(rotation);
+      matrix.setPosition(roof.x - roof.width * 0.2, roof.height, roof.z - roof.depth * 0.2);
+      mesh.setMatrixAt(index, matrix);
+      mesh.setColorAt(index, cycleColour(THREE, roof.cycle));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Roads by class: highways between top-level folders, then avenues, streets
+   * and alleys ever deeper in the folder tree. One instanced surface per class,
+   * plus painted markings -- a dashed centre line on highways and avenues and
+   * solid edge lines on highways -- so the hierarchy reads from the air even in
+   * monochrome. A road without a class (an older manifest) is a street.
+   */
+  _addStreets(streets) {
+    if (!streets.length) return;
+    const THREE = this.THREE;
+    const regions = this.source.manifest.regions || [];
+    const plane = new THREE.PlaneGeometry(1, 1);
+    plane.rotateX(-Math.PI / 2);
+    const byClass = ROAD_STYLE.map(() => []);
+    for (const street of streets) {
+      const cls = Math.max(0, Math.min(ROAD_STYLE.length - 1, street.length > 4 ? street[4] : 2));
+      byClass[cls].push(street);
+    }
+    const widths = (this.source.manifest.roads && this.source.manifest.roads.widths) || [14, 9, 5.5, 3];
+    const matrix = new THREE.Matrix4();
+    const dashes = [];
+    const edges = [];
+
+    byClass.forEach((list, cls) => {
+      if (!list.length) return;
+      const style = ROAD_STYLE[cls];
+      const material = new THREE.MeshStandardMaterial({
+        color: style.colour,
+        roughness: cls === 3 ? 1 : 0.9,
+        metalness: 0.02,
+        polygonOffset: true,
+        polygonOffsetFactor: -1 - cls,
+        polygonOffsetUnits: -1 - cls,
+      });
+      const mesh = new THREE.InstancedMesh(plane.clone(), material, list.length);
+      mesh.name = `streets-${ROAD_STYLE[cls].name.toLowerCase()}`;
+      mesh.receiveShadow = true;
+      mesh.raycast = () => {};
+      list.forEach(([x, z, w, h], index) => {
+        const y = roadLevel(regions, cls, x + w / 2, z + h / 2) + 0.05 + cls * 0.004;
+        matrix.makeScale(w, 1, h);
+        matrix.setPosition(x + w / 2, y, z + h / 2);
+        mesh.setMatrixAt(index, matrix);
+        // Markings only on a full-width carriageway, not on the shoulder
+        // strips that fill the gap between the ring road and the bands.
+        const across = Math.min(w, h);
+        const along = Math.max(w, h);
+        const full = across >= widths[cls] * 0.8;
+        if (!full || !style.marking || along < 12) return;
+        const horizontal = w >= h;
+        const period = cls === 0 ? 9 : 7;
+        const dash = period * 0.55;
+        const count = Math.floor(along / period);
+        const start = (horizontal ? x : z) + (along - count * period) / 2 + (period - dash) / 2;
+        for (let i = 0; i < count; i++) {
+          const c = start + i * period + dash / 2;
+          dashes.push(horizontal
+            ? { x: c, z: z + h / 2, w: dash, h: 0.28, y, colour: style.marking }
+            : { x: x + w / 2, z: c, w: 0.28, h: dash, y, colour: style.marking });
+        }
+        if (style.edge) {
+          const inset = across * 0.12;
+          for (const side of [-1, 1]) {
+            edges.push(horizontal
+              ? { x: x + w / 2, z: z + h / 2 + side * (h / 2 - inset), w, h: 0.22, y, colour: style.edge }
+              : { x: x + w / 2 + side * (w / 2 - inset), z: z + h / 2, w: 0.22, h, y, colour: style.edge });
+          }
+        }
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      this.group.add(mesh);
+    });
+
+    const marks = [...dashes, ...edges].slice(0, 60000);
+    if (marks.length) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        polygonOffset: true,
+        polygonOffsetFactor: -8,
+        polygonOffsetUnits: -8,
+      });
+      const mesh = new THREE.InstancedMesh(plane.clone(), material, marks.length);
+      mesh.name = 'streets-markings';
+      mesh.raycast = () => {};
+      const colour = new THREE.Color();
+      marks.forEach((mark, index) => {
+        matrix.makeScale(mark.w, 1, mark.h);
+        matrix.setPosition(mark.x, mark.y + 0.01, mark.z);
+        mesh.setMatrixAt(index, matrix);
+        mesh.setColorAt(index, colour.set(mark.colour));
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this.group.add(mesh);
+    }
+    plane.dispose();
+  }
+
+  /**
+   * A raised plinth under every folder that splits into several
+   * neighbourhoods, one step higher per nesting level, each a shade lighter:
+   * boroughs contain neighbourhoods contain blocks. The curb is the box's own
+   * side, so the edge of a folder is a visible step from street level.
+   */
+  _addRegions(regions) {
+    if (!regions.length) return;
+    const THREE = this.THREE;
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    geometry.translate(0, 0.5, 0);
+    const material = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95, metalness: 0 });
+    const mesh = new THREE.InstancedMesh(geometry, material, regions.length);
+    mesh.name = 'region-plinths';
+    mesh.receiveShadow = true;
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+    const base = new THREE.Color(0x222938);
+    const light = new THREE.Color(0x4a5670);
+    regions.forEach((region, index) => {
+      const [x, z, w, h] = region.rect;
+      const top = plinthTop(region.level);
+      matrix.makeScale(w, Math.max(0.02, top), h);
+      matrix.setPosition(x + w / 2, 0, z + h / 2);
+      mesh.setMatrixAt(index, matrix);
+      colour.copy(base).lerp(light, Math.min(1, (region.level - 1) / 3 + 0.2));
+      mesh.setColorAt(index, colour);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.userData.baseColors = Float32Array.from(mesh.instanceColor.array);
+    // instanceId -> region, so a plinth under the cursor is a folder to inspect.
+    mesh.userData.regions = regions;
     this.group.add(mesh);
   }
 
@@ -903,6 +1206,9 @@ export class CityMesh {
       color: 0x1d2330,
       roughness: 1,
       metalness: 0,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     });
     const mesh = new THREE.InstancedMesh(geometry, material, districts.length);
     mesh.name = 'district-plates';
@@ -920,7 +1226,8 @@ export class CityMesh {
     districts.forEach((district, index) => {
       const [x, z, w, h] = district.rect;
       matrix.makeScale(w, 1, h);
-      matrix.setPosition(x + w / 2, 0.03, z + h / 2);
+      // On top of the plinth of the region it stands in.
+      matrix.setPosition(x + w / 2, plinthTop(district.level) + 0.03, z + h / 2);
       mesh.setMatrixAt(index, matrix);
       colour.copy(white);
       if (churnEligible && district.heat) {
@@ -1110,6 +1417,22 @@ export class CityMesh {
       }
     });
   }
+}
+
+/**
+ * The ground height a road runs at: the plinth of the innermost region whose
+ * rect contains the road's centre. A highway runs between top-level regions,
+ * so it is always at street level.
+ */
+function roadLevel(regions, cls, cx, cz) {
+  if (cls === 0 || !regions.length) return 0;
+  let level = 0;
+  for (const region of regions) {
+    if (region.level <= level) continue;
+    const [x, z, w, h] = region.rect;
+    if (cx >= x && cx <= x + w && cz >= z && cz <= z + h) level = region.level;
+  }
+  return plinthTop(level);
 }
 
 /**

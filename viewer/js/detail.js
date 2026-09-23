@@ -103,12 +103,22 @@ export async function renderBuilding(source, id) {
     rows.push(['new construction', building.isNew ? 'yes' : 'no']);
   }
   if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((building.heat || 0) * 100)}th percentile`]);
-  if (flags.downtown) {
+  if (flags.centrality) {
     rows.push(['centrality', `${Math.round((building.centrality || 0) * 100)}th percentile`]);
     rows.push(['downtown', building.downtown ? 'yes' : 'no']);
     rows.push(['imported by', `${building.importInDegree || 0} other file(s) (best-effort)`]);
   }
-  if (flags.sole_tenant) rows.push(['bus factor', building.soleTenant ? '1 (one author owns almost all of it)' : 'shared']);
+  if (flags.authorship) {
+    rows.push(['bus factor', building.busFactor
+      ? `${building.busFactor}${building.soleTenant ? ' (one author owns almost all of it)' : ''}`
+      : building.soleTenant ? '1 (one author owns almost all of it)' : 'shared']);
+  }
+  if (building.firstAuthor >= 0) rows.push(['built by', source.s(building.firstAuthor)]);
+  if (building.lastAuthor >= 0) rows.push(['last edited by', source.s(building.lastAuthor)]);
+  if (flags.hotspots && building.isHotspot) rows.push(['hotspot', `#${building.hotspotRank} (frequent change × size)`]);
+  if (building.oversized) rows.push(['oversized', `top ${Math.max(1, Math.round((1 - (building.sizePct || 0)) * 100))}% by lines`]);
+  if (flags.imports && building.cycle) rows.push(['import cycle', `${building.cycleSize} files`]);
+  if (flags.imports && building.orphan) rows.push(['possible dead code', 'not imported, untouched 6+ months']);
   if (flags.authorship && building.author >= 0) {
     rows.push(['author', source.s(building.author)]);
     rows.push(['ownership', `${Math.round((building.ownership || 0) * 100)}% of lines`]);

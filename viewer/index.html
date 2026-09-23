@@ -23,27 +23,47 @@
       <p id="city-subtitle">loading&hellip;</p>
     </div>
     <button id="panels-toggle" type="button" aria-pressed="false"
-            aria-controls="legend xray" title="Toggle legend and keys (L)">
-      <span id="panels-toggle-label">Hide legend &amp; keys</span>
+            aria-controls="guide" title="Toggle the city guide (L)">
+      <span id="panels-toggle-label">Hide guide</span>
     </button>
   </header>
 
-  <section id="legend" aria-label="Legend">
-    <h2>Legend</h2>
-    <ul id="legend-list"></ul>
-    <div id="legend-notes"></div>
-    <div id="filter" aria-label="Filter">
-      <input id="filter-input" type="text" placeholder="ext:py name:README.md is:test loc&gt;500">
-      <p id="filter-summary" class="hint">every building shown</p>
-      <div id="filter-chips"></div>
-      <select id="lens-select" title="colour by">
-        <option value="archetype">colour: archetype</option>
-        <option value="language">colour: language</option>
-        <option value="author">colour: author</option>
-        <option value="era">colour: age (era)</option>
-        <option value="heat">colour: recent activity (heat)</option>
-        <option value="downtown">colour: centrality (downtown)</option>
-      </select>
+  <!-- The City Guide: the legend made switchable, explained and counted, in
+       one panel. "Read the city" says what every visual means and switches its
+       layer; "Health" is the architect's shortlist; "Filter" finds and colours. -->
+  <section id="guide" aria-label="City guide">
+    <div class="guide-head">
+      <h2>City guide</h2>
+      <div class="guide-tabs" role="tablist">
+        <button type="button" role="tab" id="guide-tab-read" aria-controls="guide-read" aria-selected="true">Read the city</button>
+        <button type="button" role="tab" id="guide-tab-health" aria-controls="guide-health" aria-selected="false">Health</button>
+        <button type="button" role="tab" id="guide-tab-filter" aria-controls="guide-filter" aria-selected="false">Filter</button>
+      </div>
+    </div>
+    <div id="guide-read" role="tabpanel" aria-labelledby="guide-tab-read">
+      <p class="hint guide-intro">Every shape, colour and prop is a measurement. Click a row to learn
+        what it means; flip its switch to show or hide that layer.</p>
+      <div id="guide-list"></div>
+      <button id="guide-reset" type="button" hidden>Show every layer</button>
+      <div id="guide-notes"></div>
+    </div>
+    <div id="guide-health" role="tabpanel" aria-labelledby="guide-tab-health" hidden></div>
+    <div id="guide-filter" role="tabpanel" aria-labelledby="guide-tab-filter" hidden>
+      <div id="filter" aria-label="Filter">
+        <input id="filter-input" type="text" placeholder="ext:py is:hotspot loc&gt;500 path:src/**">
+        <p id="filter-summary" class="hint">every building shown</p>
+        <div id="filter-chips"></div>
+        <select id="lens-select" title="colour by">
+          <option value="archetype">colour: archetype</option>
+          <option value="health">colour: health (architect)</option>
+          <option value="language">colour: language</option>
+          <option value="author">colour: author</option>
+          <option value="era">colour: age (era)</option>
+          <option value="heat">colour: recent activity (heat)</option>
+          <option value="downtown">colour: centrality (downtown)</option>
+        </select>
+        <div id="lens-key" class="hint"></div>
+      </div>
     </div>
   </section>
 
@@ -51,18 +71,10 @@
     <button id="inspector-close" title="Close">&times;</button>
     <h2 id="inspector-title">&mdash;</h2>
     <p id="inspector-path"></p>
-    <dl id="inspector-metrics"></dl>
+    <div id="inspector-metrics"></div>
     <div id="inspector-floors"></div>
     <p id="inspector-source-hint" class="hint"></p>
     <button id="inspector-open-detail" hidden>Open details &#8599;</button>
-  </section>
-
-  <section id="xray" aria-label="Legend key">
-    <h2>Keys</h2>
-    <table id="xray-table"></table>
-    <button id="xray-reset" type="button" hidden>Show every layer</button>
-    <p id="xray-hint" class="hint">Click a row to show or hide that layer. Greyed rows
-       have no separate layer to switch &mdash; they are encodings, not objects.</p>
   </section>
 
   <section id="cityhall" hidden aria-label="City Hall">
@@ -93,6 +105,7 @@
     <div id="tour-progress"><div id="tour-progress-bar"></div></div>
   </div>
 
+  <div id="map-labels" aria-hidden="true"></div>
   <div id="prompt" hidden></div>
   <div id="crosshair" aria-hidden="true"></div>
   <div id="tooltip" hidden>

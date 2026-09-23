@@ -99,6 +99,12 @@ export class CitySource {
     return `District ${district.id}`;
   }
 
+  /** A nested-folder region's label; boroughs are numbered while locked. */
+  regionLabel(region) {
+    if (!this.locked) return this.s(region.name) || `Region ${region.id}`;
+    return `Borough ${region.id}`;
+  }
+
   async assignLockedAddresses(buildings) {
     if (!this.locked || !this.vault) return;
     for (const building of buildings) {

@@ -16,8 +16,9 @@ plain status per item; the rest of this document is the original plan and is kep
 | S10 complexity bracing | **Data only**: `Floor.complexity` is computed and shown in the detail report; the 3D cross-bracing geometry on the facade is not built |
 | S11 underground utilities | **Not implemented** — needs the import edge list (only in-degree counts were kept) plus a new toggle and tunnel geometry; real remaining work |
 | S12 bus-factor-1 | **Shipped** |
-| S13 nested districts | **Metadata only, not a re-layout**: `district.pathSegments` (breadcrumb) and `district.subfolders` (one level deeper) are emitted from existing file paths; `analyzer/layout.py`'s treemap, plaza reservation and street geometry are untouched. A true recursive treemap with raised plinths per level remains future work, flagged in the original plan below as the highest-risk item — deliberately not risked in this pass |
-| S14 drill-down/breadcrumb | **Shipped** as a breadcrumb + clickable sub-folder narrowing in the inspector/detail report; camera zoom-to-region and a fade-outside-the-region effect are not built |
+| S13 nested districts | **Shipped**: `analyzer/layout.py` lays the leaf districts (same keys, same members, same chunks) out as a nested treemap over their folder tree. Every folder that splits becomes a region (`manifest.regions`, drawn as a raised plinth one step per level), roads carry a class (`streets[i][4]`: highway → avenue → street → alley) by how far apart the folders they separate are, and single-child folder chains collapse. The plaza, frame and band spreading still run once over the top-level folders; the 60 m–3.2 km plan-size test passes unmodified, and `tests/test_nesting.py` pins leaf identity, region nesting, road narrowing and "no building on a road". Region and district names are drawn on the map by camera distance (`viewer/js/labels.js`) |
+| S14 drill-down/breadcrumb | **Shipped** as a breadcrumb + clickable sub-folder narrowing in the inspector/detail report, plus clickable region plinths with their own folder report (`Inspector.showRegion`); a fade-outside-the-region effect is not built |
+| Architect's signals (new) | **Shipped**: `analyzer/health.py` — hotspots (commit frequency × size), oversized files, orphan candidates, import cycles (Tarjan over the resolved import edges `_finalize_downtown` now keeps), knowledge risk (main owner inactive 6+ months), first author / last editor / bus factor. Drawn as hazard barriers, raking shores, boarded-up fronts, cycle pennants and a red corner flag; listed in the City Guide's Health tab and the manifest's `review` block; a `health` colour lens. Vendored code is excluded |
 | S15 facet index, S16 filter bar, S17 colour lens, S18 chips | **Shipped** |
 | S19 detail window | **Shipped as a report**, not a second orbiting 3D render of the selected building — a text/table report with metrics, floors, activity, co-changed files and (for a district) sub-folders and largest files. The lasso/rectangle-select extension in overview mode is not built |
 | S7 time-lapse | **Not implemented** — the monthly `activity` data it needs exists (S4), but the scrub slider and per-instance appear-at-birth animation are not built |
@@ -539,11 +540,11 @@ Copied from `CLAUDE.md` and made concrete for this roadmap:
   dates=(...,))` with a degenerate fixture (one author, one date, few commits) must assert the flag is
   false, the note is present, and the viewer-visible effect (self-test check) is that the geometry does
   not appear.
-- **A legend entry with a layer of its own also gets a Keys switch.** The `LEGEND_KEYS` table in
+- **A legend entry with a layer of its own also gets a City Guide switch.** The `LEGEND_KEYS` table in
   `viewer/js/main.js` is the viewer's half of the same contract: it names the layer each entry draws
   (`archetype`, `mesh` or `option`) so the reader can switch it off by hand. An entry with no separate
   layer is listed as inert, never given a dead control. Adding a legend entry without a `LEGEND_KEYS`
-  row leaves the Keys panel incomplete; the `keys-covers-legend` self-test check fails if the two lists
+  row leaves the City Guide incomplete; the `keys-covers-legend` self-test check fails if the two lists
   drift apart.
 - **`analyzer/` never writes into the analyzed repo.** All new emitted files (`index.json`,
   `bridges.json`, `detail.html`) go into `-o DIR` / the cache dir, same as everything else.

@@ -40,7 +40,7 @@ html, body {
   pointer-events: none;
   padding: 14px;
   display: grid;
-  grid-template-columns: minmax(230px, 300px) 1fr minmax(250px, 330px);
+  grid-template-columns: minmax(260px, 340px) 1fr minmax(290px, 380px);
   grid-template-rows: auto 1fr auto;
   gap: 12px;
 }
@@ -125,55 +125,246 @@ h2 {
   font-weight: 600;
 }
 
-/* ---------- legend ---------- */
-#legend {
+/* ---------- city guide (legend + keys, one panel) ---------- */
+#guide {
   grid-column: 1;
   grid-row: 2;
   align-self: start;
-  /* Thirteen rows plus the notes come to ~543px at this type size; the cap
-     only bites on a window too short to show them, where the panel scrolls
-     instead of running under the footer. */
   max-height: var(--panel-space);
-  overflow: auto;
-}
-#legend-list { margin: 0; padding: 0; list-style: none; }
-#legend-list li {
   display: flex;
-  gap: 7px;
-  align-items: baseline;
-  padding: 3px 0;
-  border-bottom: 1px dashed rgba(148, 163, 184, 0.12);
-  line-height: 1.35;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
 }
-#legend-list li:last-child { border-bottom: 0; }
-/* An entry whose metric family the confidence rules switched off. It still has
-   to be *readable* -- "off" is information, and at the old 0.42 the row was
-   gone (2.0:1 against the panel) along with the reason it was dimmed. */
-#legend-list li.disabled { opacity: 0.62; }
-#legend-list li.disabled .swatch { background: #64748b !important; }
-.swatch {
-  flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  margin-top: 4px;
-  background: var(--accent);
+.guide-head {
+  padding: 11px 12px 0;
+  border-bottom: 1px solid var(--edge);
 }
-.legend-unit {
-  color: #c3ccdc;
+.guide-tabs { display: flex; gap: 2px; }
+.guide-tabs button {
+  flex: 1;
+  padding: 6px 4px 7px;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-dim);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.guide-tabs button:hover { color: var(--ink); }
+.guide-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.guide-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#guide [role="tabpanel"] { overflow: auto; padding: 8px 12px 12px; }
+#guide [role="tabpanel"][hidden] { display: none; }
+.guide-intro { margin: 0 0 6px; line-height: 1.45; }
+
+.guide-group {
+  margin: 10px 0 3px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.guide-group:first-child { margin-top: 2px; }
+
+/* One row per legend entry: switch, true-colour swatch, name + one-line
+   meaning, live count. The name expands into the full rule. */
+.key-row {
+  display: grid;
+  grid-template-columns: 32px 14px 1fr auto;
+  gap: 2px 7px;
+  align-items: center;
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+.key-row:hover { background: rgba(255, 179, 71, 0.07); }
+.key-row.open { background: rgba(255, 179, 71, 0.09); }
+.key-row .g-name {
+  grid-column: 3;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  line-height: 1.3;
+}
+.key-row .g-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.key-row .g-name::after { content: " ▸"; color: var(--ink-dim); font-size: 9px; }
+.key-row.open .g-name::after { content: " ▾"; }
+.key-row .g-count {
+  grid-column: 4;
   font-family: var(--mono);
   font-size: 10.5px;
+  color: var(--ink-dim);
+  text-align: right;
 }
-#legend-notes {
-  margin-top: 9px;
+.key-row .g-short {
+  grid-column: 3 / 5;
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.key-row .g-more {
+  grid-column: 1 / 5;
+  margin: 4px 0 2px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--accent-dim);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #d5dbe6;
+}
+.key-row .g-more[hidden] { display: none; }
+.key-row .g-more p { margin: 0 0 6px; }
+.g-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.g-actions button, #guide-reset, .health-item {
+  padding: 3px 9px;
+  background: var(--panel-solid);
+  color: var(--ink-dim);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.g-actions button:hover, #guide-reset:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#guide-reset { margin-top: 8px; }
+#guide-reset[hidden] { display: none; }
+
+/* The switch: a small toggle, or a badge on a row with nothing to switch. */
+.g-switch {
+  grid-column: 1;
+  width: 24px;
+  height: 14px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  position: relative;
+  cursor: pointer;
+}
+.g-switch::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #0b1220;
+  transition: right 0.12s ease;
+}
+.g-switch[aria-checked="false"] { background: transparent; border-color: #64748b; }
+.g-switch[aria-checked="false"]::after { right: 11px; background: #64748b; }
+.g-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.g-badge {
+  grid-column: 1;
+  font-family: var(--mono);
+  font-size: 7.5px;
+  letter-spacing: 0.02em;
+  color: #7c8799;
+  text-transform: uppercase;
+  text-align: center;
+  line-height: 1.1;
+}
+.key-row .chip { grid-column: 2; }
+.key-row.off .g-name, .key-row.off .g-short { color: #64748b; }
+.key-row.off .chip { opacity: 0.35; }
+/* Not drawn for this repository: still readable, because "off" and its reason
+   are information. */
+.key-row.disabled { opacity: 0.66; }
+.key-row.disabled .chip { background: #64748b !important; }
+
+#guide-notes {
+  margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--edge);
   color: var(--ink-dim);
   font-size: 11.5px;
   line-height: 1.45;
 }
-#legend-notes p { margin: 0 0 5px; }
-#legend-notes p:last-child { margin-bottom: 0; }
+#guide-notes p { margin: 0 0 5px; }
+#guide-notes p:last-child { margin-bottom: 0; }
+
+/* ---------- health tab ---------- */
+.health-card {
+  margin: 0 0 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.health-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 3px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.health-card h3 .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--accent); }
+.health-card p { margin: 0 0 6px; color: var(--ink-dim); font-size: 11px; line-height: 1.4; }
+.health-card ol { margin: 0; padding: 0; list-style: none; }
+.health-item {
+  display: block;
+  width: 100%;
+  margin: 2px 0;
+  text-align: left;
+  color: var(--ink);
+  word-break: break-all;
+  font-size: 10.5px;
+}
+.health-item:hover { border-color: var(--accent-dim); color: var(--accent); }
+.health-item .meta { color: var(--ink-dim); float: right; margin-left: 6px; }
+.health-cycle { border-left: 3px solid; padding-left: 6px; margin: 4px 0 6px; }
+.health-empty { color: #7c8799; font-size: 11px; font-style: italic; }
+#lens-key { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+#lens-key span { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ---------- map labels ---------- */
+/* #hud is fixed, so it is its own stacking context: a negative z-index puts
+   the labels above the canvas but beneath every panel. */
+#map-labels {
+  position: fixed;
+  inset: 0;
+  pointer-events: none !important;
+  overflow: hidden;
+  z-index: -1;
+}
+.map-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  font-family: var(--sans);
+  color: #f5f7fb;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+}
+.map-label[hidden] { display: none; }
+.map-label.region.level-1 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #ffe2b3;
+}
+.map-label.region.level-2 { font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #ffd08a; }
+.map-label.region.level-3 { font-size: 11.5px; font-weight: 600; color: #f3c27a; }
+.map-label.district {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(8, 11, 19, 0.55);
+  color: #dfe6f1;
+}
+body.labels-hidden #map-labels { display: none; }
 
 /* ---------- inspector ---------- */
 #inspector {
@@ -205,15 +396,76 @@ h2 {
   color: var(--accent);
   word-break: break-all;
 }
-#inspector-metrics {
-  margin: 0;
+#inspector-metrics { font-size: 12px; }
+.insp-section { border-top: 1px solid var(--edge); padding: 6px 0 4px; }
+.insp-section:first-child { border-top: 0; padding-top: 0; }
+.insp-section > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  padding: 3px 0 5px;
+}
+.insp-section > summary::-webkit-details-marker { display: none; }
+.insp-section > summary::before { content: "▸ "; font-size: 9px; }
+.insp-section[open] > summary::before { content: "▾ "; }
+.insp-architect > summary { color: var(--accent); }
+.insp-lede { margin: 0 0 6px; line-height: 1.45; color: var(--ink); }
+.insp-fact {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 3px 10px;
-  font-size: 12px;
+  gap: 0 10px;
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.1);
 }
-#inspector-metrics dt { color: var(--ink-dim); }
-#inspector-metrics dd { margin: 0; text-align: right; font-family: var(--mono); }
+.insp-fact:last-child { border-bottom: 0; }
+.insp-label { color: var(--ink-dim); }
+.insp-value { text-align: right; font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+.insp-gloss {
+  grid-column: 1 / 3;
+  color: #9aa6ba;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 1px;
+}
+.insp-signs, .insp-notes { margin: 2px 0 4px; padding: 0; list-style: none; }
+.insp-signs li, .insp-notes li {
+  padding: 4px 0 4px 9px;
+  margin: 3px 0;
+  border-left: 3px solid #64748b;
+  font-size: 11.5px;
+  line-height: 1.42;
+  color: #d5dbe6;
+}
+.insp-signs li strong, .insp-notes li strong { color: var(--ink); }
+.sign-crane, .sign-new { border-left-color: #e8b04b !important; }
+.sign-beacon { border-left-color: #ff9d5c !important; }
+.sign-downtown { border-left-color: #8fd6ff !important; }
+.sign-flag { border-left-color: #e4c85a !important; }
+.sign-risk, .sign-hot, .note-high { border-left-color: #ff4d2e !important; }
+.sign-heavy, .note-mid { border-left-color: #ff9a2e !important; }
+.sign-vacant { border-left-color: #8a8f99 !important; }
+.sign-cycle { border-left-color: #b36bff !important; }
+.note-low { border-left-color: #6b86a8 !important; }
+.insp-links { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.insp-link {
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 1px 0;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  word-break: break-all;
+}
+.insp-link:hover { text-decoration: underline; }
+.insp-link.crossing::after { content: "  ↔ other district"; color: #ff9a2e; }
+.insp-spark { margin: 6px 0 2px; }
+.insp-spark .sparkline { margin: 4px 0 2px; height: 26px; }
 #inspector-floors { margin-top: 10px; }
 .floor {
   display: flex;
@@ -227,73 +479,6 @@ h2 {
 .floor .kind { color: var(--ink-dim); font-family: var(--mono); font-size: 10px; }
 .hint { color: var(--ink-dim); font-size: 11px; margin: 9px 0 0; }
 
-/* ---------- x-ray key ---------- */
-#xray {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: end;
-  align-self: start;
-}
-#xray-table { border-collapse: collapse; font-size: 11.5px; }
-#xray-table td { padding: 2px 0 2px 9px; }
-#xray-table td:first-child { padding-left: 0; color: var(--ink-dim); }
-/*
- * Each key is its own switch. The panel is the whole legend: a row is a button
- * that hides one layer -- an archetype, a prop cluster, or an encoding baked
- * into the buildings -- so the city can be read one signal at a time (cranes
- * only, or ruins and silos) without hiding the district plates that give it
- * context. Rows with no separate layer are listed but inert.
- */
-#xray-table tr.key-row { cursor: pointer; }
-#xray-table tr.key-row td { padding-top: 3px; padding-bottom: 3px; }
-#xray-table tr.key-row:hover td { background: rgba(255, 179, 71, 0.12); }
-#xray-table tr.key-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#xray-table tr.key-row:focus-visible td { background: rgba(255, 179, 71, 0.16); }
-#xray-table tr.key-row.off td { color: #64748b; }
-#xray-table tr.key-row.off .key-state { background: transparent; border-color: #64748b; }
-#xray-table tr.key-row.off .chip { opacity: 0.35; }
-#xray-table tr.key-group th {
-  padding: 9px 0 2px;
-  text-align: left;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-}
-#xray-table tr.key-group:first-child th { padding-top: 0; }
-/*
- * A row with no separate layer to switch: listed because the panel is the whole
- * legend, but it is not a control and must not look like one.
- */
-#xray-table tr.key-row.inert { cursor: default; }
-#xray-table tr.key-row.inert:hover td { background: none; }
-#xray-table tr.key-row.inert .key-state { background: transparent; border-color: #475569; }
-#xray-table tr.key-row.inert .chip { opacity: 0.3; }
-.key-state {
-  display: inline-block;
-  box-sizing: border-box;
-  width: 11px;
-  height: 11px;
-  border-radius: 2px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  vertical-align: -1px;
-}
-#xray-reset {
-  margin-top: 8px;
-  padding: 4px 9px;
-  background: var(--panel-solid);
-  color: var(--ink-dim);
-  border: 1px solid var(--edge);
-  border-radius: 6px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  cursor: pointer;
-}
-#xray-reset:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
-#xray-reset[hidden] { display: none; }
-#xray-hint { margin: 8px 0 0; }
 /*
  * The chip is the building's own colour, so the fill cannot be brightened to
  * make it show up -- a legend that lies about the colour is worse than a dim
@@ -337,8 +522,7 @@ kbd {
   margin-right: 1px;
   color: var(--ink);
 }
-body.panels-hidden #legend,
-body.panels-hidden #xray { display: none; }
+body.panels-hidden #guide { display: none; }
 
 /* ---------- loading ---------- */
 #loading {
@@ -456,9 +640,8 @@ body.panels-hidden #xray { display: none; }
 #prompt[hidden] { display: none; }
 #prompt kbd { margin-right: 3px; }
 
-body.hall-open #legend,
-body.hall-open #inspector,
-body.hall-open #xray { opacity: 0.25; }
+body.hall-open #guide,
+body.hall-open #inspector { opacity: 0.25; }
 
 /* ---------- capture ---------- */
 #crosshair {

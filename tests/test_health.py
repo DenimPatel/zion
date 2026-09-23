@@ -8,7 +8,7 @@ import unittest
 
 from support import TempRepoCase, git_commit, read_json
 
-from analyzer.health import bus_factor, strongly_connected
+from analyzer.health import bus_factor, is_vendored, strongly_connected
 
 
 class PureFunctionTests(unittest.TestCase):
@@ -17,6 +17,13 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(bus_factor({"a": 40, "b": 35, "c": 25}), 2)
         self.assertEqual(bus_factor({"a": 25, "b": 25, "c": 25, "d": 25}), 2)
         self.assertEqual(bus_factor({}), 0)
+
+    def test_vendored_code_is_recognised(self):
+        self.assertTrue(is_vendored("vendor/three.module.js"))
+        self.assertTrue(is_vendored("web/third_party/lib/x.js"))
+        self.assertTrue(is_vendored("static/app.min.js"))
+        self.assertFalse(is_vendored("src/vendor.py"))
+        self.assertFalse(is_vendored("analyzer/emit.py"))
 
     def test_strongly_connected_finds_only_real_cycles(self):
         edges = {"a": {"b"}, "b": {"c"}, "c": {"a"}, "d": {"a"}, "e": {"f"}}

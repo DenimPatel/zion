@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import { CitySource } from './loader.js';
 import {
   CityMesh,
+  HEALTH_COLOURS,
+  cycleColour,
   createCityHall,
   createImpostors,
   createHoverOutline,
@@ -26,7 +28,8 @@ import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
-import { buildFacets, parseQuery, runQuery } from './facets.js';
+import { buildFacets, columnIndex, parseQuery, runQuery } from './facets.js';
+import { MapLabels } from './labels.js';
 import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
@@ -117,86 +120,67 @@ resize();
 // HUD
 // ---------------------------------------------------------------------------
 
-function renderLegend() {
-  const manifest = state.source.manifest;
-  const list = document.getElementById('legend-list');
-  list.innerHTML = '';
-  for (const entry of manifest.legend || []) {
-    const item = document.createElement('li');
-    if (!entry.enabled) item.classList.add('disabled');
-    const swatch = document.createElement('span');
-    swatch.className = 'swatch';
-    const label = document.createElement('span');
-    label.textContent = entry.label;
-    const unit = document.createElement('span');
-    unit.className = 'legend-unit';
-    unit.textContent = entry.enabled ? '' : 'off';
-    item.append(swatch, label, unit);
-    list.append(item);
-  }
-
-  const notes = document.getElementById('legend-notes');
-  notes.innerHTML = '';
-  if (state.source.locked) {
-    const p = document.createElement('p');
-    p.textContent =
-      'Repo notes are encrypted. Press U and enter the passphrase to read them.';
-    notes.append(p);
-    return;
-  }
-  for (const note of manifest.stats.notes || []) {
-    const p = document.createElement('p');
-    p.textContent = state.source.s(note);
-    notes.append(p);
-  }
-}
-
 /**
- * The Keys panel is the legend, made switchable.
+ * The City Guide is the legend made switchable, explained and counted.
  *
  * The manifest's `legend` owns what each entry *means*: it is emitted by the
- * analyzer and describes the repository, not the viewer. This table is the
- * viewer's half of the same contract the degeneration flags already use
- * (`flags.churn` -> cranes) -- it says which layer an entry draws and how to
- * switch that layer off. There are three mechanisms because they cost different
- * things:
+ * analyzer (label, group, and a longer description) and describes the
+ * repository, not the viewer. This table is the viewer's half of the same
+ * contract the degeneration flags already use (`flags.churn` -> cranes) -- it
+ * says which layer an entry draws, how to switch that layer off, what colour it
+ * really is on screen, and which filter query finds the buildings that carry
+ * it (for the live count and the "Highlight" action). There are three
+ * switching mechanisms because they cost different things:
  *
  *   archetype  the form is dropped from the resident set and the city rebuilt,
  *              so collision and hover follow it (the path a form row takes)
  *   mesh       a separate InstancedMesh is toggled by visibility -- no rebuild
  *   option     the encoding is baked into the building instances (tint,
- *              weathering, lit windows, downtown glass), so the city is rebuilt
- *              with that option off
+ *              weathering, lit windows, downtown glass, boarded windows), so
+ *              the city is rebuilt with that option off
  *
  * An entry with `kind: null` has no layer of its own: it is either a pure
- * encoding -- height, footprint, floors, district area -- or it lives in the
- * detail report (skybridges). Those rows are listed, because the panel is the
- * whole legend, but they are not switches and say so.
+ * encoding -- height, footprint, floors, district area, roads -- or it lives
+ * in the detail report (skybridges). Those rows are listed, because the panel
+ * is the whole legend, but they are not switches and say so.
  */
 const LEGEND_KEYS = {
-  height: { kind: null, short: 'Height', reason: 'building height is the city itself' },
-  footprint: { kind: null, short: 'Footprint', reason: 'the footprint is the plan itself' },
-  floors: { kind: null, short: 'Floors', reason: 'floors are the window rows themselves' },
-  district_area: { kind: null, short: 'District area', reason: 'district area is the layout itself' },
-  author_tint: { kind: 'option', short: 'Author tint', colour: 0xb28ad6 },
-  churn: { kind: 'mesh', target: 'cranes', short: 'Cranes', colour: 0xd98a3a },
-  weathering: { kind: 'option', short: 'Weathering', colour: 0x7a6a5a },
+  height: { kind: null, short: 'Height', colour: 0xc9ced8, reason: 'building height is the city itself' },
+  footprint: { kind: null, short: 'Footprint', colour: 0xa4acb9, reason: 'the footprint is the plan itself' },
+  floors: { kind: null, short: 'Floors', colour: 0x8b95a5, reason: 'floors are the window rows themselves' },
   lit_windows: { kind: 'option', short: 'Lit windows', colour: 0xffd479 },
-  town_hall: { kind: 'archetype', target: 'town_hall', short: 'Town halls', colour: ARCHETYPE_COLORS.town_hall },
-  parks: { kind: 'archetype', target: 'park', short: 'Parks', colour: ARCHETYPE_COLORS.park },
-  silos: { kind: 'archetype', target: 'silo', short: 'Silos', colour: ARCHETYPE_COLORS.silo },
-  monuments: { kind: 'archetype', target: 'monument', short: 'Monuments', colour: ARCHETYPE_COLORS.monument },
-  skybridges: { kind: null, short: 'Changes together with', reason: 'listed in the detail report, not drawn' },
-  new_construction: { kind: 'mesh', target: 'scaffolding', short: 'Scaffolding', colour: 0x9aa7b4 },
-  heat: { kind: 'mesh', target: 'heat-beacons', short: 'Rooftop beacons', colour: 0xff9d5c },
-  downtown: { kind: 'option', short: 'Downtown towers', colour: 0x8fd6ff },
-  sole_tenant: { kind: 'mesh', target: 'sole-tenant-markers', short: 'Corner flags', colour: 0xe4e0a0 },
+  district_area: { kind: null, short: 'District area', colour: 0x1d2330, reason: 'district area is the layout itself' },
+  roads: { kind: null, short: 'Roads', colour: 0xf2c14e, reason: 'roads are the layout itself' },
+  regions: { kind: null, short: 'Folder plinths', colour: 0x4a5670, reason: 'plinths are the layout itself' },
+  new_construction: { kind: 'mesh', target: 'scaffolding', short: 'Scaffolding', colour: 0xe8b04b, query: 'is:new' },
+  churn: { kind: 'mesh', target: 'cranes', short: 'Cranes', colour: 0xd9a531, query: 'is:hot' },
+  heat: { kind: 'mesh', target: 'heat-beacons', short: 'Rooftop beacons', colour: 0xff9d5c, query: 'heat>0' },
+  weathering: { kind: 'option', short: 'Weathering', colour: 0x7a6a5a },
+  author_tint: { kind: 'option', short: 'Author tint', colour: 0xb28ad6 },
+  sole_tenant: { kind: 'mesh', target: 'sole-tenant-markers', short: 'Corner flags', colour: 0xe4c85a, query: 'is:soletenant' },
+  town_hall: { kind: 'archetype', target: 'town_hall', short: 'Town halls', colour: ARCHETYPE_COLORS.town_hall, query: 'archetype:town_hall' },
+  parks: { kind: 'archetype', target: 'park', short: 'Parks', colour: ARCHETYPE_COLORS.park, query: 'archetype:park' },
+  silos: { kind: 'archetype', target: 'silo', short: 'Silos', colour: ARCHETYPE_COLORS.silo, query: 'archetype:silo' },
+  monuments: { kind: 'archetype', target: 'monument', short: 'Monuments', colour: ARCHETYPE_COLORS.monument, query: 'archetype:monument' },
+  downtown: { kind: 'option', short: 'Downtown towers', colour: 0x8fd6ff, query: 'is:downtown' },
+  skybridges: { kind: null, short: 'Changes together with', colour: 0x6b7a90, reason: 'listed in the detail report, not drawn' },
+  hotspots: { kind: 'mesh', target: 'hazard-barriers', short: 'Hazard barriers — hotspots', colour: HEALTH_COLOURS.hotspot, query: 'is:hotspot' },
+  oversized: { kind: 'mesh', target: 'raking-shores', short: 'Buttresses — oversized', colour: HEALTH_COLOURS.oversized, query: 'is:oversized' },
+  orphans: { kind: 'option', short: 'Boarded up — orphans', colour: HEALTH_COLOURS.orphan, query: 'is:orphan' },
+  cycles: { kind: 'mesh', target: 'cycle-pennants', short: 'Pennants — import cycles', colour: HEALTH_COLOURS.cycle, query: 'is:cycle' },
+  knowledge: { kind: 'mesh', target: 'knowledge-flags', short: 'Red flags — owner gone', colour: 0xe8332a, query: 'is:knowledge' },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
-// four that *are* legend entries (town hall, park, silo, monument) appear in the
-// Signals group and are not repeated here.
+// four that *are* legend entries (town hall, park, silo, monument) appear under
+// Civic and are not repeated here.
 const FORM_KEYS = ['tower', 'slab', 'warehouse', 'ruin'];
+const FORM_NOTES = {
+  tower: 'The tallest quarter of the code files: a lot of real code in one file.',
+  slab: 'Middle-height files: the ordinary working stock of the city.',
+  warehouse: 'Low, broad files: short, or a few long definitions.',
+  ruin: 'Ignored files, drawn only with --include-noise.',
+};
 
 /** Is one legend entry currently switched off? */
 function layerOff(id) {
@@ -206,107 +190,197 @@ function layerOff(id) {
   return state.hiddenLayers.has(id);
 }
 
-/** Is the switch for a legend entry available at all in this repository? */
-function layerToggleable(id) {
-  const spec = LEGEND_KEYS[id];
-  return Boolean(spec && spec.kind);
+const hexColour = (colour) => `#${(colour === undefined ? 0x777777 : colour).toString(16).padStart(6, '0')}`;
+
+/** How many buildings, repository-wide, a filter query matches -- or null. */
+function countFor(query) {
+  if (!query || !context.facetIndex) return null;
+  const predicate = parseQuery(
+    query,
+    state.source.manifest.indexColumns,
+    (idx) => state.source.s(idx),
+    resolveExt
+  );
+  if (!predicate) return null;
+  return runQuery(context.facetIndex, predicate, state.source.manifest.indexColumns).count;
 }
 
-function keyRow({ key, label, colour, kind, target, legend, reason }) {
-  const row = document.createElement('tr');
+/** "Logical source lines -> building height" reads better with a real arrow. */
+function prettyEncoding(text) {
+  return String(text || '').replace(/\s*->\s*/g, ' → ');
+}
+
+function keyRow({ key, label, short, colour, kind, target, legend, reason, description, query, disabled }) {
+  const row = document.createElement('div');
   row.className = 'key-row';
   row.dataset.key = key;
   if (legend) row.dataset.legend = legend;
+  if (disabled) row.classList.add('disabled');
+
+  let control;
   if (kind) {
     row.dataset.kind = kind;
     if (target) row.dataset.target = target;
-    row.tabIndex = 0;
-    row.setAttribute('role', 'button');
+    control = document.createElement('button');
+    control.type = 'button';
+    control.className = 'g-switch';
+    control.setAttribute('role', 'switch');
+    control.setAttribute('aria-label', `Show ${label}`);
+    // The row carries the pressed state too, for anything that reads rows.
+    row.setAttribute('aria-pressed', 'true');
   } else {
     row.classList.add('inert');
-    row.title = reason || 'no separate layer to switch';
+    control = document.createElement('span');
+    control.className = 'g-badge';
+    control.textContent = disabled ? 'off' : 'always';
+    control.title = reason || 'no separate layer to switch';
   }
 
-  const stateCell = document.createElement('td');
-  const box = document.createElement('span');
-  box.className = 'key-state';
-  box.setAttribute('aria-hidden', 'true');
-  stateCell.append(box);
-
-  const labelCell = document.createElement('td');
-  labelCell.textContent = label;
-
-  const chipCell = document.createElement('td');
   const chip = document.createElement('span');
   chip.className = 'chip';
-  chip.style.background = `#${(colour === undefined ? 0x777777 : colour).toString(16).padStart(6, '0')}`;
-  chipCell.append(chip);
+  chip.style.background = hexColour(colour);
 
-  row.append(stateCell, labelCell, chipCell);
+  const name = document.createElement('button');
+  name.type = 'button';
+  name.className = 'g-name';
+  name.textContent = label;
+  name.setAttribute('aria-expanded', 'false');
+
+  const count = document.createElement('span');
+  count.className = 'g-count';
+  const n = disabled ? null : countFor(query);
+  if (n !== null) {
+    count.textContent = n.toLocaleString();
+    count.title = `${n.toLocaleString()} building${n === 1 ? '' : 's'} in the whole city`;
+  }
+
+  const line = document.createElement('p');
+  line.className = 'g-short';
+  line.textContent = disabled ? `${prettyEncoding(short)} — not drawn for this repository` : prettyEncoding(short);
+
+  const more = document.createElement('div');
+  more.className = 'g-more';
+  more.hidden = true;
+  const text = document.createElement('p');
+  text.textContent = description || prettyEncoding(short);
+  more.append(text);
+  if (disabled && reason) {
+    const why = document.createElement('p');
+    why.textContent = reason;
+    more.append(why);
+  }
+  if (query && n) {
+    const actions = document.createElement('div');
+    actions.className = 'g-actions';
+    const highlight = document.createElement('button');
+    highlight.type = 'button';
+    highlight.dataset.query = query;
+    highlight.className = 'g-highlight';
+    highlight.textContent = `Highlight ${n.toLocaleString()}`;
+    highlight.dataset.label = highlight.textContent;
+    highlight.title = `Dim everything else (filter: ${query})`;
+    actions.append(highlight);
+    more.append(actions);
+  }
+
+  row.append(control, chip, name, count, line, more);
   return row;
 }
 
-function groupRow(text) {
-  const row = document.createElement('tr');
-  row.className = 'key-group';
-  const cell = document.createElement('th');
-  cell.colSpan = 3;
-  cell.textContent = text;
-  row.append(cell);
-  return row;
+function groupHeading(text) {
+  const heading = document.createElement('div');
+  heading.className = 'guide-group';
+  heading.textContent = text;
+  return heading;
 }
 
-function renderXray() {
-  const table = document.getElementById('xray-table');
-  table.innerHTML = '';
+/** Why a legend entry is off, from the analyzer's own notes where one says. */
+function disabledReason(id) {
+  const notes = (state.source.manifest.flags && state.source.manifest.flags.notes) || [];
+  const words = {
+    author_tint: /author/i, sole_tenant: /author/i, churn: /churn/i, heat: /churn/i, hotspots: /churn/i,
+    weathering: /weather|commit dates/i, new_construction: /birth/i, skybridges: /coupling/i,
+    downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
+  }[id];
+  const note = words ? notes.find((n) => words.test(n)) : null;
+  if (note) return note;
+  if (id === 'cycles') return 'No import cycles were found.';
+  return 'Not drawn: the repository history is too thin for this signal to mean anything.';
+}
 
-  table.append(groupRow('Signals'));
-  for (const entry of state.source.manifest.legend || []) {
-    const spec = LEGEND_KEYS[entry.id] || {
-      kind: null,
-      short: entry.id,
-      reason: 'no layer to switch',
-    };
+function renderGuide() {
+  const manifest = state.source.manifest;
+  const list = document.getElementById('guide-list');
+  list.innerHTML = '';
+
+  let group = null;
+  for (const entry of manifest.legend || []) {
+    const spec = LEGEND_KEYS[entry.id] || { kind: null, short: entry.id, reason: 'no layer to switch' };
+    const heading = entry.group || 'Signals';
+    if (heading !== group) {
+      list.append(groupHeading(heading));
+      group = heading;
+    }
     // A degeneration flag that is off means the geometry was never drawn, so
     // there is nothing for the reader to switch: say so rather than offer a
-    // dead control. Same rule the legend panel already shows as "off".
+    // dead control.
     const disabled = entry.enabled === false;
-    table.append(
+    list.append(
       keyRow({
         key: `legend:${entry.id}`,
         label: spec.short,
+        short: entry.label,
         colour: spec.colour,
         kind: disabled ? null : spec.kind,
         target: spec.target,
         legend: entry.id,
-        reason: disabled
-          ? 'not drawn for this repository (see the legend notes)'
-          : spec.reason,
+        reason: disabled ? disabledReason(entry.id) : spec.reason,
+        description: entry.description,
+        query: spec.query,
+        disabled,
       })
     );
   }
 
-  table.append(groupRow('Forms'));
+  list.append(groupHeading('Forms'));
   for (const name of FORM_KEYS) {
-    table.append(
+    list.append(
       keyRow({
         key: `form:${name}`,
         label: archetypeLabel(name),
+        short: FORM_NOTES[name],
         colour: ARCHETYPE_COLORS[name],
         kind: 'archetype',
         target: name,
+        description: FORM_NOTES[name],
+        query: `archetype:${name}`,
       })
     );
   }
 
+  const notes = document.getElementById('guide-notes');
+  notes.innerHTML = '';
+  if (state.source.locked) {
+    const p = document.createElement('p');
+    p.textContent = 'Repo notes are encrypted. Press U and enter the passphrase to read them.';
+    notes.append(p);
+  } else {
+    for (const note of manifest.stats.notes || []) {
+      const p = document.createElement('p');
+      p.textContent = state.source.s(note);
+      notes.append(p);
+    }
+  }
   syncKeyRows();
+  renderHealth();
+  renderLensKey();
 }
 
-/** Reflect every switch on its row, the reset control, and the legend panel. */
+/** Reflect every switch on its row and the reset control. */
 function syncKeyRows() {
-  const table = document.getElementById('xray-table');
-  if (!table) return;
-  for (const row of table.querySelectorAll('tr.key-row')) {
+  const list = document.getElementById('guide-list');
+  if (!list) return;
+  for (const row of list.querySelectorAll('.key-row')) {
     const kind = row.dataset.kind;
     if (!kind) continue;
     const off = kind === 'archetype'
@@ -314,32 +388,16 @@ function syncKeyRows() {
       : state.hiddenLayers.has(row.dataset.legend);
     row.classList.toggle('off', off);
     row.setAttribute('aria-pressed', String(!off));
-    row.title = `${off ? 'Show' : 'Hide'} ${row.children[1].textContent}`;
+    const control = row.querySelector('.g-switch');
+    if (control) {
+      control.setAttribute('aria-checked', String(!off));
+      control.title = `${off ? 'Show' : 'Hide'} ${row.querySelector('.g-name').textContent}`;
+    }
   }
-  const reset = document.getElementById('xray-reset');
+  const reset = document.getElementById('guide-reset');
   if (reset) {
     reset.hidden = state.hiddenArchetypes.size === 0 && state.hiddenLayers.size === 0;
   }
-  updateLegendDimming();
-}
-
-/**
- * Dim the legend entry for anything switched off in the Keys, so the two panels
- * cannot disagree about what is on screen.
- */
-function updateLegendDimming() {
-  const list = document.getElementById('legend-list');
-  if (!list) return;
-  const legend = state.source.manifest.legend || [];
-  [...list.children].forEach((item, index) => {
-    const entry = legend[index];
-    if (!entry) return;
-    item.classList.toggle('disabled', entry.enabled === false || layerOff(entry.id));
-    const unit = item.querySelector('.legend-unit');
-    if (unit) {
-      unit.textContent = entry.enabled === false ? 'off' : layerOff(entry.id) ? 'hidden' : '';
-    }
-  });
 }
 
 /**
@@ -370,6 +428,30 @@ function toggleRow(row) {
   else scheduleRebuild();
 }
 
+/** Open or close one row's explanation. */
+function toggleExplain(row) {
+  const more = row.querySelector('.g-more');
+  const name = row.querySelector('.g-name');
+  if (!more) return;
+  more.hidden = !more.hidden;
+  row.classList.toggle('open', !more.hidden);
+  if (name) name.setAttribute('aria-expanded', String(!more.hidden));
+}
+
+/** Point at every building a row describes by filtering to it. */
+function highlightQuery(query) {
+  const input = document.getElementById('filter-input');
+  const same = state.filterText === query;
+  state.filterText = same ? '' : query;
+  if (input) input.value = state.filterText;
+  applyActiveFilter();
+  for (const button of document.querySelectorAll('.g-highlight')) {
+    const active = button.dataset.query === state.filterText;
+    button.classList.toggle('active', active);
+    button.textContent = active ? 'Clear highlight' : button.dataset.label;
+  }
+}
+
 /** Re-apply every prop-cluster switch to the mesh that is on screen now. */
 function applyHiddenLayers() {
   if (!context.city) return;
@@ -398,13 +480,207 @@ function resetKeys() {
   scheduleRebuild();
 }
 
+// ---- Health tab: the architect's shortlist -------------------------------
+
+const HEALTH_SECTIONS = [
+  {
+    id: 'hotspots', title: 'Hotspots', colour: HEALTH_COLOURS.hotspot, flag: 'hotspots',
+    text: 'Large and changed often: where refactoring pays back first.',
+  },
+  {
+    id: 'oversized', title: 'Oversized files', colour: HEALTH_COLOURS.oversized, flag: null,
+    text: 'Top 5% by lines and 400+ lines. Split out the longest definition first.',
+  },
+  {
+    id: 'cycles', title: 'Import cycles', colour: HEALTH_COLOURS.cycle, flag: 'imports',
+    text: 'Files that import each other in a loop. Break one edge in each.',
+  },
+  {
+    id: 'knowledge', title: 'Knowledge risk', colour: 0xe8332a, flag: 'knowledge',
+    text: 'The main author has not committed in six months. Pair up or document before it is needed.',
+  },
+  {
+    id: 'orphans', title: 'Possible dead code', colour: HEALTH_COLOURS.orphan, flag: 'imports',
+    text: 'Nothing imports these and they have not changed in six months. Best-effort: verify before deleting.',
+  },
+];
+
+function indexRowById() {
+  if (context._rowById) return context._rowById;
+  const map = new Map();
+  const col = columnIndex(state.source.manifest.indexColumns);
+  for (const row of context.facetIndex || []) map.set(row[col.id], row);
+  context._rowById = map;
+  return map;
+}
+
+function healthItem(id) {
+  const row = indexRowById().get(id);
+  const col = columnIndex(state.source.manifest.indexColumns);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'health-item';
+  button.dataset.building = String(id);
+  const path = row ? state.source.s(row[col.path !== undefined ? col.path : col.name]) : '';
+  const loc = row ? row[col.loc] : 0;
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  meta.textContent = `${Number(loc || 0).toLocaleString()} ln`;
+  button.append(meta, document.createTextNode(path || `building ${id}`));
+  return button;
+}
+
+function renderHealth() {
+  const panel = document.getElementById('guide-health');
+  if (!panel) return;
+  panel.innerHTML = '';
+  const manifest = state.source.manifest;
+  const review = manifest.review;
+  const flags = manifest.flags || {};
+  if (!review) {
+    panel.innerHTML = '<p class="health-empty">This city was built before the health review existed. Rebuild it to see hotspots, cycles and knowledge risk.</p>';
+    return;
+  }
+  const intro = document.createElement('p');
+  intro.className = 'hint guide-intro';
+  intro.textContent =
+    'What an architect would look at first. Click a file to fly to it. Switch the colour lens to "health" to see all of these at once.';
+  panel.append(intro);
+
+  for (const section of HEALTH_SECTIONS) {
+    const card = document.createElement('div');
+    card.className = 'health-card';
+    card.dataset.section = section.id;
+    const title = document.createElement('h3');
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.background = hexColour(section.colour);
+    const count = document.createElement('span');
+    count.className = 'count';
+    const total = (review.totals && review.totals[section.id]) || 0;
+    const off = section.flag && !flags[section.flag];
+    count.textContent = off ? 'off' : String(total);
+    title.append(chip, document.createTextNode(section.title), count);
+    const text = document.createElement('p');
+    text.textContent = off ? disabledReason(section.id) : section.text;
+    card.append(title, text);
+
+    if (!off) {
+      const list = document.createElement('ol');
+      if (section.id === 'cycles') {
+        (review.cycles || []).forEach((members, index) => {
+          const li = document.createElement('li');
+          li.className = 'health-cycle';
+          li.style.borderColor = `#${cycleColour(THREE, index + 1).getHexString()}`;
+          for (const id of members) li.append(healthItem(id));
+          list.append(li);
+        });
+      } else {
+        for (const id of review[section.id] || []) {
+          const li = document.createElement('li');
+          li.append(healthItem(id));
+          list.append(li);
+        }
+      }
+      if (!list.children.length) {
+        const none = document.createElement('p');
+        none.className = 'health-empty';
+        none.textContent = 'None found.';
+        card.append(none);
+      } else {
+        card.append(list);
+      }
+    }
+    panel.append(card);
+  }
+}
+
+/** Fly to a building by id: it may not be resident, so fall back to its district. */
+async function flyToBuilding(id) {
+  let building = context.resident.find((b) => b.id === id);
+  if (!building) {
+    const row = indexRowById().get(id);
+    const col = columnIndex(state.source.manifest.indexColumns);
+    const district = row && state.source.manifest.districts[row[col.district]];
+    if (district) {
+      teleportTo({ kind: 'district', district });
+      // The district streams in as the camera arrives; open the file then.
+      setTimeout(() => {
+        const arrived = context.resident.find((b) => b.id === id);
+        if (arrived && context.inspector) context.inspector.showBuilding(arrived);
+      }, 1800);
+    }
+    return;
+  }
+  teleportTo({ kind: 'building', building });
+}
+
+function renderLensKey() {
+  const key = document.getElementById('lens-key');
+  const lens = document.getElementById('lens-select');
+  if (!key || !lens) return;
+  key.innerHTML = '';
+  if (lens.value !== 'health') return;
+  const names = { hotspot: 'hotspot', cycle: 'import cycle', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+  for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) {
+    const item = document.createElement('span');
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.style.background = hexColour(colour);
+    item.append(chip, document.createTextNode(names[signal]));
+    key.append(item);
+  }
+}
+
+/** Folder names on the map: regions by level, districts up close. */
+function setupMapLabels() {
+  const container = document.getElementById('map-labels');
+  if (!container) return;
+  const manifest = state.source.manifest;
+  const items = [];
+  for (const region of manifest.regions || []) {
+    const [x, z, w, h] = region.rect;
+    items.push({
+      text: state.source.regionLabel(region),
+      x: x + w / 2,
+      z: z + h / 2,
+      y: 2,
+      level: region.level,
+      kind: 'region',
+    });
+  }
+  for (const district of manifest.districts || []) {
+    const [x, z, w, h] = district.rect;
+    items.push({
+      text: state.source.districtLabel(district),
+      x: x + w / 2,
+      z: z + h / 2,
+      y: 1,
+      level: district.level || 0,
+      kind: 'district',
+    });
+  }
+  if (!context.labels) context.labels = new MapLabels(container, camera);
+  const bounds = manifest.bounds;
+  context.labels.setItems(items, Math.max(bounds[2], bounds[3]));
+}
+
+function selectGuideTab(name) {
+  for (const tab of ['read', 'health', 'filter']) {
+    const button = document.getElementById(`guide-tab-${tab}`);
+    const panel = document.getElementById(`guide-${tab}`);
+    if (button) button.setAttribute('aria-selected', String(tab === name));
+    if (panel) panel.hidden = tab !== name;
+  }
+}
+
 function setPanelsHidden(hidden) {
   document.body.classList.toggle('panels-hidden', hidden);
   const button = document.getElementById('panels-toggle');
   if (!button) return;
   button.setAttribute('aria-pressed', String(hidden));
   const label = document.getElementById('panels-toggle-label');
-  if (label) label.textContent = hidden ? 'Show legend & keys' : 'Hide legend & keys';
+  if (label) label.textContent = hidden ? 'Show guide' : 'Hide guide';
 }
 
 function togglePanels() {
@@ -412,24 +688,35 @@ function togglePanels() {
 }
 
 document.getElementById('panels-toggle').addEventListener('click', togglePanels);
+for (const tab of ['read', 'health', 'filter']) {
+  document.getElementById(`guide-tab-${tab}`).addEventListener('click', () => selectGuideTab(tab));
+}
 
-// A key row is the whole switch, so the label, the state box and the colour
-// chip all act on the same layer. Stop propagation on the keyboard path: Enter
-// would otherwise also reach the global handler and enter a building.
-const xrayTable = document.getElementById('xray-table');
-xrayTable.addEventListener('click', (event) => {
-  const row = event.target.closest('tr.key-row');
-  if (row) toggleRow(row);
-});
-xrayTable.addEventListener('keydown', (event) => {
-  if (event.key !== 'Enter' && event.key !== ' ') return;
-  const row = event.target.closest('tr.key-row');
+// The switch toggles the layer; the name opens the explanation; Highlight
+// filters to the buildings the row describes. Keyboard events stop here:
+// Enter would otherwise also reach the global handler and enter a building.
+const guideList = document.getElementById('guide-list');
+guideList.addEventListener('click', (event) => {
+  const row = event.target.closest('.key-row');
   if (!row) return;
-  event.preventDefault();
-  event.stopPropagation();
-  toggleRow(row);
+  if (event.target.closest('.g-switch')) toggleRow(row);
+  else if (event.target.closest('.g-highlight')) {
+    highlightQuery(event.target.closest('.g-highlight').dataset.query);
+  } else if (event.target.closest('.g-name') || event.target.closest('.chip') || event.target.closest('.g-short')) {
+    toggleExplain(row);
+  }
 });
-document.getElementById('xray-reset').addEventListener('click', resetKeys);
+guideList.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.stopPropagation();
+});
+document.getElementById('guide-health').addEventListener('click', (event) => {
+  const item = event.target.closest('.health-item');
+  if (!item) return;
+  flyToBuilding(Number(item.dataset.building));
+});
+document.getElementById('guide-health').addEventListener('keydown', (event) => event.stopPropagation());
+document.getElementById('guide-reset').addEventListener('click', resetKeys);
 
 function renderTitle() {
   const manifest = state.source.manifest;
@@ -494,6 +781,7 @@ function rebuildCity(buildings) {
     authorTint: !state.hiddenLayers.has('author_tint'),
     weathering: !state.hiddenLayers.has('weathering'),
     downtown: !state.hiddenLayers.has('downtown'),
+    orphans: !state.hiddenLayers.has('orphans'),
     litCap: state.hiddenLayers.has('lit_windows') ? 0 : 1,
   });
   // Stand-in massing for districts that are not resident, so streaming does not
@@ -512,6 +800,9 @@ function rebuildCity(buildings) {
     disposeGroup(previous.group);
   }
   context.city = mesh;
+  // A rebuild (streaming, LOD, a switch) must not silently drop the lens.
+  const lens = document.getElementById('lens-select');
+  if (lens && lens.value !== 'archetype') mesh.recolour(lens.value);
   applyHiddenLayers();
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
@@ -628,6 +919,7 @@ function setupFilterAndLens() {
   if (lens) {
     lens.addEventListener('change', (event) => {
       if (context.city) context.city.recolour(event.target.value);
+      renderLensKey();
     });
   }
 }
@@ -647,7 +939,9 @@ async function refreshResident(force = false) {
     // park and it was still a cube. Rebuilding when the camera has travelled a
     // fraction of the LOD radius keeps the near tier where the eye actually is.
     const radius = (context.city && context.city.lodRadius) || 600;
-    const travel = Math.max(400, radius * 0.6);
+    // A fraction of the radius, not a fixed floor: a small city's radius is
+    // 240 m, and a 400 m floor left buildings 240-400 m away as boxes.
+    const travel = Math.max(80, radius * 0.6);
     const moved =
       !lodCentre ||
       Math.hypot(lodCentre.x - camera.position.x, lodCentre.z - camera.position.z) > travel;
@@ -731,12 +1025,21 @@ function raycastAt(ndcX, ndcY) {
 /** District plates and district impostors: both stand for a folder. */
 function raycastDistricts() {
   const meshes = context.city.group.children.filter(
-    (child) => child.name === 'district-plates' || child.name === 'district-impostors'
+    (child) =>
+      child.name === 'district-plates' ||
+      child.name === 'district-impostors' ||
+      child.name === 'region-plinths'
   );
   if (!meshes.length) return null;
   const hits = raycaster.intersectObjects(meshes, false);
   if (!hits.length) return null;
   const hit = hits[0];
+  // A plinth's edge, or a road across it, is the folder that contains them.
+  if (hit.object.name === 'region-plinths') {
+    const region = hit.object.userData.regions && hit.object.userData.regions[hit.instanceId];
+    if (!region) return null;
+    return { kind: 'region', region, mesh: hit.object, instanceId: hit.instanceId, point: hit.point };
+  }
   const districts = hit.object.userData.districts;
   const district = districts && districts[hit.instanceId];
   if (!district) return null;
@@ -755,6 +1058,7 @@ function sameTarget(a, b) {
   if (a.kind !== b.kind) return false;
   if (a.kind === 'city_hall') return true;
   if (a.kind === 'district') return a.district.id === b.district.id;
+  if (a.kind === 'region') return a.region.id === b.region.id;
   return a.building === b.building;
 }
 
@@ -831,6 +1135,16 @@ function tooltipFor(target) {
       hint: 'click, or press C, to open',
     };
   }
+  if (target.kind === 'region') {
+    const r = target.region;
+    return {
+      title: `${state.source.regionLabel(r)}/`,
+      meta:
+        `folder · ${r.districts} neighbourhoods · ${r.buildings} buildings · ` +
+        `${(r.logicalLoc || 0).toLocaleString()} lines`,
+      hint: 'click to inspect this folder · raised plinth = nested folder',
+    };
+  }
   if (target.kind === 'district') {
     const d = target.district;
     return {
@@ -875,8 +1189,12 @@ function applyHover(target, clientX, clientY) {
   hover.y = clientY;
 
   if (context.city) {
-    if (target && (target.kind === 'building' || target.kind === 'district')) {
-      context.city.setHighlight(target.mesh, target.instanceId, target.kind === 'district' ? 0.45 : 0.62);
+    if (target && (target.kind === 'building' || target.kind === 'district' || target.kind === 'region')) {
+      context.city.setHighlight(
+        target.mesh,
+        target.instanceId,
+        target.kind === 'building' ? 0.62 : target.kind === 'region' ? 0.3 : 0.45
+      );
     } else {
       context.city.clearHighlight();
     }
@@ -886,6 +1204,8 @@ function applyHover(target, clientX, clientY) {
   // whole block rather than a box around one mesh.
   if (target && target.kind === 'district') {
     placeDistrictMarker(context.hoverDistrictMarker, target.district.rect);
+  } else if (target && target.kind === 'region') {
+    placeDistrictMarker(context.hoverDistrictMarker, target.region.rect);
   } else {
     context.hoverDistrictMarker.visible = false;
   }
@@ -1054,6 +1374,11 @@ function activate(target) {
   if (target.kind === 'district') {
     context.inspector.showDistrict(target.district);
     orbitAround(target);
+    return;
+  }
+  if (target.kind === 'region') {
+    context.inspector.showRegion(target.region);
+    orbitAround({ kind: 'district', district: { rect: target.region.rect } });
     return;
   }
   context.inspector.showBuilding(target.building);
@@ -1456,7 +1781,8 @@ async function refreshLabelsAfterUnlock() {
   context.resident = context.streamer.buildings();
   state.source.buildings = context.resident;
   context.inspector.hide();
-  renderLegend();
+  renderGuide();
+  setupMapLabels();
   renderTitle();
   renderChips();
   applyActiveFilter();
@@ -1619,6 +1945,7 @@ function frame(now) {
   refreshResident();
   refreshHover();
   renderer.render(scene, camera);
+  if (context.labels) context.labels.update(now, window.innerWidth, window.innerHeight);
 }
 
 function driveInterior(dt) {
@@ -2228,12 +2555,12 @@ async function runSelfTest() {
     `camera moved ${handbackJump.toFixed(3)}m after the tour ended`
   );
 
-  // 5d. The Keys panel is the whole legend, and a switch that exists must
+  // 5d. The City Guide is the whole legend, and a switch that exists must
   //     actually reach the geometry rather than only recolour a row.
   {
     const legend = state.source.manifest.legend || [];
     const legendRows = document.querySelectorAll(
-      '#xray-table tr.key-row[data-key^="legend:"]'
+      '#guide-list .key-row[data-key^="legend:"]'
     );
     check(
       'keys-covers-legend',
@@ -2241,14 +2568,14 @@ async function runSelfTest() {
       `${legendRows.length} rows for ${legend.length} legend entries`
     );
 
-    const inert = [...document.querySelectorAll('#xray-table tr.key-row.inert')];
+    const inert = [...document.querySelectorAll('#guide-list .key-row.inert')];
     check(
       'keys-inert-encodings',
       inert.length > 0 && inert.every((row) => !row.hasAttribute('aria-pressed')),
       `${inert.length} encoding row(s) listed without a switch`
     );
 
-    const craneRow = document.querySelector('#xray-table tr.key-row[data-key="legend:churn"]');
+    const craneRow = document.querySelector('#guide-list .key-row[data-key="legend:churn"]');
     const cranes = context.city.group.getObjectByName('cranes');
     if (craneRow && craneRow.dataset.kind === 'mesh' && cranes) {
       toggleRow(craneRow);
@@ -2260,7 +2587,7 @@ async function runSelfTest() {
       check('keys-restores-layer', true, 'no crane layer in this city');
     }
 
-    const formRow = [...document.querySelectorAll('#xray-table tr.key-row[data-kind="archetype"]')].find(
+    const formRow = [...document.querySelectorAll('#guide-list .key-row[data-kind="archetype"]')].find(
       (row) => context.resident.some((b) => (b.archetype || 'warehouse') === row.dataset.target)
     );
     if (formRow) {
@@ -2279,7 +2606,7 @@ async function runSelfTest() {
 
     // An encoding switch rebuilds with that option off; downtown is the easiest
     // one to see, because its antennas are their own cluster and must vanish.
-    const downtownRow = document.querySelector('#xray-table tr.key-row[data-key="legend:downtown"]');
+    const downtownRow = document.querySelector('#guide-list .key-row[data-key="legend:downtown"]');
     if (downtownRow && downtownRow.dataset.kind === 'option') {
       const before = context.city.group.getObjectByName('antennas');
       toggleRow(downtownRow);
@@ -2296,6 +2623,79 @@ async function runSelfTest() {
     } else {
       check('keys-option-switch', true, 'no downtown encoding in this city');
     }
+  }
+
+  // 5e. The guide explains, counts and highlights; the ground shows the
+  //     folder tree; the report explains a building; health is one lens away.
+  {
+    const row = document.querySelector('#guide-list .key-row[data-key="legend:height"]');
+    const name = row && row.querySelector('.g-name');
+    if (name) name.click();
+    const more = row && row.querySelector('.g-more');
+    check(
+      'guide-explains',
+      Boolean(more && !more.hidden && more.textContent.length > 40),
+      more ? `${more.textContent.length} chars of explanation` : 'no height row'
+    );
+    if (name) name.click();
+
+    const highlight = document.querySelector('#guide-list .g-highlight');
+    if (highlight) {
+      const query = highlight.dataset.query;
+      highlightQuery(query);
+      const applied = state.filterText === query && Boolean(context.city._filtered);
+      highlightQuery(query);
+      check('guide-highlight', applied && !state.filterText, `highlight ${query} then clear`);
+    } else {
+      check('guide-highlight', true, 'no countable layer in this city');
+    }
+
+    const manifest = state.source.manifest;
+    const classes = new Set((manifest.streets || []).map((s) => (s.length > 4 ? s[4] : 2)));
+    const roadMeshes = context.city.group.children.filter((c) => c.name.startsWith('streets-') && c.name !== 'streets-markings');
+    check(
+      'roads-have-classes',
+      roadMeshes.length === classes.size && roadMeshes.length > 0,
+      `${roadMeshes.length} road meshes for ${classes.size} classes`
+    );
+    const plinths = context.city.group.getObjectByName('region-plinths');
+    const regionCount = (manifest.regions || []).length;
+    check(
+      'regions-drawn',
+      regionCount === 0 ? !plinths : Boolean(plinths && plinths.count === regionCount),
+      `${plinths ? plinths.count : 0} plinths for ${regionCount} regions`
+    );
+
+    const withFloors = context.resident.find((b) => b.floors > 1 && b.source);
+    if (withFloors) {
+      context.inspector.showBuilding(withFloors);
+      for (let i = 0; i < 40 && !document.querySelector('#inspector-floors .floor'); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const text = document.getElementById('inspector-metrics').textContent;
+      const floorsListed = document.querySelectorAll('#inspector-floors .floor').length;
+      check(
+        'inspector-explains-floors',
+        /row of windows/i.test(text) && /Architect/.test(text) && floorsListed === withFloors.floors,
+        `${floorsListed} floors listed for ${withFloors.floors}`
+      );
+      context.inspector.hide();
+    } else {
+      check('inspector-explains-floors', true, 'no building with floors resident');
+    }
+
+    const mesh = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 0);
+    if (mesh) {
+      const before = Array.from(mesh.userData.baseColors.slice(0, 3));
+      context.city.recolour('health');
+      const after = Array.from(mesh.userData.baseColors.slice(0, 3));
+      context.city.recolour('archetype');
+      check('health-lens', before.some((v, i) => Math.abs(v - after[i]) > 1e-3), 'health lens recolours');
+    } else {
+      check('health-lens', true, 'no buildings');
+    }
+    const cards = document.querySelectorAll('#guide-health .health-card').length;
+    check('health-tab', manifest.review ? cards === 5 : cards === 0, `${cards} health cards`);
   }
 
   // 5e. Detail follows the camera. A building beyond the opening camera's LOD
@@ -2331,7 +2731,10 @@ async function runSelfTest() {
       context.fly.yaw = 0;
       context.fly.pitch = -1.0;
       context.fly.apply();
-      lodRebuiltAt = 0; // the check is not subject to the flight rate limit
+      // The check is not subject to the flight rate limit. -Infinity rather
+      // than 0: under Chrome's virtual clock performance.now() can still be
+      // below the 600 ms limit here, and `now - 0` would skip the rebuild.
+      lodRebuiltAt = -Infinity;
       await refreshResident();
       const nearMesh = context.city.group.children.find(
         (child) => child.name === `buildings-${archetype}`
@@ -2557,6 +2960,19 @@ async function boot() {
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
   context.inspector = new Inspector(state.source);
+  // The inspector names other files (cycle members, co-changed files) and can
+  // fly to them; both need the whole-repo index, which it does not hold.
+  context.inspector.pathForId = (id) => {
+    const row = indexRowById().get(id);
+    if (!row) return '';
+    const col = columnIndex(state.source.manifest.indexColumns);
+    return state.source.s(row[col.path !== undefined ? col.path : col.name]);
+  };
+  context.inspector.districtForId = (id) => {
+    const row = indexRowById().get(id);
+    return row ? row[columnIndex(state.source.manifest.indexColumns).district] : null;
+  };
+  context.inspector.onFly = (id) => flyToBuilding(id);
   setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
     panel: document.getElementById('cityhall'),
@@ -2587,8 +3003,8 @@ async function boot() {
   camera.fov = manifest.camera.fov;
   camera.updateProjectionMatrix();
 
-  renderLegend();
-  renderXray();
+  renderGuide();
+  setupMapLabels();
   renderTitle();
   applyTime();
 

@@ -34,8 +34,10 @@ Everything in the city is one of these, and nothing is decoration.
 | how evenly the file divides into floors | footprint shape: even → square, lopsided → slab |
 | top-level functions / classes / headings / notebook cells | floors |
 | folder content weight | district area (treemap) |
+| folder nesting | raised plinths, one step per level; folder names on the map, deeper names as you fly closer |
+| how far apart two folders are in the tree | road class: highway (top-level folders, the ring road) → avenue → street → alley |
 | dominant author by lines owned | building tint, district Mayor |
-| commits touching the file | window traffic; crane on top-decile recent activity (heat) |
+| recent activity (heat), top decile | a crane |
 | days since last commit | weathering: clean → grimy → derelict |
 | docstring + comment ratio | **fraction of lit windows** |
 | README in the folder | Town Hall landmark |
@@ -49,23 +51,71 @@ Everything in the city is one of these, and nothing is decoration.
 | one author owns ≥ 90% of a file's lines | a corner flag (bus factor 1) |
 | decision points per function/class (exact for Python, heuristic elsewhere) | floor complexity, shown in the detail report |
 | a `__main__` guard or a function named `main`/`run` | a ⭐ next to that floor in the detail report |
+| **hotspot**: commit frequency × size, top 5% | striped hazard barriers around the plot |
+| **oversized**: top 5% by logical lines and ≥ 400 of them | raking shores (buttresses) braced against the walls |
+| **orphan candidate**: nothing imports it, not an entry point, untouched 6 months | boarded up: dark windows, a vacancy sign |
+| **import cycle** (strongly connected imports) | a rooftop pennant, one colour per cycle |
+| **knowledge risk**: main author inactive 6+ months | the corner flag turns red |
 
-The **Keys** panel is the legend, made switchable. Its *Signals* group lists every
-entry the analyzer emitted — height, footprint, floors, district area, author
-tint, cranes, weathering, lit windows, town halls, parks, silos, monuments,
-changes together with, scaffolding, rooftop beacons, downtown towers, corner
-flags — and its *Forms* group lists the building forms the legend does not name
-(tower, slab, warehouse, ruin). Every row with a layer of its own is a switch:
-click it (or focus it and press `Enter`) to hide that layer, so the city can be
-read one signal at a time — cranes only, or ruins and silos — while the district
-plates and streets stay for context. A form is dropped when the city is built, so
-it takes its rooftop clutter and its collision box with it and cannot be hovered
-or walked into; a prop cluster (cranes, beacons, scaffolding, corner flags) is its
-own instanced mesh and is simply hidden; an encoding baked into the buildings —
-author tint, weathering, lit windows, downtown glass — rebuilds the city with that
-option off. The five entries that are pure encodings or live in the detail report
-are listed but inert, because there is no separate layer to switch, and the row
-says so rather than pretending otherwise. *Show every layer* restores them all.
+The architect's signals (the last five rows) are computed in `analyzer/health.py`
+from numbers the analysis already has. Each is relative to the repository itself
+and gated on its own degeneration flag. Vendored third-party code (`vendor/`,
+`third_party/`, `*.min.js`) is left out of all of them.
+
+The **City Guide** (left panel, `L` to hide) is the legend made switchable,
+explained and counted. It has three tabs.
+
+- **Read the city.** Every legend entry is a row, grouped as *Size & shape*,
+  *Ground*, *Construction & time*, *People*, *Civic*, *Health* and *Forms*. A row
+  shows the entry's real on-screen colour, its one-line encoding, and a live
+  count of the buildings in the whole repository that carry it.
+- **Health.** The architect's shortlist, described below.
+- **Filter.** The zoning filter and the colour lens.
+
+Clicking a row's name expands it into the full rule and the analogy behind it.
+Where a count exists, a **Highlight** button filters the city to exactly those
+buildings.
+
+Each row with a layer of its own has a switch that hides that layer, so the city
+can be read one signal at a time. How a switch works depends on the layer:
+
+- **A form** is dropped when the city is built. It takes its rooftop clutter and
+  its collision box with it, so it cannot be hovered or walked into.
+- **A prop cluster** is its own instanced mesh and is simply hidden: cranes,
+  beacons, scaffolding, flags, barriers, shores and pennants.
+- **An encoding baked into the buildings** rebuilds the city with that option
+  off: author tint, weathering, lit windows, downtown glass and boarded windows.
+
+Entries that are pure encodings (height, footprint, floors, district area, roads,
+plinths) show an *always* badge instead of a dead switch. An entry the
+degeneration rules turned off says *off* and why. *Show every layer* restores
+everything.
+
+The **Health** tab lists the top hotspots, oversized files, import cycles,
+knowledge risks and possible dead code. Clicking one flies to it. The
+**health** colour lens tints every building by its most pressing signal.
+
+**Click a building** and the inspector explains it rather than listing numbers:
+
+- **What you're looking at.** Its form and why, plus a badge for every prop on
+  it and the rule that put it there.
+- **Reading the structure.** Height in logical lines and metres; what its floors
+  are ("30 floors = 3 classes, 23 functions at the top level + 4 nested
+  definitions (StringTable, EmitOptions, …)"); its footprint and area and what a
+  wide plan means; lit windows as documentation; and how weathered it is.
+- **People.** Who built it (first commit), who last edited it and with which
+  message, its main owner and their share, how many people have contributed, its
+  bus factor, and whether the owner is still active.
+- **Activity.** Commits, churn, heat, age and a 24-month sparkline.
+- **Architect's notes.** Rule-based suggestions, each stating the rule that
+  fired: hotspot rank, the longest definition to split out first,
+  branch-heavy code, the cycle's other members (click to fly), knowledge risk,
+  possible dead code, undocumented bulk, and co-changed files, with pairs that
+  cross a folder boundary called out as hidden coupling.
+
+Clicking a raised plinth or a district plate opens the same report for that
+folder: its contributors, bus factor and hotspot, oversized, cycle, dead-code and
+owner-gone counts.
 
 ### Why height is never bytes on disk
 
@@ -137,7 +187,7 @@ that one is the repository root in each case.
 | `T` | guided tour: one continuous route, holding at each district with a caption |
 | `N` | skip to the next stop during the tour |
 | `C` | City Hall |
-| `L` | toggle the legend and keys (same as the title-bar button) |
+| `L` | toggle the City Guide (same as the title-bar button) |
 | drag | look around (the cursor stays visible) |
 | click | inspect the building you are pointing at |
 | `F` | capture the mouse for continuous flying (crosshair appears); `Esc` releases |
@@ -186,12 +236,13 @@ buildings, so *lit = documented* is legible in one glance. There is a slider for
 both.
 
 **The filter bar is a zoning map.** Type `ext:py`, `name:CLAUDE.md`, `is:test`,
-`loc>500`, or `-is:doc` into the filter box under the legend, and every
+`loc>500`, `is:hotspot`, `is:cycle` or `-is:doc` into the Filter tab of the guide, and every
 non-matching building fades to ghost grey while the count, total lines and
 district spread of the match are reported live. The chips underneath fill it
 for you from the repo's own top languages, archetypes and special files
 (READMEs, `CLAUDE.md`, license, `Dockerfile`, CI configs). A colour-by dropdown
-next to it re-tints the whole city by archetype, language or author.
+next to it re-tints the whole city by archetype, health, language, author, era,
+heat or centrality.
 
 **New buildings wear scaffolding.** A file born in the newest slice of the
 repo's own history (at least 30 days, or the newest 10% of its lifetime,
@@ -333,6 +384,23 @@ enormous districts). `--district-depth` overrides it.
 Street geometry falls out of the treemap: each subdivision line is where a street
 goes, so blocks and roads are the same decision rather than two.
 
+**The treemap is nested, so the folder tree is visible on the ground.** The chosen
+depth decides the *leaf* districts, as before. Above them, every folder that splits
+into more than one piece becomes a region on its own raised plinth, and the roads
+between siblings narrow with depth:
+
+- **highways** between top-level folders and around City Hall
+- **avenues** inside a top-level folder
+- **streets** one level deeper
+- **alleys** below that
+
+The width of a road is therefore how far apart two neighbourhoods are in the tree.
+A folder with a single child passes its ground straight through, with no road and
+no plinth, so `src/main/java/com/acme` costs nothing. The plaza, the frame and the
+band assignment still run once, over the top-level folders only. Road area is
+budgeted up front, so the nesting does not shrink the buildings, and road widths
+scale down on small plans so a small repository is not all tarmac.
+
 **City Hall's plaza is reserved ground, not a building dropped into a block.** The
 treemap is never handed the middle of the plan: the plan is framed around a central
 reserve, districts are dealt into the four bands by weight, and an avenue rings the
@@ -438,7 +506,7 @@ because "it renders" is not the same as "it works":
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-which returns `ZION_SELFTEST {…}` containing 47 checks: walk gravity (simulated
+which returns `ZION_SELFTEST {…}` containing 54 checks: walk gravity (simulated
 until the player actually comes to rest on a surface), a collision test that
 drives the player into a building and asserts they stop outside it, drag-to-look
 rotating the camera without capturing the pointer or opening the inspector, a
@@ -446,8 +514,11 @@ click on a building's projected position opening it, hover reporting the same
 building that the click then acts on, interior floors and source, an interior
 wall texture confirmed to contain rendered text, City Hall's clickable rows,
 teleport, the tour and its caption, hover/click agreement, district hover and
-district click, the tour's dwell share and district highlight, the Keys panel
-covering every legend entry with its switches actually reaching the geometry, and
+district click, the tour's dwell share and district highlight, the City Guide
+covering every legend entry with its switches actually reaching the geometry, a
+guide row expanding into its explanation and highlighting its buildings, one road
+mesh per road class and one plinth per region, the inspector explaining a
+building's floors with its architect's notes, the health lens and Health tab, and
 that the level of detail follows the camera (fly past the LOD radius and the
 nearest building must be in the near tier, not a far-tier box), and the draw-call
 budget.
@@ -456,7 +527,7 @@ budget.
 `NO_WEBGL` and renders nothing, which is a silent failure rather than an error.
 
 **The HUD itself** needs eyes, not assertions: contrast is the one property none
-of those 47 checks measures. Chrome's `--screenshot` flag cannot capture this
+of those 54 checks measures. Chrome's `--screenshot` flag cannot capture this
 viewer at all — the frame loop never lets `--virtual-time-budget` expire, so the
 process hangs — so `tests/capture.py` drives Chrome over the DevTools Protocol,
 waits on wall-clock time, and runs a snippet before capturing (opening the
@@ -522,15 +593,19 @@ analyzer/
   gitmeta.py             one `git log --numstat` pass → authorship, churn,
                          recency, co-change coupling
   metrics.py             per-file metrics, confidence and degeneration rules
-  layout.py              district depth rule, treemap, streets, building grid
+  health.py              architect's signals: hotspots, knowledge risk,
+                         oversized, orphans, import cycles
+  layout.py              district depth rule, nested treemap, road classes,
+                         region plinths, building grid
   crypto.py              AES-256-GCM + PBKDF2, WebCrypto-compatible framing
   emit.py                manifest, chunks, floor detail, string table, inlining
 viewer/
   index.html · css/hud.css
   js/  main · loader · city · stream · interior · cityhall/tour · cameras
-       · collision · inspector · sky · vault
+       · collision · inspector · labels · sky · vault
+       parts/ massing · civic · construction · parks · beacons · health
 vendor/                  three.module.js (pinned, with provenance) · aes_gcm.py
-tests/                   74 stdlib tests + committed fixture repositories
+tests/                   105 stdlib tests + committed fixture repositories
 bench/                   synthetic repository generator and measured results
 ```
 

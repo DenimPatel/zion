@@ -21,6 +21,9 @@ each is gated on the same degeneration flag as the data it stands on:
 - **Import cycle**: strongly connected components of the resolved import
   graph with more than one member.
 
+Vendored third-party code (`vendor/`, `third_party/`, `*.min.js`, ...) is left
+out of every signal: it is not this repository's to split or own.
+
 All times are measured back from the repository's newest commit, never the
 wall clock, so a build is reproducible and an old clone reads as it was.
 """
@@ -34,6 +37,17 @@ STALE_DAYS = 180.0
 OWNER_AWAY_DAYS = 180.0
 REVIEW_LIMIT = 15
 
+# Third-party code copied into the tree: not this repository's to refactor, so
+# it is never a hotspot, oversized, an orphan or a knowledge risk.
+VENDOR_DIRS = {"vendor", "vendors", "third_party", "thirdparty", "third-party", "external", "extern", "node_modules"}
+VENDOR_SUFFIXES = (".min.js", ".min.css", "-min.js", ".bundle.js")
+
+
+def is_vendored(rel: str) -> bool:
+    parts = rel.lower().split("/")
+    return any(part in VENDOR_DIRS for part in parts[:-1]) or parts[-1].endswith(VENDOR_SUFFIXES)
+
+
 # Languages whose imports `metrics._finalize_downtown` can resolve at all.
 IMPORT_LANGUAGES = ("python", "javascript", "typescript")
 # Files that are reached by convention, not by import.
@@ -44,7 +58,9 @@ CONVENTIONAL_ENTRY_NAMES = {
 
 
 def _is_code(record) -> bool:
-    return not (record.is_binary or record.rows is not None or record.is_doc or record.is_ruin)
+    return not (
+        record.is_binary or record.rows is not None or record.is_doc or record.is_ruin or is_vendored(record.rel)
+    )
 
 
 def _rank(values: list[tuple[str, float]]) -> dict[str, float]:
