@@ -45,6 +45,13 @@
     <div id="guide-read" role="tabpanel" aria-labelledby="guide-tab-read">
       <p class="hint guide-intro">Every shape, colour and prop is a measurement. Click a row to learn
         what it means; flip its switch to show or hide that layer.</p>
+      <!-- Colour the city by any attribute: the same lens as the Filter tab's,
+           kept in step with it, with its key counted on the buildings in view. -->
+      <div id="guide-colour">
+        <label for="guide-lens">Colour buildings by</label>
+        <select id="guide-lens" title="Colour every building by one of its attributes"></select>
+        <div id="guide-lens-key" class="hint"></div>
+      </div>
       <div id="guide-list"></div>
       <button id="guide-reset" type="button" hidden>Show every layer</button>
       <div id="guide-notes"></div>
@@ -71,24 +78,34 @@
         <p id="filter-summary" class="hint">every building shown</p>
         <div id="filter-chips"></div>
         <select id="lens-select" title="colour by">
-          <option value="archetype">colour: archetype</option>
-          <option value="health">colour: health (architect)</option>
-          <option value="language">colour: language</option>
-          <option value="author">colour: author</option>
-          <option value="era">colour: age (era)</option>
-          <option value="heat">colour: recent activity (heat)</option>
-          <option value="downtown">colour: centrality (downtown)</option>
-          <option value="instability">colour: instability (imports out vs in)</option>
-          <option value="tests">colour: test coverage links</option>
-          <option value="complexity">colour: branchiest function</option>
-          <option value="delta">colour: changed since baseline</option>
-          <option value="territory">colour: one author’s territory</option>
-          <option value="trend">colour: trend (rising vs cooling)</option>
-          <option value="defects">colour: fix commits (defect-prone)</option>
-          <option value="debt">colour: TODO / FIXME debt</option>
-          <option value="depth">colour: import depth and hubs</option>
-          <option value="coupling">colour: copied code and hidden coupling</option>
-          <option value="mainsequence">colour: folder on the main sequence</option>
+          <optgroup label="What it is">
+            <option value="language">colour: language</option>
+            <option value="archetype">colour: kind of building (archetype)</option>
+          </optgroup>
+          <optgroup label="Health">
+            <option value="health">colour: health (architect)</option>
+            <option value="defects">colour: fix commits (defect-prone)</option>
+            <option value="complexity">colour: branchiest function</option>
+            <option value="debt">colour: TODO / FIXME debt</option>
+            <option value="tests">colour: test coverage links</option>
+          </optgroup>
+          <optgroup label="Change over time">
+            <option value="heat">colour: recent activity (heat)</option>
+            <option value="trend">colour: trend (rising vs cooling)</option>
+            <option value="era">colour: age (era)</option>
+            <option value="delta">colour: changed since baseline</option>
+          </optgroup>
+          <optgroup label="Structure">
+            <option value="instability">colour: instability (imports out vs in)</option>
+            <option value="depth">colour: import depth and hubs</option>
+            <option value="coupling">colour: copied code and hidden coupling</option>
+            <option value="downtown">colour: centrality (downtown)</option>
+            <option value="mainsequence">colour: folder on the main sequence</option>
+          </optgroup>
+          <optgroup label="People">
+            <option value="author">colour: main author</option>
+            <option value="territory">colour: one author’s territory</option>
+          </optgroup>
         </select>
         <select id="lens-author" title="whose territory" hidden></select>
         <div id="lens-key" class="hint"></div>

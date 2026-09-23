@@ -30,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (90 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (91 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -147,6 +147,9 @@ traffic cones, cross-bracing, survey stake, owner notice and note pin;
   the filter query that counts/highlights its buildings. A new legend entry needs a row there *and* a
   `(id, label, unit, group, description)` entry in `emit.py::LEGEND_SPEC`; an entry with no separate layer
   is shown with an "always" badge, never as a dead switch.
+- The City Guide's `#guide-lens` and the Filter tab's `#lens-select` are one lens (`main.js::applyLens` keeps
+  them, the key and the city in step; its options are copied from `#lens-select`). A fresh page opens on the
+  reader's saved lens or `language`; `?selftest=1` always opens on `archetype`.
 - The city and the minimap colour through one function, `city.js::lensColour`. A new lens is added there, never
   copied into `minimap.js`.
 - Relationships are drawn for the selection only (`viewer/js/selection.js`). Never draw every import or co-change edge

@@ -23,6 +23,7 @@ import {
   LENS_BANDS,
   lensBand,
   lensColour,
+  categoryColour,
   MAIN_SEQUENCE_BANDS,
   mainSequenceBand,
   healthSignal,
@@ -1040,6 +1041,28 @@ function renderLensKey() {
       counts.set(band, (counts.get(band) || 0) + 1);
     }
     for (const band of LENS_BANDS[lens.value]) item(band.colour, band.label, counts.get(band) || 0);
+  } else if (lens.value === 'language' || lens.value === 'author') {
+    // Categories: the most common ones on screen, then everything else.
+    const counts = new Map();
+    const authorTint = Boolean(state.source.manifest.flags && state.source.manifest.flags.authorship);
+    for (const b of resident) {
+      const name = lens.value === 'language'
+        ? state.source.s(b.language) || 'unknown'
+        : (authorTint ? state.source.s(b.author) : '') || 'unknown';
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [name, count] of ranked.slice(0, 10)) {
+      item(name === 'unknown' ? 0x777777 : categoryColour(name, lens.value === 'language' ? undefined : null), name, count);
+    }
+    const rest = ranked.slice(10).reduce((sum, [, count]) => sum + count, 0);
+    if (rest) item(0x555a63, `${ranked.length - 10} more`, rest);
+  } else if (lens.value === 'archetype') {
+    const counts = new Map();
+    for (const b of resident) counts.set(b.archetype, (counts.get(b.archetype) || 0) + 1);
+    for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+      item(ARCHETYPE_COLORS[name] || 0x777777, archetypeLabel(name), count);
+    }
   } else if (lens.value === 'mainsequence') {
     const counts = new Map();
     for (const b of resident) {
@@ -1504,7 +1527,10 @@ function setupFilterAndLens() {
   }
   const lens = document.getElementById('lens-select');
   if (lens) {
-    lens.addEventListener('change', (event) => applyLens(event.target.value));
+    lens.addEventListener('change', (event) => {
+      applyLens(event.target.value);
+      rememberLens(event.target.value);
+    });
   }
   // The territory lens paints one author; the list is the manifest's own
   // author table, so a locked city offers no names until it is unlocked.
@@ -1535,16 +1561,64 @@ function fillAuthorSelect() {
   select.value = state.territoryAuthor;
 }
 
+/** The City Guide's copy of the lens key, so the colours explain themselves where they are chosen. */
+function mirrorLensKey() {
+  const key = document.getElementById('lens-key');
+  const guideKey = document.getElementById('guide-lens-key');
+  if (!key || !guideKey) return;
+  guideKey.replaceChildren(...[...key.childNodes].map((node) => node.cloneNode(true)));
+}
+
+const LENS_STORAGE = 'zion.lens';
+
+/** The lens a fresh page opens with: the reader's last choice, else language. */
+function initialLens() {
+  if (state.selftest) return 'archetype';
+  try {
+    const saved = localStorage.getItem(LENS_STORAGE);
+    if (saved && document.querySelector(`#lens-select option[value="${saved}"]`)) return saved;
+  } catch {
+    // Storage can be blocked; the default still applies.
+  }
+  return 'language';
+}
+
+function rememberLens(value) {
+  if (state.selftest) return;
+  try {
+    localStorage.setItem(LENS_STORAGE, value);
+  } catch {
+    /* not remembered, which is fine */
+  }
+}
+
+/** The City Guide's "Colour buildings by": the same options as the Filter tab's lens. */
+function setupGuideColour() {
+  const lens = document.getElementById('lens-select');
+  const guide = document.getElementById('guide-lens');
+  if (!lens || !guide) return;
+  guide.innerHTML = lens.innerHTML.replace(/>colour: /g, '>');
+  guide.value = lens.value;
+  guide.addEventListener('change', (event) => {
+    applyLens(event.target.value);
+    rememberLens(event.target.value);
+  });
+  guide.addEventListener('keydown', (event) => event.stopPropagation());
+}
+
 /** Switch the colour lens, keeping the select, the key and the city in step. */
 function applyLens(value) {
   const lens = document.getElementById('lens-select');
   if (lens && lens.value !== value) lens.value = value;
+  const guide = document.getElementById('guide-lens');
+  if (guide && guide.value !== value) guide.value = value;
   if (context.city) {
     context.city.territoryAuthor = state.territoryAuthor;
     context.city.recolour(value);
   }
   if (context.minimap) context.minimap.invalidate();
   renderLensKey();
+  mirrorLensKey();
 }
 
 // ---------------------------------------------------------------------------
@@ -4070,7 +4144,7 @@ async function runSelfTest() {
     const lensSelect = document.getElementById('lens-select');
     const before = lensSelect.value;
     const failed = [];
-    for (const lens of ['trend', 'defects', 'debt', 'depth', 'coupling', 'mainsequence']) {
+    for (const lens of ['trend', 'defects', 'debt', 'depth', 'coupling', 'mainsequence', 'language', 'archetype', 'author']) {
       applyLens(lens);
       const keyTotal = [...document.querySelectorAll('#lens-key > span')]
         .map((span) => Number((span.textContent.split('·').pop() || '').replace(/[^\d]/g, '')) || 0)
@@ -4078,7 +4152,26 @@ async function runSelfTest() {
       if (keyTotal !== context.resident.length) failed.push(`${lens}: key ${keyTotal} of ${context.resident.length}`);
     }
     applyLens(before);
-    check('deeper-lenses-keyed', failed.length === 0, failed.join('; ') || 'six lenses, every building counted');
+    check('deeper-lenses-keyed', failed.length === 0, failed.join('; ') || 'nine lenses, every building counted');
+
+    // The City Guide's "Colour buildings by" drives the same lens as the Filter tab.
+    const guideLens = document.getElementById('guide-lens');
+    const sample = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 1);
+    if (guideLens && sample) {
+      const colourBefore = Array.from(sample.userData.baseColors);
+      guideLens.value = 'language';
+      guideLens.dispatchEvent(new Event('change'));
+      const colourAfter = Array.from(sample.userData.baseColors);
+      const synced = document.getElementById('lens-select').value === 'language';
+      const keyed = document.querySelectorAll('#guide-lens-key span.chip').length > 0;
+      const languages = new Set(context.resident.map((b) => b.language)).size;
+      const recoloured = languages < 2 || colourBefore.some((v, i) => Math.abs(v - colourAfter[i]) > 1e-3);
+      check('guide-colour-by', synced && keyed && recoloured,
+        `filter select ${synced ? 'in step' : 'out of step'}, key ${keyed ? 'shown' : 'missing'}, ${recoloured ? 'recoloured' : 'unchanged'}`);
+      applyLens(before);
+    } else {
+      check('guide-colour-by', Boolean(guideLens), 'no mesh to sample');
+    }
   }
 
   // 5b. Plan view and minimap.
@@ -4322,6 +4415,11 @@ async function boot() {
   const progress = (text) => {
     loadingText.textContent = text;
   };
+  // Before the first rebuild, which reads the lens off this select: a fresh
+  // page colours buildings by what they are made of, or by the reader's last
+  // choice; the self-test keeps the archetype colours its checks expect.
+  const lensSelect = document.getElementById('lens-select');
+  if (lensSelect) lensSelect.value = initialLens();
   try {
     progress('reading manifest');
     await state.source.load(progress);
@@ -4470,6 +4568,8 @@ async function boot() {
   setupMiniMap();
   setupPlanFlows();
   setupPalette();
+  setupGuideColour();
+  applyLens(document.getElementById('lens-select').value);
   renderTitle();
   applyTime();
   setupHistory();

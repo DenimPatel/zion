@@ -400,6 +400,18 @@ numbers, and a progress bar shows how far along the circuit is. Press `N` to ski
 ahead. Cities with more than 32 districts are sampled evenly, and the label says
 so rather than silently dropping most of the map.
 
+**Colour buildings by any attribute.** The top of the City Guide has a *Colour
+buildings by* picker — the same lens as the Filter tab's, kept in step with it —
+grouped by question: what it is (language, kind of building), health (the
+architect's signals, fix commits, branchiest function, TODO debt, test links),
+change over time (heat, trend, age, change since the baseline), structure
+(instability, import depth and hubs, copied code and hidden coupling, centrality,
+the folder's place on the main sequence) and people (main author, one author's
+territory). Its key sits right under it and counts the buildings on screen in
+each colour. A fresh page colours by language, with fixed, clearly different
+colours for the common languages; whatever you pick is remembered in the
+browser.
+
 **The minimap is always there.** A small map in the bottom-right corner draws the
 whole plan -- region plinths, roads by class, district plates, City Hall -- from
 the manifest, so districts that have not streamed in are on it too. Plates and

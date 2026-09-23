@@ -1103,3 +1103,24 @@ body.panels-hidden #minimap:not(.collapsed) { opacity: 0.85; }
 .palette-text { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-hint { margin-left: auto; color: var(--ink-dim); font-size: 11px; white-space: nowrap; }
 .palette-note { margin: 4px 2px 0; font-size: 11px; }
+
+/* ---------- City Guide: colour by ---------- */
+#guide-colour {
+  margin: 2px 0 10px;
+  padding: 8px 9px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.06);
+}
+#guide-colour label { display: block; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 5px; }
+#guide-lens {
+  width: 100%;
+  font: 12.5px var(--sans);
+  color: var(--ink);
+  background: var(--panel-solid);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 5px 6px;
+}
+#guide-lens-key { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 7px; }
+#guide-lens-key span { display: inline-flex; align-items: center; gap: 4px; }

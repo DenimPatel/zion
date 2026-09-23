@@ -335,6 +335,33 @@ export function makeGroundTexture(THREE) {
   return texture;
 }
 
+/**
+ * Categorical colours for languages: the common ones get fixed, clearly
+ * different colours (close to what people already associate with them), and
+ * anything else draws from a spare palette by a stable hash -- far apart in
+ * hue, unlike a raw hash hue, where two languages often landed a shade apart.
+ */
+const LANGUAGE_COLOURS = {
+  python: 0x4b8bd6, javascript: 0xf0d54a, typescript: 0x3fa7e6, java: 0xe07b39, go: 0x3fc8c8, rust: 0xd4674a,
+  c: 0x8e9ab0, cpp: 0xd05a8a, csharp: 0x6fbf5c, kotlin: 0xa678e8, swift: 0xff8a4a, ruby: 0xd94545, php: 0x8f8fdc,
+  scala: 0xdc4f63, shell: 0x8ccf6a, html: 0xe8663d, css: 0x9b6fe0, markdown: 0xb8c4d6, json: 0xc9a64a,
+  yaml: 0xcf7fb0, notebook: 0xf29a45, sql: 0x5fb3a8, csv: 0xa89060, text: 0x9aa3ad, toml: 0xa0845c, xml: 0x7fa36a,
+  vue: 0x4fc08d, svelte: 0xff6a3d, dart: 0x40b4c4, lua: 0x5a6ee0, r: 0x5b8fd1, julia: 0x9a5fc4, binary: 0x5d6470,
+};
+const SPARE_COLOURS = [0x56b4e9, 0xe69f00, 0x009e73, 0xf0e442, 0xcc79a7, 0xd55e00, 0x0072b2, 0x9ad0ec, 0xc9a0dc, 0x8dd3c7, 0xfb8072, 0xbebada];
+
+/** A stable, well-separated colour for any category name (a language, an author). */
+export function categoryColour(text, table = LANGUAGE_COLOURS) {
+  if (!text) return 0x777777;
+  if (table && table[text] !== undefined) return table[text];
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return SPARE_COLOURS[(hash >>> 0) % SPARE_COLOURS.length];
+}
+
 function hueFor(text) {
   let hash = 2166136261;
   for (let i = 0; i < text.length; i++) {
@@ -366,13 +393,10 @@ function tintFor(THREE, baseHex, author, strength) {
 export function lensColour(THREE, source, lens, building, archetype, territoryAuthor, out) {
   const manifest = source.manifest;
   const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
-  if (lens === 'language') {
-    const lang = source.s(building.language);
-    return lang ? out.setHSL(hueFor(lang), 0.5, 0.55) : out.set(0x777777);
-  }
+  if (lens === 'language') return out.set(categoryColour(source.s(building.language)));
   if (lens === 'author') {
     const author = authorTint ? source.s(building.author) : '';
-    return author ? out.setHSL(hueFor(author), 0.45, 0.55) : out.set(0x777777);
+    return out.set(author ? categoryColour(author, null) : 0x777777);
   }
   if (lens === 'era') {
     // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
