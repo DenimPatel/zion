@@ -131,9 +131,133 @@ export class CityHall {
       }
     }
 
+    this._dependencyMatrix(manifest, s);
+    this._folderHealth(manifest);
+
     this.panel.hidden = false;
   }
 }
+
+/**
+ * The dependency structure matrix: rows import columns. Only the folders with
+ * the most cross-folder imports, so it stays a readable square; a cell with a
+ * red outline holds an import against the layering. Click a row to fly there.
+ */
+CityHall.prototype._dependencyMatrix = function _dependencyMatrix(manifest, s) {
+  const deps = manifest.dependencies;
+  if (!deps || !deps.matrix || !deps.matrix.length) return;
+  const involvement = new Map();
+  for (const [a, b, n] of deps.matrix) {
+    involvement.set(a, (involvement.get(a) || 0) + n);
+    involvement.set(b, (involvement.get(b) || 0) + n);
+  }
+  // The busiest folders, ordered from least to most stable: leaves first,
+  // foundations last. In that order a clean layering has every import above
+  // the diagonal, so anything below it points the wrong way.
+  const inst = (id) => {
+    const d = manifest.districts[id];
+    return d && d.instability >= 0 ? d.instability : 0.5;
+  };
+  const ids = [...involvement.entries()].sort((x, y) => y[1] - x[1]).slice(0, 12).map(([id]) => id)
+    .sort((a, b) => inst(b) - inst(a) || a - b);
+  const cells = new Map(deps.matrix.map(([a, b, n]) => [`${a}>${b}`, n]));
+  const violating = new Set((deps.violatingPairs || []).map(([a, b]) => `${a}>${b}`));
+  const max = Math.max(1, ...deps.matrix.map((r) => r[2]));
+  const name = (id) => {
+    const district = manifest.districts[id];
+    return district ? this.source.districtLabel(district) : String(id);
+  };
+  const h = document.createElement('h3');
+  h.textContent = 'Dependencies between folders (row imports column)';
+  this.body.append(h);
+  const note = document.createElement('p');
+  note.className = 'hall-note';
+  const rules = deps.rules >= 0 ? s(deps.rules) : '';
+  note.textContent = `${deps.violations} import(s) against the layering` +
+    (rules && rules !== 'majority' ? ` (rules: ${rules}).` : ' (without a .zion/rules.json: folder pairs that import both ways).') +
+    ' Folders run from leaves (unstable) to foundations (stable): in a clean layering every import sits above the diagonal.';
+  this.body.append(note);
+  const table = document.createElement('table');
+  table.className = 'hall-matrix';
+  const head = document.createElement('tr');
+  head.append(document.createElement('th'));
+  ids.forEach((id, index) => {
+    const th = document.createElement('th');
+    th.className = 'col';
+    th.textContent = `${index + 1}`;
+    th.title = name(id);
+    head.append(th);
+  });
+  table.append(head);
+  ids.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    const th = document.createElement('th');
+    th.textContent = `${index + 1}. ${name(row)}`;
+    tr.append(th);
+    for (const col of ids) {
+      const td = document.createElement('td');
+      const n = cells.get(`${row}>${col}`) || 0;
+      if (row === col) td.className = 'self';
+      else if (n) {
+        td.textContent = String(n);
+        td.style.background = `rgba(77, 163, 255, ${(0.15 + 0.75 * (n / max)).toFixed(2)})`;
+        td.title = `${name(row)} imports ${name(col)}: ${n}`;
+        if (violating.has(`${row}>${col}`)) td.classList.add('violating');
+      }
+      tr.append(td);
+    }
+    tr.addEventListener('click', () => {
+      const district = manifest.districts[row];
+      if (district && this.onTeleport) this.onTeleport({ kind: 'district', district });
+    });
+    table.append(tr);
+  });
+  this.body.append(table);
+
+  if (deps.coupling && deps.coupling.length) {
+    const h2 = document.createElement('h3');
+    h2.textContent = 'Folders that change together';
+    this.body.append(h2);
+    const coupling = document.createElement('table');
+    coupling.className = 'hall-table';
+    for (const [a, b, pairs, commits] of deps.coupling) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${escapeHtml(name(a))} ↔ ${escapeHtml(name(b))}</td><td class="num">${pairs} pairs</td><td class="num">${commits} commits</td>`;
+      coupling.append(tr);
+    }
+    this.body.append(coupling);
+  }
+};
+
+/** One row per folder: instability, tests, who to ask. The architect's table. */
+CityHall.prototype._folderHealth = function _folderHealth(manifest) {
+  const flags = manifest.flags || {};
+  if (!flags.imports && !flags.tests && !flags.authorship) return;
+  const h = document.createElement('h3');
+  h.textContent = 'Folders: coupling, tests and who to ask';
+  this.body.append(h);
+  const table = document.createElement('table');
+  table.className = 'hall-table';
+  const head = document.createElement('tr');
+  head.innerHTML = '<td>folder</td><td class="num">Ca</td><td class="num">Ce</td><td class="num">I</td><td class="num">tested</td><td>ask</td>';
+  table.append(head);
+  const rows = [...manifest.districts].sort((a, b) => (b.ca + b.ce) - (a.ca + a.ce) || b.logicalLoc - a.logicalLoc).slice(0, 24);
+  for (const district of rows) {
+    const tr = document.createElement('tr');
+    tr.className = 'clickable';
+    const inst = district.instability >= 0 ? district.instability.toFixed(2) : '—';
+    const tested = district.sourceFiles ? `${district.testedFiles}/${district.sourceFiles}` : '—';
+    const ask = (district.experts || []).map((e) => this.source.s(e.name)).filter(Boolean).slice(0, 2).join(', ') || '—';
+    tr.innerHTML = `<td>${escapeHtml(this.source.districtLabel(district))}</td><td class="num">${district.ca || 0}</td>` +
+      `<td class="num">${district.ce || 0}</td><td class="num">${inst}</td><td class="num">${tested}</td><td>${escapeHtml(ask)}</td>`;
+    tr.addEventListener('click', () => {
+      if (this.onTeleport) this.onTeleport({ kind: 'district', district });
+    });
+    table.append(tr);
+  }
+  this.body.append(table);
+};
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) =>

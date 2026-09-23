@@ -14,10 +14,12 @@ is vanilla JS + a vendored `three.js`, no build step, no `npm`/`node_modules`.
 python3 zion.py stats  /path/to/repo        # text report, no build artifacts
 python3 zion.py build  /path/to/repo [-o DIR] [--district-depth N] [--include-noise] [--encrypt] [--single-file]
 python3 zion.py serve  /path/to/repo        # build if needed, serve, open a browser
+python3 zion.py report /path/to/repo [--format md|json] [--compare REV] [--baseline summary.json] [--fail-on LIST]
+python3 zion.py build  /path/to/repo --compare REV   # delta against a revision instead of the last build
 python3 bench/generate_repo.py bench/tmp/repo-50000 --files 50000 --commits 40   # synthetic repo for scale testing
 ```
 
-Tests (105 tests, stdlib only, no test runner dependency):
+Tests (121 tests, stdlib only, no test runner dependency):
 
 ```
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -28,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (54 interactive checks, dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (72 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -41,8 +43,9 @@ Encrypted build: `ZION_PASSPHRASE='…' python3 zion.py build /path/to/repo --en
 
 ## Architecture
 
-**Pipeline (all Python, all in `analyzer/`):** `walk.py` → `gitmeta.py` → `metrics.py` (→ `health.py`) → `layout.py` →
-`crypto.py` (if `--encrypt`) → `emit.py`. The viewer never parses source — it only receives numbers
+**Pipeline (all Python, all in `analyzer/`):** `walk.py` → `gitmeta.py` → `metrics.py` (→ `health.py`, `owners.py`,
+`testmap.py`) → `layout.py` (→ `architecture.py`) → `history.py` + `crypto.py` (if `--encrypt`) → `emit.py`; `report.py`
+renders the same analysis as Markdown/JSON for `zion.py report`. The viewer never parses source — it only receives numbers
 (the manifest + chunk JSON emitted by `emit.py`). `zion.py` is the CLI that wires this pipeline together
 for `stats`/`build`/`serve`/`bench`.
 
@@ -62,6 +65,19 @@ for `stats`/`build`/`serve`/`bench`.
   factor, owner-inactive knowledge risk, hotspots (commit frequency × size), oversized files, orphan
   candidates and import cycles (iterative Tarjan). Each gated on its own flag (`hotspots`, `knowledge`,
   `imports`); vendored paths are excluded.
+- `architecture.py` — dependency structure between leaf districts, run at the end of `build_layout` (it needs districts):
+  per-folder Ca/Ce/instability, the folder matrix, layering violations (from a read-only `.zion/rules.json` /
+  `zion.rules.json`, else "the thinner direction of a folder pair that imports both ways") and cross-folder
+  co-change. Tests and vendored code are not design dependencies.
+- `owners.py` — recency-weighted experts ("who to ask", half-life 180 days), author shares, and CODEOWNERS parsing
+  (gitignore semantics, last match wins) with drift = the named individuals commit but did not write the file. Teams
+  are never called drifted. Needs `gitmeta`'s author emails.
+- `testmap.py` — links tests to sources by resolved import and by same-language name stem; `untested_risk` only for
+  hotspot/oversized/downtown files and only when at least one link exists (`flags.tests`). Also `is_braced`
+  (a *function or method* with ≥ 15 decision points — class totals are sums, not one definition).
+- `history.py` — `summary.json` per build (paths HMAC-keyed under `--encrypt`), the delta against the last build in
+  the same output dir (or the one before it when the head did not move), and `analyze_revision` for `--compare REV`
+  (`git archive` into a temp dir; never touches the analyzed working tree).
 - `layout.py` — chooses district depth (most structure within a readable district-count band, preferring
   no single-building district, ties toward shallower), then lays the leaf districts out as a *nested*
   treemap over their folder tree: each folder that splits becomes a region (raised plinth) and the roads
@@ -85,6 +101,10 @@ from; `facade.js` renders windows per-fragment from a building's own metrics (no
 window rows equal parsed floor counts; `interior.js` builds/destroys building interiors on enter/leave
 (max 2 cached), slicing source by byte offset so displayed text matches exactly what was measured;
 `labels.js` projects region/district names as DOM labels, revealed by camera distance per level;
+`selection.js` draws what the current selection is connected to (import lines, co-change rings, district arcs) —
+only for the selection, as its own scene group; `notes.js` (localStorage, keyed by repo name + path) and
+`views.js` (URL-hash saved views) are the reader's own state; `parts/structure.js` holds the no-entry sign,
+traffic cones, cross-bracing, survey stake, owner notice and note pin;
 `inspector.js` is the explaining building/district/region report; `cityhall/`, `tour.js`, `cameras.js`,
 `collision.js`, `sky.js` are self-explanatory;
 `vault.js` handles client-side WebCrypto decryption of encrypted cities.
@@ -113,6 +133,11 @@ window rows equal parsed floor counts; `interior.js` builds/destroys building in
   the filter query that counts/highlights its buildings. A new legend entry needs a row there *and* a
   `(id, label, unit, group, description)` entry in `emit.py::LEGEND_SPEC`; an entry with no separate layer
   is shown with an "always" badge, never as a dead switch.
+- Relationships are drawn for the selection only (`viewer/js/selection.js`). Never draw every import or co-change edge
+  at once — that is the tangle the original skybridges were removed for.
+- `index.json` columns and `FLAG_*` bits are append-only; `viewer/js/facets.js::FLAG_BITS` must mirror `emit.py`.
+- Nothing about the repository may reach `summary.json`, `imports.json` or `city.json` in plaintext under `--encrypt`:
+  edges are building ids, summaries are HMAC-keyed, names go through the string table.
 - Streets are `[x, y, w, h, class]` and regions carry `level`; anything drawn on the ground (district
   plates, roads, ground props) must sit on `plinthTop(level)` from `viewer/js/city.js`, or it is buried
   inside the plinth.

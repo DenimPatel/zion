@@ -829,3 +829,116 @@ body.detail-page {
 }
 #inspector-open-detail:hover { background: rgba(255, 179, 71, 0.28); }
 #inspector-open-detail[hidden] { display: none; }
+
+/* ---------- the next layer: structure, history, views, notes ---------- */
+#view-link {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 6px 11px;
+  background: var(--panel-solid);
+  color: var(--ink-dim);
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+}
+#view-link:hover { color: var(--ink); border-color: rgba(148, 163, 184, 0.45); }
+#lens-author {
+  width: 100%;
+  margin-top: 6px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 4px 6px;
+}
+#lens-author[hidden] { display: none; }
+#lens-key { margin-top: 6px; }
+#filter-help { margin: 4px 0 6px; }
+#filter-help summary { cursor: pointer; color: var(--ink-dim); }
+#filter-help p { margin: 4px 0; line-height: 1.7; }
+#filter-help code {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: rgba(148, 163, 184, 0.14);
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
+}
+#history-control[hidden] { display: none; }
+#history-control input[type="range"] { width: 180px; }
+#history-play {
+  background: rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  color: var(--ink);
+  font-size: 10px;
+  width: 26px;
+  height: 22px;
+  cursor: pointer;
+}
+body.history-active #history-out { color: #ff7a4a; }
+.insp-bar {
+  display: flex;
+  height: 8px;
+  margin: 6px 0 3px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.14);
+}
+.insp-bar span { display: block; height: 100%; }
+.insp-bar-legend { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 10.5px; color: var(--ink-dim); }
+.insp-bar-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+.sparkline.trend .spark-bar { position: relative; }
+.spark-dot {
+  position: absolute;
+  left: -1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8fd6ff;
+  box-shadow: 0 0 0 1px rgba(5, 7, 13, 0.8);
+}
+.floor-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 32px;
+  margin: 4px 0 8px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+.floor-chart span { flex: 1 1 0; min-width: 2px; max-width: 10px; background: #6b86a8; border-radius: 1px 1px 0 0; }
+.floor-chart span.hot { background: #ff9a2e; }
+.insp-note {
+  width: 100%;
+  margin: 4px 0;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 6px;
+  resize: vertical;
+}
+.insp-note-actions { display: flex; align-items: center; gap: 8px; }
+.health-item .note-text { display: block; color: var(--ink-dim); font-style: italic; word-break: normal; }
+.dep-item.violating { border-left: 3px solid #e0245e; }
+.delta-table { width: 100%; border-collapse: collapse; margin: 4px 0 6px; font-family: var(--mono); font-size: 10.5px; }
+.delta-table td { padding: 1px 4px; color: var(--ink-dim); }
+.delta-table td.num { text-align: right; }
+.delta-table tr.worse td:last-child { color: #ff6b4a; }
+.delta-table tr.better td:last-child { color: #3ddc84; }
+.delta-table tr.info td:last-child { color: var(--accent); }
+.hall-matrix { border-collapse: collapse; font-family: var(--mono); font-size: 10px; margin: 4px 0 10px; }
+.hall-matrix th { color: var(--ink-dim); font-weight: normal; padding: 2px 4px; text-align: left; }
+.hall-matrix th.col { writing-mode: vertical-rl; transform: rotate(180deg); max-height: 120px; white-space: nowrap; }
+.hall-matrix td { width: 22px; height: 18px; text-align: center; border: 1px solid rgba(148, 163, 184, 0.1); }
+.hall-matrix td.self { background: rgba(148, 163, 184, 0.08); }
+.hall-matrix td.violating { outline: 2px solid #e0245e; outline-offset: -2px; }

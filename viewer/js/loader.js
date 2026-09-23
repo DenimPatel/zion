@@ -130,6 +130,14 @@ export class CitySource {
     return this._bridges;
   }
 
+  /** Import edges, `[[fromId, toId, violates], ...]`; ids only, so locked or not. */
+  async imports() {
+    if (this._imports) return this._imports;
+    if (!this.manifest || !this.manifest.imports) return [];
+    this._imports = await getJSON(this.base, this.manifest.imports);
+    return this._imports;
+  }
+
   /**
    * The whole-repo facet index: one row per building, columns named by
    * `manifest.indexColumns`. Loaded once, up front -- unlike district chunks,

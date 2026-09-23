@@ -4,6 +4,7 @@
     python3 zion.py stats  <repo>            # text report, no 3D at all
     python3 zion.py build  <repo> [-o DIR]   # write a city
     python3 zion.py serve  <repo>            # build if needed, serve, open
+    python3 zion.py report <repo>            # architect's report (Markdown/JSON), CI gate
     python3 zion.py bench  generate          # synthetic repo for 50k testing
 
 Pure standard library.  No npm, no Node, no third-party packages.
@@ -49,6 +50,19 @@ def prepare_analysis(root: str, include_noise: bool, max_buildings: int | None):
     analysis.noise_excluded = walk.noise_excluded
     analysis.truncated = walk.truncated
     return analysis
+
+
+def compare_baseline(args, analysis, passphrase: str | None = None):
+    """A `--compare REV` baseline summary, or None."""
+    rev = getattr(args, "compare", None)
+    if not rev:
+        return None
+    from analyzer import history
+
+    key, keying = history.key_function(passphrase)
+    old, sha = history.analyze_revision(args.repo, rev, args.include_noise, args.max_buildings)
+    label = rev if rev.startswith(sha[:7]) else f"{rev} ({sha[:7]})"
+    return history.summarize(old, key, keying, label=label)
 
 
 def human_bytes(value: int) -> str:
@@ -138,6 +152,19 @@ def cmd_stats(args) -> int:
           f"weathering={flags.recency} skybridges={flags.coupling}")
     for note in flags.notes:
         print(f"      note: {note}")
+    arch = analysis.architecture
+    if arch is not None and flags.imports:
+        rules = "rules from " + arch.rules if arch.rules not in ("", "majority") else "majority direction"
+        print(f"  structure          {len(arch.matrix)} folder-to-folder import pairs, "
+              f"{len(arch.violations)} against the layering ({rules})")
+    sources = [f for f in analysis.files if f.is_tested or f.is_untested]
+    if flags.tests:
+        print(f"  tests              {sum(1 for f in sources if f.is_tested)} of {len(sources)} source files "
+              f"have a linked test; {sum(1 for f in sources if f.untested_risk)} risky ones do not")
+    if flags.codeowners:
+        print(f"  CODEOWNERS         {analysis.codeowners_path}: {sum(1 for f in analysis.files if f.owner_drift)} drifted, "
+              f"{sum(1 for f in analysis.files if f.is_unowned)} unowned")
+    print("  (python3 zion.py report <repo> for the full architect's report)")
     missing = [d for d in layout.districts if not d.has_readme]
     print(f"  town halls         {len(layout.districts) - len(missing)} of "
           f"{len(layout.districts)} districts have a README")
@@ -170,11 +197,17 @@ def cmd_build(args) -> int:
                 print("error: empty passphrase", file=sys.stderr)
                 return 2
 
+    try:
+        baseline = compare_baseline(args, analysis, passphrase if args.encrypt else None)
+    except ValueError as error:
+        print(f"error: --compare: {error}", file=sys.stderr)
+        return 2
     options = emit_mod.EmitOptions(
         encrypt=args.encrypt,
         passphrase=passphrase,
         single_file=args.single_file,
         include_source=not args.no_source,
+        baseline=baseline,
     )
     result = emit_mod.emit_city(analysis, out_dir, options, layout=layout)
 
@@ -186,6 +219,11 @@ def cmd_build(args) -> int:
     print(f"  city size     {human_bytes(result.bytes_written)}")
     print(f"  analyze       {elapsed_analysis:.2f}s")
     print(f"  total         {total:.2f}s")
+    delta = analysis.delta
+    if delta:
+        label = delta["baseline"].get("label") or delta["baseline"].get("generated", "the last build")
+        print(f"  changed       since {label}: {len(delta['added'])} added, {len(delta['removed'])} removed, "
+              f"{len(delta['grown'])} grown, {len(delta['shrunk'])} shrunk")
     if args.encrypt:
         print(f"  encrypted     yes ({result.encryption_seconds:.2f}s of AES-GCM)")
     else:
@@ -196,6 +234,52 @@ def cmd_build(args) -> int:
             print(f"                {result.single_file_note}")
         else:
             print(f"  single file   not produced: {result.single_file_note}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# report
+# --------------------------------------------------------------------------
+
+
+def cmd_report(args) -> int:
+    from analyzer import history
+    from analyzer.report import build_report, evaluate_gates, render_markdown
+
+    analysis = prepare_analysis(args.repo, args.include_noise, args.max_buildings)
+    layout = build_layout(analysis, args.district_depth)
+    baseline = None
+    try:
+        baseline = compare_baseline(args, analysis)
+    except ValueError as error:
+        print(f"error: --compare: {error}", file=sys.stderr)
+        return 2
+    if baseline is None and args.baseline:
+        baseline = history.load_summary(args.baseline)
+        if baseline is None:
+            print(f"error: --baseline: not a Zion summary: {args.baseline}", file=sys.stderr)
+            return 2
+    delta = history.apply_delta(analysis, baseline)
+    report = build_report(analysis, layout, delta)
+    conditions = [c for c in (args.fail_on or "").split(",") if c.strip()]
+    failures, skipped = evaluate_gates(report, conditions)
+    report["gate"] = {"conditions": conditions, "failures": failures, "unevaluated": skipped}
+
+    text = json.dumps(report, indent=2) if args.format == "json" else render_markdown(report)
+    if args.format != "json" and conditions:
+        lines = ["## Gate", ""]
+        lines += [f"- ❌ {f}" for f in failures] or ["- ✅ every condition passed"]
+        lines += [f"- ⚠️ not evaluated: {s}" for s in skipped]
+        text += "\n" + "\n".join(lines) + "\n"
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    else:
+        print(text)
+    if failures:
+        for failure in failures:
+            print(f"zion: gate failed: {failure}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -224,6 +308,7 @@ def cmd_serve(args) -> int:
                 district_depth=args.district_depth,
                 max_buildings=args.max_buildings,
                 no_source=False,
+                compare=args.compare,
             )
             cmd_build(build_args)
 
@@ -296,6 +381,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_build = sub.add_parser("build", parents=[common], help="write a city")
     p_build.add_argument("-o", "--output", default=None, help="output directory")
+    p_build.add_argument("--compare", default=None, metavar="REV",
+                         help="mark what changed since REV (a tag, branch or commit) instead of the last build")
     p_build.add_argument("--encrypt", action="store_true",
                          help="encrypt the string table and floor detail (AES-256-GCM)")
     p_build.add_argument("--single-file", action="store_true",
@@ -306,10 +393,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_serve = sub.add_parser("serve", parents=[common], help="build if needed and serve")
     p_serve.add_argument("-o", "--output", default=None, help="output directory")
+    p_serve.add_argument("--compare", default=None, metavar="REV",
+                         help="mark what changed since REV instead of the last build")
     p_serve.add_argument("--port", type=int, default=8765)
     p_serve.add_argument("--open", action="store_true", help="open a browser")
     p_serve.add_argument("--no-rebuild", action="store_true", help="serve the existing build")
     p_serve.set_defaults(func=cmd_serve)
+
+    p_report = sub.add_parser("report", parents=[common], help="architect's report as Markdown or JSON; CI gate")
+    p_report.add_argument("--format", choices=["md", "json"], default="md")
+    p_report.add_argument("-o", "--output", default=None, help="write the report to this file")
+    p_report.add_argument("--compare", default=None, metavar="REV",
+                          help="compare against the repository at REV (tag, branch or commit)")
+    p_report.add_argument("--baseline", default=None, metavar="FILE",
+                          help="compare against a summary.json written by an earlier build")
+    p_report.add_argument("--fail-on", default="", metavar="LIST",
+                          help="exit 1 when any condition holds: cycles, violations, hotspots, untested, drift, "
+                               "<signal>-up, new-<signal> (comma-separated)")
+    p_report.set_defaults(func=cmd_report)
 
     p_bench = sub.add_parser("bench", help="synthetic scale benchmark")
     p_bench.add_argument("action", choices=["generate", "run"], default="generate", nargs="?")

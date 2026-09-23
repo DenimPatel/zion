@@ -123,7 +123,57 @@ export async function renderBuilding(source, id) {
     rows.push(['author', source.s(building.author)]);
     rows.push(['ownership', `${Math.round((building.ownership || 0) * 100)}% of lines`]);
   }
+  if (flags.authorship && building.authorShares && building.authorShares.length) {
+    rows.push(['authors', building.authorShares.map(([n, share]) => `${source.s(n)} ${Math.round(share * 100)}%`).join(', ')]);
+  }
+  if (flags.authorship && building.experts && building.experts.length) {
+    rows.push(['who to ask', building.experts.map(([n]) => source.s(n)).join(', ')]);
+  }
+  if (flags.codeowners) {
+    const declared = (building.declaredOwners || []).map((i) => source.s(i)).join(' ') || 'no rule';
+    rows.push(['CODEOWNERS', `${declared}${building.ownerDrift ? ' (drifted: they did not write it)' : ''}`]);
+  }
+  if (flags.imports) {
+    rows.push(['imports', `${building.importsOut || 0} file(s) out, ${building.importInDegree || 0} in`]);
+    if (building.instability >= 0) rows.push(['instability', building.instability.toFixed(2)]);
+    if (flags.layering && building.violations) rows.push(['layering violations', String(building.violations)]);
+  }
+  if (flags.tests && (building.untested || (building.testedBy && building.testedBy.length))) {
+    rows.push(['tests', building.testedBy && building.testedBy.length
+      ? `${building.testedBy.length} linked`
+      : building.untestedRisk ? 'none linked (risky)' : 'none linked']);
+  }
+  if (building.braceComplexity) rows.push(['busiest function', `${building.braceComplexity} decision points`]);
+  if (flags.delta && source.manifest.delta) {
+    rows.push(['since baseline', building.delta
+      ? `${building.delta}${building.locDelta ? ` (${building.locDelta > 0 ? '+' : ''}${building.locDelta} lines)` : ''}`
+      : building.locDelta ? `${building.locDelta > 0 ? '+' : ''}${building.locDelta} lines` : 'unchanged']);
+    if (building.became && building.became.length) rows.push(['newly flagged', building.became.join(', ')]);
+  }
   root.append(metricList(rows));
+
+  // Imports and tests as flyable lists: the edges the overlay draws, by name.
+  if (flags.imports || flags.tests) {
+    const edges = await source.imports();
+    const byId = new Map(index.map((r) => [r[cols.id], r]));
+    const label = (otherId) => (source.locked ? `building ${otherId}` : source.s((byId.get(otherId) || [])[cols.path]) || `building ${otherId}`);
+    const list = (heading, ids, marks = new Set()) => {
+      if (!ids.length) return;
+      root.append(el('h2', { textContent: heading }));
+      const box = el('div', { className: 'floor-list' });
+      for (const otherId of ids.slice(0, 40)) {
+        const button = el('button', { className: 'chip-btn', textContent: `${label(otherId)}${marks.has(otherId) ? '  ⛔ against the layering' : ''}` });
+        button.addEventListener('click', () => flyTo(otherId));
+        box.append(button);
+      }
+      root.append(box);
+    };
+    const out = edges.filter(([a]) => a === id);
+    list('Imports', out.map(([, b]) => b), new Set(out.filter(([, , v]) => v).map(([, b]) => b)));
+    const inbound = edges.filter(([, b]) => b === id);
+    list('Imported by', inbound.map(([a]) => a), new Set(inbound.filter(([, , v]) => v).map(([a]) => a)));
+    list('Tested by', building.testedBy || []);
+  }
 
   if (flags.churn && building.activity) {
     const spark = sparkline(building.activity);
@@ -207,7 +257,57 @@ export async function renderDistrict(source, id) {
   if (flags.churn) rows.push(['heat (recent activity)', `${Math.round((district.heat || 0) * 100)}% of scale`]);
   if (flags.age) rows.push(['new files', `${district.newFiles || 0} of ${district.buildings}`]);
   if (flags.downtown) rows.push(['central business district', district.isCbd ? 'yes' : 'no']);
+  if (flags.imports) {
+    rows.push(['afferent coupling (Ca)', `${district.ca || 0} file(s) elsewhere import something here`]);
+    rows.push(['efferent coupling (Ce)', `${district.ce || 0} file(s) here import something elsewhere`]);
+    if (district.instability >= 0) rows.push(['instability Ce/(Ca+Ce)', district.instability.toFixed(2)]);
+    if (flags.layering) rows.push(['layering violations', String(district.violations || 0)]);
+  }
+  if (flags.tests && district.sourceFiles) {
+    rows.push(['tested', `${district.testedFiles} of ${district.sourceFiles} source files (${district.untestedRisk || 0} risky untested)`]);
+  }
+  if (flags.authorship && district.experts && district.experts.length) {
+    rows.push(['who to ask', district.experts.map((e) => `${source.s(e.name)} ${Math.round(e.share * 100)}%`).join(', ')]);
+  }
+  if (flags.codeowners) rows.push(['CODEOWNERS', `${district.ownerDrift || 0} drifted, ${district.unowned || 0} unowned`]);
+  if (flags.delta) rows.push(['changed since baseline', `${district.changed || 0} file(s)`]);
   root.append(metricList(rows));
+
+  if (flags.churn && district.activity) {
+    const spark = sparkline(district.activity);
+    if (spark) root.append(el('h2', { textContent: 'Commits per month in this folder (last 24 months)' }), spark);
+    if (district.activeAuthors && district.activeAuthors.some((v) => v > 0)) {
+      root.append(el('h2', { textContent: 'People active per month' }), sparkline(district.activeAuthors));
+    }
+  }
+
+  const deps = source.manifest.dependencies;
+  if (deps && deps.matrix) {
+    const name = (otherId) => {
+      const other = source.districts.find((d) => d.id === otherId);
+      return other ? source.districtLabel(other) : `district ${otherId}`;
+    };
+    const violating = new Set((deps.violatingPairs || []).map(([a, b]) => `${a}>${b}`));
+    const folderList = (heading, rows2) => {
+      if (!rows2.length) return;
+      root.append(el('h2', { textContent: heading }));
+      const box = el('div', { className: 'floor-list' });
+      for (const [otherId, count, bad] of rows2) {
+        const button = el('button', { className: 'chip-btn', textContent: `${name(otherId)} — ${count}${bad ? '  ⛔ against the layering' : ''}` });
+        button.addEventListener('click', () => {
+          resetDetailPanel();
+          renderDistrict(source, otherId);
+        });
+        box.append(button);
+      }
+      root.append(box);
+    };
+    folderList('Depends on (imports)', deps.matrix.filter((r) => r[0] === id).map((r) => [r[1], r[2], violating.has(`${r[0]}>${r[1]}`)]));
+    folderList('Depended on by (imports)', deps.matrix.filter((r) => r[1] === id).map((r) => [r[0], r[2], violating.has(`${r[0]}>${r[1]}`)]));
+    folderList('Changes together with (shared commits)', (deps.coupling || [])
+      .filter((r) => r[0] === id || r[1] === id)
+      .map((r) => [r[0] === id ? r[1] : r[0], r[3], false]));
+  }
 
   const index = await source.index();
   const cols = columnIndex(source.manifest.indexColumns);

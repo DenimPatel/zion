@@ -19,6 +19,11 @@ import {
   placeDistrictMarker,
   ARCHETYPE_COLORS,
   archetypeLabel,
+  DELTA_COLOURS,
+  LENS_BANDS,
+  lensBand,
+  healthSignal,
+  plinthTop,
 } from './city.js';
 import { SkyRig } from './sky.js';
 import { FlyCamera, OrbitCamera, CameraFlight } from './cameras.js';
@@ -28,7 +33,10 @@ import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
-import { buildFacets, columnIndex, parseQuery, runQuery } from './facets.js';
+import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
+import { SelectionOverlay, LINK_COLOURS } from './selection.js';
+import { Notes } from './notes.js';
+import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
 import { MapLabels } from './labels.js';
 import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
@@ -61,6 +69,13 @@ const state = {
   // so the panel is driven by the analyzer's own list rather than a second one
   // kept here by hand.
   hiddenLayers: new Set(),
+  // Folders the current district/region selection focuses on (S14): every
+  // building outside them fades, the way a filter fades non-matches.
+  focus: null,
+  // The History slider: days before the newest commit, or null for today.
+  timeline: null,
+  // The author the territory lens paints.
+  territoryAuthor: '',
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -163,12 +178,22 @@ const LEGEND_KEYS = {
   silos: { kind: 'archetype', target: 'silo', short: 'Silos', colour: ARCHETYPE_COLORS.silo, query: 'archetype:silo' },
   monuments: { kind: 'archetype', target: 'monument', short: 'Monuments', colour: ARCHETYPE_COLORS.monument, query: 'archetype:monument' },
   downtown: { kind: 'option', short: 'Downtown towers', colour: 0x8fd6ff, query: 'is:downtown' },
-  skybridges: { kind: null, short: 'Changes together with', colour: 0x6b7a90, reason: 'listed in the detail report, not drawn' },
+  skybridges: { kind: 'overlay', target: 'cochange-rings', short: 'Co-change rings', colour: LINK_COLOURS.cochange },
   hotspots: { kind: 'mesh', target: 'hazard-barriers', short: 'Hazard barriers — hotspots', colour: HEALTH_COLOURS.hotspot, query: 'is:hotspot' },
   oversized: { kind: 'mesh', target: 'raking-shores', short: 'Buttresses — oversized', colour: HEALTH_COLOURS.oversized, query: 'is:oversized' },
   orphans: { kind: 'option', short: 'Boarded up — orphans', colour: HEALTH_COLOURS.orphan, query: 'is:orphan' },
   cycles: { kind: 'mesh', target: 'cycle-pennants', short: 'Pennants — import cycles', colour: HEALTH_COLOURS.cycle, query: 'is:cycle' },
   knowledge: { kind: 'mesh', target: 'knowledge-flags', short: 'Red flags — owner gone', colour: 0xe8332a, query: 'is:knowledge' },
+  untested: { kind: 'mesh', target: 'traffic-cones', short: 'Traffic cones — untested risk', colour: 0xff6a1a, query: 'is:untestedrisk' },
+  complexity: { kind: 'mesh', target: 'cross-bracing', short: 'Cross-bracing — branch-heavy', colour: 0xb8c2cc, query: 'is:braced' },
+  imports: { kind: 'overlay', target: 'import-lines', short: 'Utility lines — imports', colour: LINK_COLOURS.out, query: 'fanout>0' },
+  instability: { kind: null, short: 'Instability', colour: 0xd9b44a, reason: 'a colour lens: Filter tab → instability' },
+  violations: { kind: 'mesh', target: 'no-entry-signs', short: 'No-entry signs — layering', colour: HEALTH_COLOURS.violation, query: 'is:violation' },
+  district_coupling: { kind: 'overlay', target: 'district-links', short: 'Folder links', colour: LINK_COLOURS.cochange },
+  codeowners: { kind: 'mesh', target: 'owner-notices', short: 'Owner notices — CODEOWNERS drift', colour: 0x8c5ce6, query: 'is:drift' },
+  experts: { kind: null, short: 'Who to ask', colour: 0xb28ad6, reason: 'listed in the inspector, not drawn' },
+  delta: { kind: 'mesh', target: 'survey-stakes', short: 'Survey stakes — changed', colour: DELTA_COLOURS.added, query: 'is:added OR is:grown OR is:shrunk' },
+  timeline: { kind: null, short: 'History', colour: 0xe8b04b, reason: 'the History slider replays it' },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
@@ -195,12 +220,7 @@ const hexColour = (colour) => `#${(colour === undefined ? 0x777777 : colour).toS
 /** How many buildings, repository-wide, a filter query matches -- or null. */
 function countFor(query) {
   if (!query || !context.facetIndex) return null;
-  const predicate = parseQuery(
-    query,
-    state.source.manifest.indexColumns,
-    (idx) => state.source.s(idx),
-    resolveExt
-  );
+  const predicate = compileQuery(query);
   if (!predicate) return null;
   return runQuery(context.facetIndex, predicate, state.source.manifest.indexColumns).count;
 }
@@ -301,10 +321,17 @@ function disabledReason(id) {
     author_tint: /author/i, sole_tenant: /author/i, churn: /churn/i, heat: /churn/i, hotspots: /churn/i,
     weathering: /weather|commit dates/i, new_construction: /birth/i, skybridges: /coupling/i,
     downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
+    untested: /test/i, imports: /import/i, instability: /import/i, district_coupling: /coupling/i,
+    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i,
   }[id];
   const note = words ? notes.find((n) => words.test(n)) : null;
   if (note) return note;
   if (id === 'cycles') return 'No import cycles were found.';
+  if (id === 'violations') return 'No import points against the layering.';
+  if (id === 'complexity') return 'No function has 15 or more decision points.';
+  if (id === 'codeowners') return 'No CODEOWNERS file in the repository.';
+  if (id === 'district_coupling') return 'No two folders keep changing together.';
+  if (id === 'delta') return 'No baseline yet: build again after the repository changes, or build with --compare REV.';
   return 'Not drawn: the repository history is too thin for this signal to mean anything.';
 }
 
@@ -424,7 +451,7 @@ function toggleRow(row) {
   if (state.hiddenLayers.has(key)) state.hiddenLayers.delete(key);
   else state.hiddenLayers.add(key);
   syncKeyRows();
-  if (kind === 'mesh') applyHiddenLayers();
+  if (kind === 'mesh' || kind === 'overlay') applyHiddenLayers();
   else scheduleRebuild();
 }
 
@@ -455,10 +482,18 @@ function highlightQuery(query) {
 /** Re-apply every prop-cluster switch to the mesh that is on screen now. */
 function applyHiddenLayers() {
   if (!context.city) return;
+  // Every prop back first (the History slider may have hidden them all), then
+  // each switch takes its own layer away again.
+  context.city.showProps();
   for (const [id, spec] of Object.entries(LEGEND_KEYS)) {
-    if (spec.kind !== 'mesh') continue;
-    context.city.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+    if (spec.kind === 'mesh') context.city.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+    else if (spec.kind === 'overlay' && context.overlay) {
+      context.overlay.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
+    }
   }
+  // The History slider hides every prop while it replays the past; a switch
+  // flipped meanwhile must not bring them back early.
+  if (state.timeline !== null) context.city.hideProps();
 }
 
 let rebuildScheduled = false;
@@ -503,7 +538,26 @@ const HEALTH_SECTIONS = [
     id: 'orphans', title: 'Possible dead code', colour: HEALTH_COLOURS.orphan, flag: 'imports',
     text: 'Nothing imports these and they have not changed in six months. Best-effort: verify before deleting.',
   },
+  {
+    id: 'violations', title: 'Layering violations', colour: HEALTH_COLOURS.violation, flag: 'layering',
+    text: 'Files with an import that points the wrong way. Select one to see the red line.',
+  },
+  {
+    id: 'untested', title: 'Untested risk', colour: 0xff6a1a, flag: 'tests',
+    text: 'Hotspots, oversized and downtown files that no test imports or is named after.',
+  },
+  {
+    id: 'complexity', title: 'Branch-heavy code', colour: 0xb8c2cc, flag: 'complexity',
+    text: 'A function with 15+ decision points, worst first. Hard to test every path.',
+  },
+  {
+    id: 'drift', title: 'CODEOWNERS drift', colour: 0x8c5ce6, flag: 'codeowners',
+    text: 'The people CODEOWNERS names for these files wrote almost none of them.',
+  },
 ];
+
+// Extra Health cards that are not one ranked list of files.
+const HEALTH_EXTRA = ['delta', 'dependencies', 'notes'];
 
 function indexRowById() {
   if (context._rowById) return context._rowById;
@@ -593,6 +647,208 @@ function renderHealth() {
     }
     panel.append(card);
   }
+  const delta = renderDeltaCard(manifest);
+  if (delta) panel.prepend(intro, delta);
+  const deps = renderDependencyCard(manifest);
+  if (deps) panel.append(deps);
+  panel.append(renderNotesCard());
+}
+
+function card(title, colour, count) {
+  const node = document.createElement('div');
+  node.className = 'health-card';
+  const heading = document.createElement('h3');
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.style.background = hexColour(colour);
+  heading.append(chip, document.createTextNode(title));
+  if (count !== undefined) {
+    const badge = document.createElement('span');
+    badge.className = 'count';
+    badge.textContent = String(count);
+    heading.append(badge);
+  }
+  node.append(heading);
+  return node;
+}
+
+/** What changed since the baseline: the trend line an architect tracks over months. */
+function renderDeltaCard(manifest) {
+  const delta = manifest.delta;
+  if (!delta) return null;
+  const node = card('Since the baseline', DELTA_COLOURS.added, delta.added.length + delta.grown.length + delta.shrunk.length);
+  node.dataset.section = 'delta';
+  const base = delta.baseline || {};
+  const label = base.label >= 0 ? state.source.s(base.label) : base.head ? `build of ${base.head.slice(0, 7)}` : 'the previous build';
+  const text = document.createElement('p');
+  text.textContent =
+    `Against ${label}: ${delta.added.length} added, ${delta.removedCount || 0} removed, ` +
+    `${delta.grown.length} grown and ${delta.shrunk.length} shrunk by 10% or more.`;
+  node.append(text);
+
+  const rows = [
+    ['hotspots', 'Hotspots'], ['cycles', 'Import cycles'], ['violations', 'Layering violations'],
+    ['untested', 'Untested risk'], ['oversized', 'Oversized'], ['knowledge', 'Knowledge risk'],
+    ['orphans', 'Possible dead code'], ['files', 'Files'], ['loc', 'Logical lines'],
+  ];
+  const table = document.createElement('table');
+  table.className = 'delta-table';
+  for (const [key, name] of rows) {
+    const before = (delta.before || {})[key] || 0;
+    const after = (delta.after || {})[key] || 0;
+    const change = after - before;
+    const tr = document.createElement('tr');
+    // Worse is red for every signal row; for files and lines a change is only information.
+    const neutral = key === 'files' || key === 'loc';
+    tr.className = change === 0 ? 'same' : neutral ? 'info' : change > 0 ? 'worse' : 'better';
+    tr.innerHTML = `<td>${name}</td><td class="num">${before.toLocaleString()}</td><td class="num">→ ${after.toLocaleString()}</td>` +
+      `<td class="num">${change > 0 ? '+' : ''}${change.toLocaleString()}</td>`;
+    table.append(tr);
+  }
+  node.append(table);
+
+  const list = document.createElement('ol');
+  const became = delta.became || {};
+  for (const [signal, ids] of Object.entries(became)) {
+    for (const id of (ids || []).slice(0, 6)) {
+      const li = document.createElement('li');
+      const item = healthItem(id);
+      item.querySelector('.meta').textContent = `became ${signal}`;
+      li.append(item);
+      list.append(li);
+    }
+  }
+  for (const [id, lines] of (delta.grown || []).slice(0, 5)) {
+    const li = document.createElement('li');
+    const item = healthItem(id);
+    item.querySelector('.meta').textContent = `+${lines} ln`;
+    li.append(item);
+    list.append(li);
+  }
+  if (list.children.length) node.append(list);
+  const hint = document.createElement('p');
+  hint.className = 'health-empty';
+  hint.textContent = 'Colour lens “changed since baseline” paints it on the map; filter is:added, is:grown, is:shrunk.';
+  node.append(hint);
+  return node;
+}
+
+/** The folder-level dependency picture: the heaviest edges, and every one that points the wrong way. */
+function renderDependencyCard(manifest) {
+  const deps = manifest.dependencies;
+  if (!deps || !deps.matrix || !deps.matrix.length) return null;
+  const node = card('Folder dependencies', LINK_COLOURS.out, deps.matrix.length);
+  node.dataset.section = 'dependencies';
+  const rules = deps.rules >= 0 ? state.source.s(deps.rules) : '';
+  const text = document.createElement('p');
+  text.textContent = rules && rules !== 'majority'
+    ? `Imports between folders, heaviest first. Layering rules: ${rules}.`
+    : 'Imports between folders, heaviest first. With no .zion/rules.json, an import is against the grain when the two folders import each other and this is the thinner direction.';
+  node.append(text);
+  const violating = new Set((deps.violatingPairs || []).map(([a, b]) => `${a}>${b}`));
+  const name = (id) => {
+    const d = manifest.districts[id];
+    return d ? state.source.districtLabel(d) : `district ${id}`;
+  };
+  const list = document.createElement('ol');
+  for (const [from, to, count] of deps.matrix.slice(0, 12)) {
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'health-item dep-item';
+    button.dataset.district = String(from);
+    if (violating.has(`${from}>${to}`)) button.classList.add('violating');
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = `${count} import${count === 1 ? '' : 's'}`;
+    button.append(meta, document.createTextNode(`${name(from)} → ${name(to)}`));
+    li.append(button);
+    list.append(li);
+  }
+  node.append(list);
+  if (deps.coupling && deps.coupling.length) {
+    const sub = document.createElement('p');
+    sub.className = 'health-empty';
+    sub.textContent = 'Folders that change together: ' + deps.coupling.slice(0, 4)
+      .map(([a, b, , commits]) => `${name(a)} ↔ ${name(b)} (${commits})`).join(' · ');
+    node.append(sub);
+  }
+  return node;
+}
+
+/** The reader's notes, with export/import so they can travel. */
+function renderNotesCard() {
+  const node = card('Your notes', 0xff5fa2, context.notes ? context.notes.all().length : 0);
+  node.dataset.section = 'notes';
+  const notes = context.notes;
+  const text = document.createElement('p');
+  if (!notes || !notes.available) {
+    text.textContent = 'Notes need browser storage, which is unavailable here.';
+    node.append(text);
+    return node;
+  }
+  text.textContent = 'Pinned in this browser. Add one from a building’s inspector; a pink pin marks it on the map.';
+  node.append(text);
+  const byPath = new Map();
+  const col = columnIndex(state.source.manifest.indexColumns);
+  for (const row of context.facetIndex || []) byPath.set(state.source.s(row[col.path]), row[col.id]);
+  const list = document.createElement('ol');
+  for (const item of notes.all().slice(0, 30)) {
+    const id = byPath.get(item.path);
+    const li = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'health-item';
+    if (id !== undefined) button.dataset.building = String(id);
+    else button.disabled = true;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = id === undefined ? 'not in this build' : '';
+    button.append(meta, document.createTextNode(item.path));
+    const body = document.createElement('span');
+    body.className = 'note-text';
+    body.textContent = item.text;
+    button.append(body);
+    li.append(button);
+    list.append(li);
+  }
+  if (list.children.length) node.append(list);
+  const actions = document.createElement('div');
+  actions.className = 'g-actions';
+  const exportButton = document.createElement('button');
+  exportButton.type = 'button';
+  exportButton.className = 'chip-btn';
+  exportButton.textContent = 'Export';
+  exportButton.addEventListener('click', () => {
+    const blob = new Blob([notes.exportJson()], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'zion-notes.json';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  });
+  const importButton = document.createElement('button');
+  importButton.type = 'button';
+  importButton.className = 'chip-btn';
+  importButton.textContent = 'Import…';
+  importButton.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json,.json';
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      try {
+        notes.importJson(await file.text());
+      } catch (error) {
+        text.textContent = `Could not import: ${error.message}`;
+      }
+    });
+    input.click();
+  });
+  actions.append(exportButton, importButton);
+  node.append(actions);
+  return node;
 }
 
 /** Fly to a building by id: it may not be resident, so fall back to its district. */
@@ -620,15 +876,46 @@ function renderLensKey() {
   const lens = document.getElementById('lens-select');
   if (!key || !lens) return;
   key.innerHTML = '';
-  if (lens.value !== 'health') return;
-  const names = { hotspot: 'hotspot', cycle: 'import cycle', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
-  for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) {
-    const item = document.createElement('span');
+  const authorSelect = document.getElementById('lens-author');
+  if (authorSelect) authorSelect.hidden = lens.value !== 'territory';
+  const item = (colour, label, count) => {
+    const span = document.createElement('span');
     const chip = document.createElement('span');
     chip.className = 'chip';
-    chip.style.background = hexColour(colour);
-    item.append(chip, document.createTextNode(names[signal]));
-    key.append(item);
+    chip.style.background = typeof colour === 'string' ? colour : hexColour(colour);
+    span.append(chip, document.createTextNode(count === undefined ? label : `${label} · ${count.toLocaleString()}`));
+    key.append(span);
+  };
+  // Counts are over the buildings on screen: the key says how much of what
+  // you are looking at falls in each band, not a legend in the abstract.
+  const resident = context.resident || [];
+  if (lens.value === 'health') {
+    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+    const flags = state.source.manifest.flags || {};
+    const counts = {};
+    for (const b of resident) {
+      const signal = healthSignal(b, flags);
+      counts[signal] = (counts[signal] || 0) + 1;
+    }
+    for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) item(colour, names[signal], counts[signal] || 0);
+  } else if (LENS_BANDS[lens.value]) {
+    const counts = new Map();
+    for (const b of resident) {
+      const band = lensBand(lens.value, b);
+      counts.set(band, (counts.get(band) || 0) + 1);
+    }
+    for (const band of LENS_BANDS[lens.value]) item(band.colour, band.label, counts.get(band) || 0);
+  } else if (lens.value === 'heat') {
+    item('linear-gradient(90deg,#4b5563,#ff4d2e)', 'stable → hottest, by recent decay-weighted churn');
+  } else if (lens.value === 'downtown') {
+    item('linear-gradient(90deg,#2a2c31,#8fd6ff)', 'peripheral → most central');
+  } else if (lens.value === 'era') {
+    item(0x8a5a44, 'oldest third');
+    item(0x8f97a3, 'middle third');
+    item(0xbfe3ef, 'newest third');
+  } else if (lens.value === 'territory') {
+    const who = state.territoryAuthor || 'nobody selected';
+    item('linear-gradient(90deg,#26282d,#ffc24a)', `share of the lines written by ${who}`);
   }
 }
 
@@ -647,6 +934,7 @@ function setupMapLabels() {
       y: 2,
       level: region.level,
       kind: 'region',
+      weight: region.logicalLoc || region.buildings || 0,
     });
   }
   for (const district of manifest.districts || []) {
@@ -658,6 +946,7 @@ function setupMapLabels() {
       y: 1,
       level: district.level || 0,
       kind: 'district',
+      weight: district.logicalLoc || 0,
     });
   }
   if (!context.labels) context.labels = new MapLabels(container, camera);
@@ -713,7 +1002,15 @@ guideList.addEventListener('keydown', (event) => {
 document.getElementById('guide-health').addEventListener('click', (event) => {
   const item = event.target.closest('.health-item');
   if (!item) return;
-  flyToBuilding(Number(item.dataset.building));
+  if (item.dataset.district !== undefined) {
+    const district = state.source.manifest.districts[Number(item.dataset.district)];
+    if (district) {
+      teleportTo({ kind: 'district', district });
+      context.inspector.showDistrict(district);
+    }
+    return;
+  }
+  if (item.dataset.building !== undefined) flyToBuilding(Number(item.dataset.building));
 });
 document.getElementById('guide-health').addEventListener('keydown', (event) => event.stopPropagation());
 document.getElementById('guide-reset').addEventListener('click', resetKeys);
@@ -783,6 +1080,7 @@ function rebuildCity(buildings) {
     downtown: !state.hiddenLayers.has('downtown'),
     orphans: !state.hiddenLayers.has('orphans'),
     litCap: state.hiddenLayers.has('lit_windows') ? 0 : 1,
+    notes: pinnedIds(),
   });
   // Stand-in massing for districts that are not resident, so streaming does not
   // leave a hard edge at the horizon. Impostors have no archetype of their own,
@@ -800,9 +1098,12 @@ function rebuildCity(buildings) {
     disposeGroup(previous.group);
   }
   context.city = mesh;
-  // A rebuild (streaming, LOD, a switch) must not silently drop the lens.
+  // A rebuild (streaming, LOD, a switch) must not silently drop the lens --
+  // or the History slider's date.
+  mesh.territoryAuthor = state.territoryAuthor;
   const lens = document.getElementById('lens-select');
   if (lens && lens.value !== 'archetype') mesh.recolour(lens.value);
+  if (state.timeline !== null) mesh.setTimeline(state.timeline, { burn: historySpan() >= 45 });
   applyHiddenLayers();
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
@@ -822,29 +1123,47 @@ function resolveExt(idx) {
   return (context.extTable && context.extTable[idx]) || '';
 }
 
+/** A query compiled with everything the richer tokens need (edges, districts). */
+function compileQuery(text) {
+  const manifest = state.source.manifest;
+  return parseQuery(text, manifest.indexColumns, (idx) => state.source.s(idx), resolveExt, {
+    edges: context.edges,
+    rows: context.facetIndex,
+    resolveDistrict: (id) => {
+      const district = manifest.districts[id];
+      return district ? state.source.s(district.key) : '';
+    },
+  });
+}
+
 /** Re-run the current filter text against the resident set. Called after any
- *  streaming rebuild, since a fresh CityMesh has no ghosting of its own. */
+ *  streaming rebuild, since a fresh CityMesh has no ghosting of its own.
+ *
+ *  A focused folder (a selected district or region, S14) narrows the result
+ *  further: everything outside it fades exactly as a non-match does, so the
+ *  folder stands out without leaving the city. */
 function applyActiveFilter() {
   if (!context.city || !context.facetIndex) return;
   const text = state.filterText || '';
-  const predicate = parseQuery(
-    text,
-    state.source.manifest.indexColumns,
-    (idx) => state.source.s(idx),
-    resolveExt
-  );
+  const predicate = compileQuery(text);
   const summary = document.getElementById('filter-summary');
-  if (!predicate) {
+  const focus = state.focus;
+  if (!predicate && !focus) {
     context.city.clearFilter();
     if (summary) summary.textContent = 'every building shown';
     return;
   }
-  const result = runQuery(context.facetIndex, predicate, state.source.manifest.indexColumns);
+  const districtCol = columnIndex(state.source.manifest.indexColumns).district;
+  const scoped = focus
+    ? (row) => focus.has(row[districtCol]) && (!predicate || predicate(row))
+    : predicate;
+  const result = runQuery(context.facetIndex, scoped, state.source.manifest.indexColumns);
   context.city.applyFilter(result.ids);
   if (summary) {
     summary.textContent =
       `${result.count.toLocaleString()} files · ${result.loc.toLocaleString()} lines ` +
-      `· in ${result.districts} district${result.districts === 1 ? '' : 's'}`;
+      `· in ${result.districts} district${result.districts === 1 ? '' : 's'}` +
+      (focus ? ' · inside the selected folder' : '');
   }
 }
 
@@ -917,12 +1236,309 @@ function setupFilterAndLens() {
   }
   const lens = document.getElementById('lens-select');
   if (lens) {
-    lens.addEventListener('change', (event) => {
-      if (context.city) context.city.recolour(event.target.value);
-      renderLensKey();
+    lens.addEventListener('change', (event) => applyLens(event.target.value));
+  }
+  // The territory lens paints one author; the list is the manifest's own
+  // author table, so a locked city offers no names until it is unlocked.
+  const authorSelect = document.getElementById('lens-author');
+  if (authorSelect) {
+    fillAuthorSelect();
+    authorSelect.addEventListener('change', (event) => {
+      state.territoryAuthor = event.target.value;
+      applyLens('territory');
     });
   }
 }
+
+function fillAuthorSelect() {
+  const select = document.getElementById('lens-author');
+  if (!select) return;
+  const authors = (state.source.manifest.stats && state.source.manifest.stats.authors) || [];
+  select.innerHTML = '';
+  for (const row of authors.slice(0, 60)) {
+    const name = state.source.s(row.name);
+    if (!name) continue;
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = `${name} (${row.lines.toLocaleString()} lines)`;
+    select.append(option);
+  }
+  if (!state.territoryAuthor && select.options.length) state.territoryAuthor = select.options[0].value;
+  select.value = state.territoryAuthor;
+}
+
+/** Switch the colour lens, keeping the select, the key and the city in step. */
+function applyLens(value) {
+  const lens = document.getElementById('lens-select');
+  if (lens && lens.value !== value) lens.value = value;
+  if (context.city) {
+    context.city.territoryAuthor = state.territoryAuthor;
+    context.city.recolour(value);
+  }
+  renderLensKey();
+}
+
+// ---------------------------------------------------------------------------
+// Selection: what the selected thing is connected to (selection.js), and the
+// focus fade for a selected folder (S14).
+// ---------------------------------------------------------------------------
+
+function buildingById(id) {
+  if (!context._residentById || context._residentById.size !== context.resident.length) {
+    context._residentById = new Map(context.resident.map((b) => [b.id, b]));
+  }
+  return context._residentById.get(id);
+}
+
+/** Ground point of a building, or of its district's centre when not resident. */
+function positionOf(id) {
+  const manifest = state.source.manifest;
+  const building = buildingById(id);
+  if (building) {
+    const district = manifest.districts[building.district];
+    return {
+      x: (building.x || 0) + (building.width || 4) / 2,
+      z: (building.y || 0) + (building.depth || 4) / 2,
+      y: plinthTop(district ? district.level : 0),
+      width: building.width,
+      depth: building.depth,
+      height: building.height,
+    };
+  }
+  const row = indexRowById().get(id);
+  if (!row) return null;
+  const district = manifest.districts[row[columnIndex(manifest.indexColumns).district]];
+  return district ? { ...districtCentre(district), approximate: true } : null;
+}
+
+function districtCentre(district) {
+  if (!district) return null;
+  const [x, z, w, h] = district.rect;
+  return { x: x + w / 2, z: z + h / 2, y: plinthTop(district.level) + 1 };
+}
+
+let selectionToken = 0;
+
+async function updateSelection(selection) {
+  const token = ++selectionToken;
+  const overlay = context.overlay;
+  const manifest = state.source.manifest;
+  const previousFocus = state.focus;
+  state.focus = null;
+  if (!selection) {
+    if (overlay) overlay.clear();
+  } else if (selection.kind === 'building') {
+    const b = selection.building;
+    const edges = context.edges;
+    const outgoing = edges ? (edges.imports.get(b.id) || []).map((to) => [to, edges.violating.has(`${b.id}>${to}`)]) : [];
+    const incoming = edges ? (edges.importers.get(b.id) || []).map((from) => [from, edges.violating.has(`${from}>${b.id}`)]) : [];
+    let partners = [];
+    if (manifest.flags && manifest.flags.coupling) {
+      try {
+        const bridges = await state.source.bridges();
+        if (token !== selectionToken) return;
+        partners = bridges.filter(([x, y]) => x === b.id || y === b.id).map(([x, y, n]) => [x === b.id ? y : x, n]);
+      } catch (error) {
+        partners = [];
+      }
+    }
+    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, positionOf });
+  } else if (selection.kind === 'district') {
+    const d = selection.district;
+    const deps = manifest.dependencies;
+    const links = [];
+    if (deps) {
+      const violating = new Set((deps.violatingPairs || []).map(([a, c]) => `${a}>${c}`));
+      for (const [from, to, count] of deps.matrix || []) {
+        if (from === d.id) links.push({ district: manifest.districts[to], kind: 'out', weight: count, violates: violating.has(`${from}>${to}`) });
+        else if (to === d.id) links.push({ district: manifest.districts[from], kind: 'in', weight: count, violates: violating.has(`${from}>${to}`) });
+      }
+      const heaviestImport = Math.max(1, ...links.map((l) => l.weight));
+      const coupling = (deps.coupling || []).filter(([a, c]) => a === d.id || c === d.id);
+      const heaviestCommits = Math.max(1, ...coupling.map((row) => row[3]));
+      for (const [a, c, , commits] of coupling) {
+        // Scaled onto the import weights, so the thickest co-change arc and
+        // the thickest import arc are comparable on screen.
+        links.push({ district: manifest.districts[a === d.id ? c : a], kind: 'cochange', weight: (commits / heaviestCommits) * heaviestImport });
+      }
+    }
+    if (overlay) overlay.showDistrict(d, { links: links.filter((l) => l.district), centreOf: districtCentre });
+    state.focus = new Set([d.id]);
+  } else if (selection.kind === 'region') {
+    if (overlay) overlay.clear();
+    state.focus = new Set(selection.districtIds || []);
+  }
+  if (previousFocus || state.focus) applyActiveFilter();
+}
+
+/** Building ids that carry one of the reader's notes. */
+function pinnedIds() {
+  const notes = context.notes;
+  if (!notes || !notes.available || state.source.locked || !context.facetIndex) return null;
+  const paths = new Set(notes.all().map((n) => n.path));
+  if (!paths.size) return null;
+  const col = columnIndex(state.source.manifest.indexColumns);
+  const ids = new Set();
+  for (const row of context.facetIndex) if (paths.has(state.source.s(row[col.path]))) ids.add(row[col.id]);
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
+// History slider (S7): the city as it stood on a past day.
+// ---------------------------------------------------------------------------
+
+function historySpan() {
+  const meta = state.source.manifest.meta || {};
+  const flags = state.source.manifest.flags || {};
+  return flags.age ? Math.max(0, meta.historyDays || 0) : 0;
+}
+
+function historyDate(daysBefore) {
+  const meta = state.source.manifest.meta || {};
+  if (!meta.headTs) return `${Math.round(daysBefore)} days before the newest commit`;
+  return new Date((meta.headTs - daysBefore * 86400) * 1000).toISOString().slice(0, 10);
+}
+
+/** `null` returns to the present; otherwise days before the newest commit. */
+function setTimeline(daysBefore) {
+  const span = historySpan();
+  state.timeline = daysBefore === null || daysBefore === undefined || !span ? null : Math.max(0, Math.min(span, daysBefore));
+  const slider = document.getElementById('history');
+  const out = document.getElementById('history-out');
+  if (slider) slider.value = String(state.timeline === null ? span : span - state.timeline);
+  let born = null;
+  if (context.city) {
+    // Monthly buckets say nothing about a history shorter than a month or two.
+    born = context.city.setTimeline(state.timeline, { burn: span >= 45 });
+    if (state.timeline === null) applyHiddenLayers();
+  }
+  if (out) {
+    out.textContent = state.timeline === null
+      ? 'today'
+      : `${historyDate(state.timeline)}${born !== null ? ` · ${born.toLocaleString()} files` : ''}`;
+  }
+  document.body.classList.toggle('history-active', state.timeline !== null);
+}
+
+let historyPlayback = null;
+
+function toggleHistoryPlayback() {
+  const button = document.getElementById('history-play');
+  if (historyPlayback) {
+    cancelAnimationFrame(historyPlayback.frame);
+    historyPlayback = null;
+    if (button) button.textContent = '▶';
+    return;
+  }
+  const span = historySpan();
+  if (!span) return;
+  // Twelve seconds for the whole history, however long it is.
+  const started = performance.now();
+  const duration = 12000;
+  const step = (now) => {
+    const t = Math.min(1, (now - started) / duration);
+    setTimeline(span * (1 - t));
+    if (t >= 1) {
+      historyPlayback = null;
+      if (button) button.textContent = '▶';
+      setTimeline(null);
+      return;
+    }
+    historyPlayback.frame = requestAnimationFrame(step);
+  };
+  historyPlayback = { frame: requestAnimationFrame(step) };
+  if (button) button.textContent = '❚❚';
+}
+
+function setupHistory() {
+  const control = document.getElementById('history-control');
+  const slider = document.getElementById('history');
+  const span = historySpan();
+  if (!control || !slider) return;
+  control.hidden = !span;
+  if (!span) return;
+  slider.min = '0';
+  slider.max = String(span);
+  slider.step = String(Math.max(0.5, span / 400));
+  slider.value = String(span);
+  slider.addEventListener('input', () => {
+    const value = Number(slider.value);
+    setTimeline(value >= span ? null : span - value);
+  });
+  const play = document.getElementById('history-play');
+  if (play) play.addEventListener('click', toggleHistoryPlayback);
+  setTimeline(null);
+}
+
+// ---------------------------------------------------------------------------
+// Saved views (views.js): the view on screen as a link.
+// ---------------------------------------------------------------------------
+
+function currentView() {
+  const selected = context.inspector && context.inspector.selected;
+  const selection = selected && selected.kind === 'building'
+    ? { kind: 'building', id: selected.building.id }
+    : selected && selected.kind === 'district'
+      ? { kind: 'district', id: selected.district.id }
+      : null;
+  const lens = document.getElementById('lens-select');
+  return captureView({
+    position: camera.position,
+    yaw: context.fly.yaw,
+    pitch: context.fly.pitch,
+    filter: state.filterText,
+    lens: lens ? lens.value : 'archetype',
+    author: lens && lens.value === 'territory' ? state.territoryAuthor : '',
+    selection,
+    timeline: state.timeline,
+  });
+}
+
+async function applyView(view) {
+  if (!view) return false;
+  setMode('fly');
+  context.fly.position.set(view.position.x, view.position.y, view.position.z);
+  context.fly.yaw = view.yaw;
+  context.fly.pitch = view.pitch;
+  context.fly.apply();
+  state.filterText = view.filter || '';
+  const input = document.getElementById('filter-input');
+  if (input) input.value = state.filterText;
+  if (view.author) {
+    state.territoryAuthor = view.author;
+    const select = document.getElementById('lens-author');
+    if (select) select.value = view.author;
+  }
+  lodRebuiltAt = -Infinity;
+  await refreshResident(true);
+  applyLens(view.lens || 'archetype');
+  setTimeline(view.timeline);
+  applyActiveFilter();
+  if (view.selection && view.selection.kind === 'district') {
+    const district = state.source.manifest.districts[view.selection.id];
+    if (district) context.inspector.showDistrict(district);
+  } else if (view.selection) {
+    const building = buildingById(view.selection.id);
+    if (building) context.inspector.showBuilding(building);
+  }
+  return true;
+}
+
+function setupViewLinks() {
+  const button = document.getElementById('view-link');
+  if (button) {
+    button.addEventListener('click', async () => {
+      const hash = viewToHash(currentView());
+      history.replaceState(null, '', `${location.pathname}${location.search}${hash}`);
+      const copied = await copyText(location.href);
+      const label = button.textContent;
+      button.textContent = copied ? 'Link copied' : 'Link ready';
+      setTimeout(() => { button.textContent = label; }, 1600);
+    });
+  }
+  window.addEventListener('hashchange', () => applyView(viewFromHash(location.hash)));
+}
+
 
 async function refreshResident(force = false) {
   if (rebuilding || !context.streamer) return;
@@ -1781,6 +2397,10 @@ async function refreshLabelsAfterUnlock() {
   context.resident = context.streamer.buildings();
   state.source.buildings = context.resident;
   context.inspector.hide();
+  // Notes are keyed by the repository's name and each file's path, both of
+  // which only exist once the labels do.
+  setupNotes();
+  fillAuthorSelect();
   renderGuide();
   setupMapLabels();
   renderTitle();
@@ -2695,7 +3315,162 @@ async function runSelfTest() {
       check('health-lens', true, 'no buildings');
     }
     const cards = document.querySelectorAll('#guide-health .health-card').length;
-    check('health-tab', manifest.review ? cards === 5 : cards === 0, `${cards} health cards`);
+    const expected = HEALTH_SECTIONS.length + (manifest.delta ? 1 : 0) +
+      (manifest.dependencies && manifest.dependencies.matrix && manifest.dependencies.matrix.length ? 1 : 0) + 1;
+    check('health-tab', manifest.review ? cards === expected : cards === 0, `${cards} health cards of ${expected}`);
+  }
+
+  // 5f. The next layer: selection overlays, folder focus, the new lenses,
+  //     query words, the History slider, saved views and notes.
+  {
+    const manifest = state.source.manifest;
+    const flags = manifest.flags || {};
+    const overlay = context.overlay;
+
+    const linked = context.resident.find((b) => (b.importsOut || 0) > 0);
+    if (linked && context.edges) {
+      context.inspector.showBuilding(linked);
+      await updateSelection({ kind: 'building', building: linked });
+      const lines = overlay.group.children.filter((c) => c.name.startsWith('import-lines'));
+      check('overlay-import-lines', lines.length > 0, `${lines.length} line meshes for ${linked.importsOut} imports`);
+      state.hiddenLayers.add('imports');
+      applyHiddenLayers();
+      const hidden = lines.every((l) => !l.visible);
+      state.hiddenLayers.delete('imports');
+      applyHiddenLayers();
+      check('overlay-switch', hidden && lines.every((l) => l.visible), 'import lines follow their City Guide switch');
+      const structure = document.getElementById('inspector-metrics').textContent;
+      check('inspector-structure', /Imports/.test(structure) && /Instability|Imported by|file/.test(structure), 'Structure section present');
+      context.inspector.hide();
+      await updateSelection(null);
+      check('overlay-clears', overlay.group.children.length === 0, `${overlay.group.children.length} left`);
+    } else {
+      check('overlay-import-lines', true, 'no resolved imports in this city');
+    }
+
+    const district = manifest.districts.find((d) => d.buildings > 0 && d.buildings < context.resident.length);
+    if (district && context.city) {
+      context.inspector.showDistrict(district);
+      await updateSelection({ kind: 'district', district });
+      const outside = context.resident.filter((b) => b.district !== district.id && b.districtId !== district.id);
+      const ghosted = context.city._filtered ? context.city._filtered.touched.length : 0;
+      const shownOutside = outside.filter((b) => !state.hiddenArchetypes.has(b.archetype)).length;
+      check('district-focus-fade', ghosted >= shownOutside && ghosted > 0, `${ghosted} faded, ${shownOutside} outside the folder`);
+      const wantsLinks = manifest.dependencies && ((manifest.dependencies.matrix || []).some((r) => r[0] === district.id || r[1] === district.id) ||
+        (manifest.dependencies.coupling || []).some((r) => r[0] === district.id || r[1] === district.id));
+      const arcs = overlay.group.children.filter((c) => c.name.startsWith('district-links')).length;
+      check('district-links', wantsLinks ? arcs > 0 : arcs === 0, `${arcs} arc meshes`);
+      context.inspector.hide();
+      await updateSelection(null);
+      check('focus-clears', !context.city._filtered || Boolean(state.filterText), 'fade removed with the selection');
+    } else {
+      check('district-focus-fade', true, 'single-district city');
+    }
+
+    const mesh = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 1);
+    if (mesh) {
+      const lensChanges = {};
+      for (const lens of ['instability', 'tests', 'complexity', 'delta', 'territory']) {
+        const before = Array.from(mesh.userData.baseColors);
+        applyLens(lens);
+        const after = Array.from(mesh.userData.baseColors);
+        lensChanges[lens] = before.some((v, i) => Math.abs(v - after[i]) > 1e-3);
+      }
+      const keyItems = document.querySelectorAll('#lens-key span.chip').length;
+      applyLens('archetype');
+      check('new-lenses-recolour', lensChanges.instability || !flags.imports, JSON.stringify(lensChanges));
+      check('lens-key-bands', keyItems > 0, `${keyItems} key entries for the last lens`);
+    }
+
+    // Query words: OR is a union, district: and imports: resolve.
+    const a = countFor('is:hotspot') || 0;
+    const b = countFor('is:test') || 0;
+    const both = countFor('is:hotspot is:test') || 0;
+    const either = countFor('is:hotspot OR is:test') || 0;
+    check('query-or', either === a + b - both, `${a} + ${b} - ${both} = ${either}`);
+    if (district) {
+      const inFolder = countFor(`district:${state.source.s(district.key)}`) || 0;
+      check('query-district', inFolder >= district.buildings, `${inFolder} for ${district.buildings} buildings`);
+    }
+    if (context.edges && context.edges.imports.size) {
+      const [from, targets] = context.edges.imports.entries().next().value;
+      const col = columnIndex(manifest.indexColumns);
+      const target = indexRowById().get(targets[0]);
+      const predicate = compileQuery(`imports:${state.source.s(target[col.path])}`);
+      const row = indexRowById().get(from);
+      check('query-imports', Boolean(predicate && row && predicate(row)), `imports:${state.source.s(target[col.path])}`);
+    }
+    const owner = manifest.stats.authors && manifest.stats.authors[0];
+    if (owner && flags.authorship) {
+      const name = state.source.s(owner.name).split(' ')[0].toLowerCase();
+      check('query-owner', (countFor(`owner:${name}`) || 0) > 0, `owner:${name}`);
+    }
+
+    // The History slider: part of the city before its newest files existed.
+    const span = historySpan();
+    if (span > 0) {
+      setTimeline(span * 0.5);
+      const shown = [...context.city.meshes.values()]
+        .filter((m) => m.name.startsWith('buildings-'))
+        .reduce((sum, m) => {
+          const matrix = new THREE.Matrix4();
+          let n = 0;
+          for (let i = 0; i < m.count; i++) {
+            m.getMatrixAt(i, matrix);
+            if (Math.abs(matrix.elements[0]) > 1e-6) n++;
+          }
+          return sum + n;
+        }, 0);
+      const younger = context.resident.filter((x) => (x.ageDays || 0) < span * 0.5).length;
+      const cranes = context.city.group.getObjectByName('cranes');
+      const cranesHidden = !cranes || cranes.visible === false;
+      setTimeline(null);
+      const restoredCranes = context.city.group.getObjectByName('cranes');
+      check('timeline-replays', shown === context.resident.length - younger && cranesHidden,
+        `${shown} standing halfway through ${Math.round(span)} days (${younger} not yet built), props hidden: ${cranesHidden}`);
+      check('timeline-restores', !restoredCranes || restoredCranes.visible === !state.hiddenLayers.has('churn'), 'props back');
+    } else {
+      check('timeline-replays', true, 'no history span');
+    }
+
+    // Saved views round-trip through the URL hash.
+    const view = currentView();
+    const parsed = viewFromHash(viewToHash({ ...view, f: 'is:hotspot' }));
+    check('view-roundtrip',
+      Boolean(parsed) && Math.abs(parsed.position.x - camera.position.x) < 0.2 && parsed.filter === 'is:hotspot',
+      parsed ? `(${parsed.position.x}, ${parsed.position.y}, ${parsed.position.z})` : 'unreadable');
+
+    // Notes pin a building; removing the note removes the pin.
+    const notes = context.notes;
+    const sample = context.resident.find((x) => x.archetype !== 'park') || context.resident[0];
+    if (notes && notes.available && !state.source.locked && sample) {
+      const path = state.source.s(sample.path);
+      const had = notes.get(path);
+      notes.set(path, 'selftest note');
+      rebuildCity(context.resident);
+      const pins = context.city.group.getObjectByName('note-pins');
+      notes.set(path, had);
+      rebuildCity(context.resident);
+      const after = context.city.group.getObjectByName('note-pins');
+      check('notes-pin', Boolean(pins && pins.count >= 1) && (!after || had), `${pins ? pins.count : 0} pin(s)`);
+    } else {
+      check('notes-pin', true, 'notes unavailable (storage or locked)');
+    }
+
+    // Every new prop cluster that has a resident building to stand on exists.
+    const expectations = [
+      ['no-entry-signs', flags.layering, (x) => x.violations > 0],
+      ['traffic-cones', flags.tests, (x) => x.untestedRisk],
+      ['cross-bracing', flags.complexity, (x) => x.braced],
+      ['survey-stakes', flags.delta, (x) => Boolean(x.delta)],
+      ['owner-notices', flags.codeowners, (x) => x.ownerDrift],
+      ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
+    ];
+    const missing = expectations
+      .filter(([, on, test]) => on && context.resident.some(test))
+      .filter(([name]) => !context.city.group.getObjectByName(name))
+      .map(([name]) => name);
+    check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
   }
 
   // 5e. Detail follows the camera. A building beyond the opening camera's LOD
@@ -2875,6 +3650,18 @@ function maxHeightOf(manifest) {
   return Math.max(1, ...manifest.districts.map((d) => d.skyline.maxHeight));
 }
 
+/** The reader's notes, keyed by the repository's name once it is readable. */
+function setupNotes() {
+  const manifest = state.source.manifest;
+  const name = manifest.meta && manifest.meta.name >= 0 ? state.source.s(manifest.meta.name) : '';
+  context.notes = new Notes(state.source.locked ? 'locked' : `${name || 'repo'}`);
+  if (context.inspector) context.inspector.notes = context.notes;
+  context.notes.onChange(() => {
+    renderHealth();
+    scheduleRebuild();
+  });
+}
+
 async function boot() {
   const progress = (text) => {
     loadingText.textContent = text;
@@ -2934,6 +3721,9 @@ async function boot() {
         : Infinity,
   });
 
+  // What a selection is connected to, drawn only for the selection.
+  context.overlay = new SelectionOverlay(THREE, scene);
+
   progress('placing buildings');
   if (manifest.meta.buildingCount <= 600) {
     // Small enough to hold whole; streaming would only add latency.
@@ -2946,6 +3736,9 @@ async function boot() {
   await state.source.assignLockedAddresses(context.resident);
   context.facetIndex = await state.source.index();
   context.extTable = await state.source.extTable();
+  // Import edges: ids only, so the same whether the city is locked or not.
+  context.edges = manifest.imports ? edgeMaps(await state.source.imports()) : null;
+  setupNotes();
   setupFilterAndLens();
   renderChips();
   rebuildCity(context.resident);
@@ -2973,6 +3766,17 @@ async function boot() {
     return row ? row[columnIndex(state.source.manifest.indexColumns).district] : null;
   };
   context.inspector.onFly = (id) => flyToBuilding(id);
+  context.inspector.edges = context.edges;
+  context.inspector.notes = context.notes;
+  context.inspector.onDistrict = (id) => {
+    const district = state.source.manifest.districts[id];
+    if (!district) return;
+    teleportTo({ kind: 'district', district });
+    context.inspector.showDistrict(district);
+  };
+  context.inspector.onSelect = (selection) => {
+    updateSelection(selection).catch(() => {});
+  };
   setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
     panel: document.getElementById('cityhall'),
@@ -3007,6 +3811,8 @@ async function boot() {
   setupMapLabels();
   renderTitle();
   applyTime();
+  setupHistory();
+  setupViewLinks();
 
   loading.classList.add('done');
   window.zion = {
@@ -3021,6 +3827,9 @@ async function boot() {
     teleportTo,
     attemptUnlock,
   };
+
+  // A shared link opens on the view it was taken from.
+  if (!state.selftest && location.hash) await applyView(viewFromHash(location.hash));
 
   if (state.selftest) {
     // Awaited, not deferred: WebCrypto operations (the 310,000-iteration PBKDF2

@@ -101,6 +101,63 @@ function sparkline(activity) {
   ]);
 }
 
+/** A horizontal stacked bar: `[{label, value, colour}]`, with a legend under it. */
+function shareBar(parts, caption) {
+  const total = parts.reduce((sum, p) => sum + (p.value || 0), 0);
+  if (!total) return null;
+  const bar = el('div', { className: 'insp-bar' });
+  const legend = el('div', { className: 'insp-bar-legend' });
+  for (const part of parts) {
+    if (!part.value) continue;
+    const width = (part.value / total) * 100;
+    bar.append(el('span', { style: `width:${width.toFixed(2)}%;background:${part.colour}`, title: `${part.label}: ${Math.round(width)}%` }));
+    legend.append(el('span', {}, [el('i', { style: `background:${part.colour}` }), `${part.label} ${Math.round(width)}%`]));
+  }
+  return el('div', { className: 'insp-share' }, [bar, legend, caption ? el('span', { className: 'insp-gloss', textContent: caption }) : null]);
+}
+
+const SHARE_COLOURS = ['#b28ad6', '#56b4e9', '#e69f00', '#3ddc84', '#f0e442', '#8a8f99'];
+
+/** Two aligned monthly series, oldest to newest: bars for commits, dots for people. */
+function trendChart(commits, people) {
+  if (!commits || !commits.some((v) => v > 0)) return null;
+  const max = Math.max(1, ...commits);
+  const maxPeople = Math.max(1, ...(people || [0]));
+  const bars = commits.slice().reverse().map((value, i) => {
+    const month = commits.length - 1 - i;
+    const who = people && people.length ? people[month] : null;
+    const bar = el('span', {
+      className: 'spark-bar',
+      title: `${value} commit${value === 1 ? '' : 's'}${who !== null ? ` by ${who} ${who === 1 ? 'person' : 'people'}` : ''}, ${month} month${month === 1 ? '' : 's'} ago`,
+      style: `height:${Math.max(2, Math.round((value / max) * 24))}px`,
+    });
+    if (who) bar.append(el('i', { className: 'spark-dot', style: `bottom:${Math.round((who / maxPeople) * 24) + 2}px` }));
+    return bar;
+  });
+  return el('div', { className: 'insp-spark' }, [
+    el('div', { className: 'sparkline trend' }, bars),
+    el('span', {
+      className: 'insp-gloss',
+      textContent: people && people.length
+        ? 'bars: commits per month; dots: distinct people active that month (oldest → newest)'
+        : 'commits per month, oldest → newest (24 months)',
+    }),
+  ]);
+}
+
+/** A row of flyable file links. */
+function fileLinks(ids, pathForId, limit = 8) {
+  if (!ids || !ids.length) return null;
+  const list = el('div', { className: 'insp-links' });
+  for (const id of ids.slice(0, limit)) {
+    const link = el('button', { type: 'button', className: 'insp-link', textContent: (pathForId && pathForId(id)) || `building ${id}`, title: 'fly there' });
+    link.dataset.fly = String(id);
+    list.append(link);
+  }
+  if (ids.length > limit) list.append(el('span', { className: 'insp-gloss', textContent: `+ ${ids.length - limit} more` }));
+  return list;
+}
+
 /**
  * The badges for every prop standing on or around a building, each with why
  * it is there -- the legend, answered for this one building.
@@ -120,6 +177,11 @@ function signsFor(b, flags) {
   if (b.oversized) signs.push(['Buttresses', 'oversized: top 5% by lines and 400+ lines', 'heavy']);
   if (flags.imports && b.orphan) signs.push(['Boarded up', 'nothing imports it and it has sat still for 6+ months', 'vacant']);
   if (flags.imports && b.cycle) signs.push(['Pennant', `part of an import cycle of ${b.cycleSize} files`, 'cycle']);
+  if (flags.layering && b.violations) signs.push(['No-entry sign', `${plural(b.violations, 'import')} against the layering`, 'risk']);
+  if (flags.tests && b.untestedRisk) signs.push(['Traffic cones', 'risky and no test is linked to it', 'hot']);
+  if (flags.complexity && b.braced) signs.push(['Cross-bracing', `one function has ${b.braceComplexity} decision points`, 'heavy']);
+  if (flags.codeowners && b.ownerDrift) signs.push(['Owner notice', 'CODEOWNERS names people who do not write it', 'flag']);
+  if (flags.delta && b.delta) signs.push(['Survey stake', `${b.delta} since the baseline${b.locDelta ? ` (${b.locDelta > 0 ? '+' : ''}${b.locDelta} lines)` : ''}`, 'new']);
   return signs;
 }
 
@@ -138,6 +200,13 @@ export class Inspector {
     // co-changed files), and a way to fly to a building by id.
     this.pathForId = null;
     this.onFly = null;
+    // Also set by main.js: import edges (facets.js::edgeMaps), the reader's
+    // notes (notes.js), a way to open another district, and a hook that hears
+    // every selection change so the overlay and the focus fade can follow it.
+    this.edges = null;
+    this.notes = null;
+    this.onDistrict = null;
+    this.onSelect = null;
     document.getElementById('inspector-close').addEventListener('click', () => this.hide());
     if (this.openDetail) {
       this.openDetail.addEventListener('click', () => this._openDetailWindow());
@@ -145,16 +214,25 @@ export class Inspector {
     this.metrics.addEventListener('click', (event) => {
       const link = event.target.closest('[data-fly]');
       if (link && this.onFly) this.onFly(Number(link.dataset.fly));
+      const folder = event.target.closest('[data-district]');
+      if (folder && this.onDistrict) this.onDistrict(Number(folder.dataset.district));
     });
+    this.metrics.addEventListener('keydown', (event) => event.stopPropagation());
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') this.hide();
     });
   }
 
   hide() {
+    const was = this.selected;
     this.panel.hidden = true;
     this.selected = null;
     this._floorToken = null;
+    if (was && this.onSelect) this.onSelect(null);
+  }
+
+  _announce() {
+    if (this.onSelect) this.onSelect(this.selected);
   }
 
   /**
@@ -289,6 +367,28 @@ export class Inspector {
     if (flags.authorship && b.ownerInactive) {
       people.push(fact('Owner status', `away ${humanDays(b.ownerAwayDays)}`, 'the main owner has not committed anywhere in the repository since'));
     }
+    if (flags.authorship && b.authorShares && b.authorShares.length > 1) {
+      const shares = b.authorShares.map(([name, share], i) => ({ label: this._name(name), value: share, colour: SHARE_COLOURS[i % SHARE_COLOURS.length] }));
+      const rest = 1 - b.authorShares.reduce((sum, [, share]) => sum + share, 0);
+      if (rest > 0.005) shares.push({ label: 'others', value: rest, colour: SHARE_COLOURS[5] });
+      people.push(shareBar(shares, 'share of the lines ever added, by author'));
+    }
+    if (flags.authorship && b.experts && b.experts.length) {
+      people.push(fact(
+        'Who to ask',
+        b.experts.map(([name]) => this._name(name)).join(', '),
+        'ranked by lines written, halved for every six months since they last touched this file'
+      ));
+    }
+    if (flags.codeowners && b.declaredOwners) {
+      people.push(fact(
+        'CODEOWNERS',
+        b.declaredOwners.length ? b.declaredOwners.map((i) => this._name(i)).join(' ') : 'no owner',
+        b.ownerDrift
+          ? 'drifted: the people named here commit to the repository, but wrote almost none of this file'
+          : b.unowned ? 'no CODEOWNERS rule covers this file' : 'declared reviewers for this path'
+      ));
+    }
     if (people.length) this.metrics.append(section('People', people));
 
     // -- Activity ---------------------------------------------------------------
@@ -304,6 +404,24 @@ export class Inspector {
     const spark = flags.churn ? sparkline(b.activity) : null;
     this.metrics.append(section('Activity', [...activity, spark], false));
 
+    // -- Structure: imports, layering, tests ---------------------------------------
+    const structureFacts = this._structure(b, flags);
+    if (structureFacts.length) this.metrics.append(section('Structure', structureFacts, false));
+
+    // -- Since the baseline ---------------------------------------------------------
+    const delta = source.manifest.delta;
+    if (flags.delta && delta) {
+      const since = this._baselineLabel(delta);
+      const change = b.delta === 'added'
+        ? 'new since then'
+        : b.locDelta
+          ? `${b.locDelta > 0 ? '+' : ''}${b.locDelta.toLocaleString()} logical lines${b.delta ? ` (${b.delta})` : ''}`
+          : 'unchanged in size';
+      const items = [fact('Change', change, `against ${since}`)];
+      if (b.became && b.became.length) items.push(fact('Newly flagged', b.became.join(', '), 'signals this file did not carry at the baseline'));
+      this.metrics.append(section('Since the baseline', items, Boolean(b.delta || (b.became && b.became.length))));
+    }
+
     // -- Architect's notes --------------------------------------------------------
     const notes = this._notes(b, flags);
     const notesSection = section('Architect’s notes', notes.length
@@ -312,12 +430,100 @@ export class Inspector {
     notesSection.classList.add('insp-architect');
     this.metrics.append(notesSection);
     if (flags.coupling) this._loadCoupling(b, notesSection);
+    this._noteEditor(b);
 
     this.hint.textContent = b.source
       ? 'Press E (in walk mode, standing outside) to read its source on the walls.'
       : b.isBinary
         ? 'Binary artefact — no source to show.'
         : '';
+    this._announce();
+  }
+
+  _baselineLabel(delta) {
+    const base = delta.baseline || {};
+    const label = base.label >= 0 ? this.source.s(base.label) : '';
+    if (label) return label;
+    if (base.head) return `the build of ${base.head.slice(0, 7)}`;
+    return 'the previous build';
+  }
+
+  /** Imports, importers, instability, layering and tests: the building's place in the design. */
+  _structure(b, flags) {
+    const items = [];
+    const edges = this.edges;
+    if (flags.imports) {
+      const out = edges ? edges.imports.get(b.id) || [] : [];
+      const inbound = edges ? edges.importers.get(b.id) || [] : [];
+      const inst = b.instability;
+      items.push(fact(
+        'Imports',
+        `${plural(b.importsOut || out.length, 'file')} out · ${plural(b.importInDegree || inbound.length, 'file')} in`,
+        'select to see them as utility lines: blue out, amber in'
+      ));
+      if (inst !== undefined && inst >= 0) {
+        items.push(fact(
+          'Instability',
+          inst.toFixed(2),
+          inst < 0.25
+            ? 'a foundation: many files lean on it and it leans on few. Change it rarely and carefully'
+            : inst > 0.75
+              ? 'a leaf: it depends on others and little depends on it. Free to change'
+              : 'balanced between depending and being depended on'
+        ));
+      }
+      if (flags.layering && b.violations && edges) {
+        const bad = out.filter((to) => edges.violating.has(`${b.id}>${to}`));
+        const item = fact('Layering', `${plural(b.violations, 'import')} against the grain`, 'red lines: imports that break the layering rule');
+        const links = fileLinks(bad, this.pathForId);
+        if (links) item.append(links);
+        items.push(item);
+      }
+      if (inbound.length) {
+        const item = fact('Imported by', plural(inbound.length, 'file'));
+        const links = fileLinks(inbound, this.pathForId, 6);
+        if (links) item.append(links);
+        items.push(item);
+      }
+    }
+    if (flags.tests && (b.untested || (b.testedBy && b.testedBy.length))) {
+      const tested = b.testedBy && b.testedBy.length;
+      const item = fact(
+        'Tests',
+        tested ? plural(b.testedBy.length, 'linked test') : 'none linked',
+        tested ? 'tests that import it or are named after it' : b.untestedRisk ? 'risky and untested: the traffic cones' : 'no test imports it or is named after it'
+      );
+      const links = tested ? fileLinks(b.testedBy, this.pathForId, 5) : null;
+      if (links) item.append(links);
+      items.push(item);
+    }
+    if (b.braceComplexity) {
+      items.push(fact('Most branches', `${b.braceComplexity} decision points`, b.braced ? 'in one function: braced, 15 or more' : 'in its busiest function'));
+    }
+    return items;
+  }
+
+  /** The reader's own note on this building (localStorage; see notes.js). */
+  _noteEditor(b) {
+    const notes = this.notes;
+    const path = this.source.locked ? '' : this.source.s(b.path);
+    if (!notes) return;
+    const body = [];
+    if (!notes.available) {
+      body.push(el('p', { className: 'insp-gloss', textContent: 'Notes need browser storage, which is unavailable here.' }));
+    } else if (!path) {
+      body.push(el('p', { className: 'insp-gloss', textContent: 'Unlock the city to read and write notes.' }));
+    } else {
+      const area = el('textarea', { className: 'insp-note', rows: 3, placeholder: 'A note for yourself: kept in this browser, pinned on the map.', value: notes.get(path) });
+      const save = el('button', { type: 'button', className: 'chip-btn', textContent: 'Save note' });
+      const status = el('span', { className: 'insp-gloss' });
+      save.addEventListener('click', () => {
+        const ok = notes.set(path, area.value);
+        status.textContent = ok ? (area.value.trim() ? 'saved' : 'removed') : 'could not save';
+      });
+      body.push(area, el('div', { className: 'insp-note-actions' }, [save, status]));
+    }
+    this.metrics.append(section('Your note', body, Boolean(path && notes.get(path))));
   }
 
   /** Rule-based, self-explaining suggestions: each says what fired and why. */
@@ -382,6 +588,24 @@ export class Inspector {
     }
     if (b.lit !== null && b.lit !== undefined && (b.docRatio || 0) < 0.05 && (b.loc || 0) >= 150 && !b.isTest) {
       note('low', 'Undocumented.', `Only ${pct(b.docRatio)} of ${(b.loc || 0).toLocaleString()} lines are comments or docstrings: the facade is dark.`);
+    }
+    if (flags.layering && b.violations) {
+      const rules = this.source.manifest.dependencies;
+      const byFile = rules && rules.rules >= 0 && this.source.s(rules.rules) !== 'majority';
+      note('high', 'Layering violation.',
+        byFile
+          ? `${plural(b.violations, 'import')} break the rules in ${this.source.s(rules.rules)}. Invert the dependency or move the shared code down a layer.`
+          : `${plural(b.violations, 'import')} run against the main direction between two folders, closing a folder-level cycle. Cutting these edges untangles the folders.`);
+    }
+    if (flags.tests && b.untestedRisk) {
+      const why = [b.isHotspot && 'a hotspot', b.oversized && 'oversized', b.downtown && 'downtown'].filter(Boolean).join(', ');
+      note('high', 'Untested and risky.', `It is ${why}, and no test imports it or is named after it. A characterisation test before the next change is cheap insurance.`);
+    }
+    if (flags.codeowners && b.ownerDrift) {
+      note('mid', 'CODEOWNERS has drifted.', `Reviews go to ${(b.declaredOwners || []).map((i) => this._name(i)).join(' ')}, but ${this._name(b.author)} wrote ${pct(b.ownership)} of it. Update CODEOWNERS or pair the two.`);
+    }
+    if (flags.delta && b.became && b.became.length) {
+      note('mid', 'New since the baseline.', `It became ${b.became.join(', ')} since ${this._baselineLabel(this.source.manifest.delta || {})}.`);
     }
     if (flags.centrality && b.downtown && (b.loc || 0) > 300) {
       note('low', 'Central and large.', 'Many files depend on or change with this one. Keep its interface small and stable.');
@@ -462,6 +686,20 @@ export class Inspector {
             `(${names.join(', ')}${top.length > 3 ? ', …' : ''}). One row of windows per floor.`;
         }
       }
+      // Floor sizes at a glance: one bar per top-level floor, ground to roof,
+      // so one enormous definition among small ones is visible before reading.
+      if (top.length > 1) {
+        const max = Math.max(1, ...top.map((f) => f.loc || 0));
+        const chart = el('div', { className: 'floor-chart', title: 'logical lines per top-level floor, ground floor first' });
+        for (const f of top.slice(0, 80)) {
+          chart.append(el('span', {
+            className: (f.complexity || 0) >= 15 ? 'hot' : '',
+            title: `${source.s(f.name) || '(anonymous)'}: ${f.loc} lines${f.complexity ? `, ${f.complexity} decision points` : ''}`,
+            style: `height:${Math.max(2, Math.round(((f.loc || 0) / max) * 30))}px`,
+          }));
+        }
+        this.floorsEl.append(chart);
+      }
       for (const floor of floors) {
         const row = el('div', { className: 'floor' });
         const name = el('span', {
@@ -535,10 +773,72 @@ export class Inspector {
       people.push(fact('Contributors', String(district.contributors), district.busFactor ? `bus factor ${district.busFactor}: ${plural(district.busFactor, 'person', 'people')} wrote half of it` : ''));
     }
     if (people.length) this.metrics.append(section('People', people));
+    if (flags.authorship && district.experts && district.experts.length) {
+      people.push(fact('Who to ask', district.experts.map((e) => this._name(e.name)).join(', '), 'recency-weighted authorship across its files'));
+    }
+    if (flags.codeowners) {
+      people.push(fact('CODEOWNERS', `${district.ownerDrift || 0} drifted · ${district.unowned || 0} unowned`, 'files whose declared owners do not write them / that no rule covers'));
+    }
     const health = this._healthFacts([district], flags);
     if (flags.churn) health.unshift(fact('Heat', district.heat ? `${Math.round(district.heat * 100)}%` : 'quiet', 'mean recent activity of its files; the pavement warms with it'));
+    if (flags.tests && district.sourceFiles) {
+      health.push(fact('Tested', `${district.testedFiles} of ${district.sourceFiles}`, `source files with a linked test${district.untestedRisk ? ` · ${district.untestedRisk} risky ones without` : ''}`));
+    }
+    if (flags.complexity) health.push(fact('Braced', String(district.braced || 0), 'files with a function of 15+ decision points'));
     this.metrics.append(section('Health', health));
-    this.hint.textContent = 'Click a building to inspect it individually.';
+    const structure = this._districtStructure(district, flags);
+    if (structure.length) this.metrics.append(section('Structure', structure));
+    const trend = flags.churn ? trendChart(district.activity, district.activeAuthors) : null;
+    if (trend) this.metrics.append(section('Activity', [trend], false));
+    if (flags.delta && source.manifest.delta) {
+      this.metrics.append(section('Since the baseline', [fact('Changed files', String(district.changed || 0), `added, grown or shrunk since ${this._baselineLabel(source.manifest.delta)}`)], false));
+    }
+    this.hint.textContent = 'Click a building to inspect it individually. Arcs show which folders this one depends on and changes with.';
+    this._announce();
+  }
+
+  /** A folder's afferent/efferent coupling and the folders on either side of it. */
+  _districtStructure(district, flags) {
+    const manifest = this.source.manifest;
+    const deps = manifest.dependencies;
+    const items = [];
+    if (!flags.imports || !deps) return items;
+    const inst = district.instability;
+    items.push(fact(
+      'Coupling',
+      `Ca ${district.ca} · Ce ${district.ce}`,
+      'Ca: files elsewhere that import something here. Ce: files here that import something elsewhere'
+    ));
+    if (inst !== undefined && inst >= 0) {
+      items.push(fact('Instability', inst.toFixed(2), inst < 0.25 ? 'a foundation the rest of the code stands on' : inst > 0.75 ? 'a leaf: free to change, nothing leans on it' : 'both depends and is depended on'));
+    }
+    if (flags.layering && district.violations) {
+      items.push(fact('Layering', `${plural(district.violations, 'import')} against the grain`, 'red arcs'));
+    }
+    const name = (id) => {
+      const d = manifest.districts[id];
+      return d ? this.source.districtLabel(d) : `district ${id}`;
+    };
+    const folderLinks = (rows, label, gloss) => {
+      if (!rows.length) return;
+      const item = fact(label, plural(rows.length, 'folder'), gloss);
+      const list = el('div', { className: 'insp-links' });
+      for (const [id, count] of rows.slice(0, 8)) {
+        const link = el('button', { type: 'button', className: 'insp-link', textContent: `${name(id)} · ${count}`, title: 'inspect that folder' });
+        link.dataset.district = String(id);
+        list.append(link);
+      }
+      item.append(list);
+      items.push(item);
+    };
+    folderLinks(deps.matrix.filter((r) => r[0] === district.id).map((r) => [r[1], r[2]]), 'Depends on', 'imports from these folders (blue arcs)');
+    folderLinks(deps.matrix.filter((r) => r[1] === district.id).map((r) => [r[0], r[2]]), 'Depended on by', 'these folders import from it (amber arcs)');
+    folderLinks(
+      (deps.coupling || []).filter((r) => r[0] === district.id || r[1] === district.id).map((r) => [r[0] === district.id ? r[1] : r[0], r[3]]),
+      'Changes with',
+      'shared commits with these folders, with no import to explain it (teal arcs)'
+    );
+    return items;
   }
 
   /** A folder that splits into several neighbourhoods: its plinth. */
@@ -585,6 +885,8 @@ export class Inspector {
     }
     this.metrics.append(section('What you’re looking at', overview));
     this.metrics.append(section('Health', this._healthFacts(districts, flags)));
-    this.hint.textContent = 'Click a block inside it to inspect one district.';
+    this.hint.textContent = 'Click a block inside it to inspect one district. Everything outside this folder is dimmed.';
+    this.selected.districtIds = districts.map((d) => d.id);
+    this._announce();
   }
 }

@@ -26,7 +26,20 @@ const FLAG_BITS = {
   orphan: 1 << 11,
   cycle: 1 << 12,
   knowledge: 1 << 13,
+  violation: 1 << 14,
+  untested: 1 << 15,
+  untestedrisk: 1 << 16,
+  drift: 1 << 17,
+  added: 1 << 18,
+  grown: 1 << 19,
+  shrunk: 1 << 20,
+  braced: 1 << 21,
+  unowned: 1 << 22,
 };
+
+// Numeric comparisons: `loc>500`, `cx>=15`, `fanin>10`. The key is the query
+// word, the value the index.json column it reads.
+const NUMERIC = { loc: 'loc', age: 'age', heat: 'heat', cx: 'cx', complexity: 'cx', fanin: 'fanin', fanout: 'fanout', delta: 'delta' };
 
 /** Column-index lookup built once from the manifest's declared column order. */
 export function columnIndex(indexColumns) {
@@ -65,12 +78,12 @@ function compileTerm(term, context) {
 
   let predicate;
   const colonAt = body.indexOf(':');
-  const cmpMatch = body.match(/^(loc|age|heat)(>=|<=|>|<|=)([\d.]+)$/i);
+  const cmpMatch = body.match(/^([a-z]+)(>=|<=|>|<|=)(-?[\d.]+)$/i);
 
-  if (cmpMatch) {
+  if (cmpMatch && NUMERIC[cmpMatch[1].toLowerCase()]) {
     const [, field, op, valueText] = cmpMatch;
     const value = Number(valueText);
-    const idx = context.col[field.toLowerCase() === 'loc' ? 'loc' : field.toLowerCase()];
+    const idx = context.col[NUMERIC[field.toLowerCase()]];
     predicate = (row) => {
       if (idx === undefined) return false;
       const cell = Number(row[idx]) || 0;
@@ -109,6 +122,22 @@ function compileTerm(term, context) {
     } else if (key === 'archetype') {
       const idx = context.col.archetype;
       predicate = (row) => idx !== undefined && String(row[idx]).toLowerCase() === value;
+    } else if (key === 'owner' || key === 'author') {
+      // The main author, by name; a substring so `owner:ada` finds "Ada Lovelace".
+      const idx = context.col.owner;
+      predicate = (row) => idx !== undefined && row[idx] >= 0 && context.resolveString(row[idx]).toLowerCase().includes(value);
+    } else if (key === 'district' || key === 'folder') {
+      const idx = context.col.district;
+      const prefix = value.replace(/\*+$/, '').replace(/\/$/, '');
+      predicate = (row) => {
+        if (idx === undefined || !context.resolveDistrict) return false;
+        const name = context.resolveDistrict(row[idx]).toLowerCase();
+        return name === prefix || name.startsWith(`${prefix}/`);
+      };
+    } else if (key === 'imports' || key === 'importedby') {
+      // `imports:analyzer/health.py` -- files that import a path (prefix);
+      // `importedby:zion.py` -- files that path imports. Needs imports.json.
+      predicate = edgePredicate(key, value, context);
     } else {
       predicate = () => false;
     }
@@ -131,15 +160,66 @@ function compileTerm(term, context) {
 }
 
 /**
+ * `imports:` and `importedby:`. The path is a prefix, so `imports:analyzer/`
+ * finds everything that reaches into the analyzer. Resolved once per query.
+ */
+function edgePredicate(key, value, context) {
+  const edges = context.edges;
+  const col = context.col;
+  if (!edges || !context.rows || col.id === undefined) return () => false;
+  const pathIdx = col.path !== undefined ? col.path : col.name;
+  const prefix = value.replace(/\*+$/, '');
+  const targets = new Set();
+  for (const row of context.rows) {
+    if (context.resolveString(row[pathIdx]).toLowerCase().startsWith(prefix)) targets.add(row[col.id]);
+  }
+  const matches = new Set();
+  const lookup = key === 'imports' ? edges.importers : edges.imports;
+  for (const id of targets) {
+    for (const other of lookup.get(id) || []) matches.add(other);
+  }
+  return (row) => matches.has(row[col.id]);
+}
+
+/** `[[from, to, violates], ...]` -> both directions, for the edge tokens and the overlay. */
+export function edgeMaps(edgeList) {
+  const imports = new Map();
+  const importers = new Map();
+  const violating = new Set(); // `${from}>${to}`
+  for (const [from, to, violates] of edgeList || []) {
+    if (!imports.has(from)) imports.set(from, []);
+    if (!importers.has(to)) importers.set(to, []);
+    imports.get(from).push(to);
+    importers.get(to).push(from);
+    if (violates) violating.add(`${from}>${to}`);
+  }
+  return { imports, importers, violating };
+}
+
+/**
  * Compile a query string into `(row) => boolean`. An empty/whitespace query
  * always matches everything (no filter active).
+ *
+ * Terms are ANDed; `OR` (or `|`) between groups of terms ORs the groups, so
+ * `is:hotspot is:untested OR is:cycle` is "untested hotspots, or anything in a
+ * cycle". `extra` supplies what some tokens need beyond the index itself:
+ * `edges` (from `edgeMaps`), `rows` (the index) and `resolveDistrict(id)`.
  */
-export function parseQuery(text, indexColumns, resolveString, resolveExt) {
+export function parseQuery(text, indexColumns, resolveString, resolveExt, extra = {}) {
   const trimmed = (text || '').trim();
   if (!trimmed) return null;
-  const context = { col: columnIndex(indexColumns), resolveString, resolveExt };
-  const clauses = splitTerms(trimmed).map((term) => compileTerm(term, context));
-  return (row) => clauses.every((clause) => clause(row));
+  const context = { col: columnIndex(indexColumns), resolveString, resolveExt, ...extra };
+  const groups = [[]];
+  for (const term of splitTerms(trimmed)) {
+    if (term === 'OR' || term === '|' || term === '||') {
+      if (groups[groups.length - 1].length) groups.push([]);
+      continue;
+    }
+    groups[groups.length - 1].push(compileTerm(term, context));
+  }
+  const live = groups.filter((g) => g.length);
+  if (!live.length) return null;
+  return (row) => live.some((clauses) => clauses.every((clause) => clause(row)));
 }
 
 /** Run a compiled predicate over the whole index, returning matching ids and a summary. */

@@ -11,6 +11,20 @@
 
 const CACHE_LIMIT = 2;
 
+/** A floor plate's tint: what kind of definition it is, orange when branch-heavy. */
+function plateColour(floor) {
+  if (!floor) return 0x46516a;
+  if ((floor.complexity || 0) >= 15) return 0xff8a2e;
+  return {
+    class: 0x8a6ad6,
+    function: 0x4d86c9,
+    method: 0x3aa6a0,
+    heading: 0x7c8a7a,
+    section: 0x7c8a7a,
+    cell: 0x3aa6a0,
+  }[floor.kind] || 0x46516a;
+}
+
 /**
  * Draw text onto a canvas sized to the wall it will cover.
  *
@@ -208,17 +222,24 @@ export class Interior {
 
     // A small floor stack in the far corner: a model of the building, not a rug
     // across the room. The highlighted plate is the floor you are standing on.
+    // Floors that mean something (S9): each plate is tinted by what the floor
+    // is -- class, function, method, heading, cell -- turns orange when that
+    // definition is branch-heavy, and is as wide as its share of the lines, so
+    // the model says which floors carry the building before any is read.
     this.plates = [];
     const plateCount = Math.max(1, Math.min(this.floors.length, 14));
+    const maxLoc = Math.max(1, ...this.floors.slice(0, plateCount).map((f) => f.loc || 0));
     for (let i = 0; i < plateCount; i++) {
+      const floor = this.floors[i];
+      const share = floor ? 0.35 + 0.65 * Math.sqrt((floor.loc || 0) / maxLoc) : 1;
       const plate = new THREE.Mesh(
-        new THREE.BoxGeometry(5.4, 0.16, 3.6),
+        new THREE.BoxGeometry(5.4 * share, 0.16, 3.6),
         new THREE.MeshStandardMaterial({
-          color: i === this.floorIndex ? 0xffb347 : 0x46516a,
+          color: i === this.floorIndex ? 0xffb347 : plateColour(floor),
           emissive: i === this.floorIndex ? 0xffb347 : 0x000000,
           emissiveIntensity: i === this.floorIndex ? 0.35 : 0,
           transparent: true,
-          opacity: i === this.floorIndex ? 1 : 0.55,
+          opacity: i === this.floorIndex ? 1 : 0.7,
         })
       );
       plate.position.set(-width / 2 + 6.5, 1.0 + i * 0.42, -depth / 2 + 4.5);
@@ -239,7 +260,8 @@ export class Interior {
     const slice = this.sourceText.slice(floor.srcOffset, floor.srcOffset + floor.srcLength);
     const header = [
       `${this.source.s(this.building?.path || '')}`,
-      `floor ${this.floorIndex + 1} / ${this.floors.length}   ${this.source.s(floor.name)}   (${floor.kind})`,
+      `floor ${this.floorIndex + 1} / ${this.floors.length}   ${this.source.s(floor.name)}   (${floor.kind}` +
+        `${floor.loc ? `, ${floor.loc} lines` : ''}${floor.complexity ? `, ${floor.complexity} decision points` : ''})`,
       floor.doc >= 0 ? `${this.source.s(floor.doc)}` : '',
       '\u2500'.repeat(96),
     ]
@@ -268,7 +290,7 @@ export class Interior {
     if (building.parseConfidence !== 'high') {
       lines.push('', `parsed with ${building.parseConfidence} confidence`);
     }
-    lines.push('', 'floors');
+    lines.push('', 'floors      plates: purple class · blue function · teal method · grey heading · orange 15+ branches');
     this.floors.slice(0, 18).forEach((floor, index) => {
       const marker = index === this.floorIndex ? '>' : ' ';
       lines.push(`${marker} ${source.s(floor.name)}`);
@@ -300,10 +322,10 @@ export class Interior {
 
     this.plates.forEach((plate, index) => {
       const active = index === this.floorIndex;
-      plate.material.color.set(active ? 0xffb347 : 0x46516a);
+      plate.material.color.set(active ? 0xffb347 : plateColour(this.floors[index]));
       plate.material.emissive.set(active ? 0xffb347 : 0x000000);
       plate.material.emissiveIntensity = active ? 0.35 : 0;
-      plate.material.opacity = active ? 1 : 0.55;
+      plate.material.opacity = active ? 1 : 0.7;
     });
   }
 

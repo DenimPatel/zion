@@ -672,6 +672,11 @@ def build_layout(analysis: RepoAnalysis, depth: int | None = None) -> CityLayout
     layout.streets = [s for s in streets if s.w > 0.1 and s.h > 0.1]
     _region_totals(layout)
     layout.bounds = Rect(0.0, 0.0, side, side)
+    # Dependency structure is measured between districts, so it can only be
+    # computed now that every file has one. Idempotent across layout passes.
+    from .architecture import finalize_architecture
+
+    finalize_architecture(analysis)
     return layout
 
 

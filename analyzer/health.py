@@ -251,4 +251,9 @@ def review(analysis) -> dict:
         "knowledge": top(lambda f: f.knowledge_risk, lambda f: (-f.logical_loc, f.rel)) if flags.knowledge else [],
         "orphans": top(lambda f: f.is_orphan, lambda f: (-f.logical_loc, f.rel)) if flags.imports else [],
         "cycles": [list(c) for c in analysis.cycles[:REVIEW_LIMIT]],
+        # The next layer: architecture.py, testmap.py and owners.py.
+        "violations": top(lambda f: f.is_violation, lambda f: (-len(f.import_violations), f.rel)),
+        "untested": top(lambda f: f.untested_risk, lambda f: (f.hotspot_rank or 10**9, -f.logical_loc, f.rel)),
+        "drift": top(lambda f: f.owner_drift, lambda f: (-f.logical_loc, f.rel)),
+        "complexity": top(lambda f: f.is_braced, lambda f: (-f.brace_complexity, f.rel)),
     }

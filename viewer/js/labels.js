@@ -67,12 +67,15 @@ export class MapLabels {
       if (!p || p.x < -0.1 || p.x > 1.1 || p.y < -0.1 || p.y > 1.1) continue;
       visible.push({ item, distance, sx: p.x * width, sy: p.y * height });
     }
-    // Shallow folders first, then the nearest: the borough name beats the
-    // block name, and a near block beats a far one.
+    // Shallow folders first; among regions of one level the bigger borough
+    // wins a collision (its name says more about the map), among blocks the
+    // nearest does (it is the one you are looking at).
     visible.sort((a, b) => {
       const ka = a.item.kind === 'region' ? a.item.level : 9;
       const kb = b.item.kind === 'region' ? b.item.level : 9;
-      return ka - kb || a.distance - b.distance;
+      if (ka !== kb) return ka - kb;
+      if (ka !== 9) return (b.item.weight || 0) - (a.item.weight || 0) || a.distance - b.distance;
+      return a.distance - b.distance;
     });
     const placed = [];
     let used = 0;

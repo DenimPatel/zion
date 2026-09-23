@@ -32,6 +32,14 @@ import {
   vacantBoardGeometry,
 } from './parts/health.js';
 import {
+  crossBracingGeometry,
+  noEntrySignGeometry,
+  notePinGeometry,
+  ownerNoticeGeometry,
+  surveyStakeGeometry,
+  trafficConeGeometry,
+} from './parts/structure.js';
+import {
   makeMassingDepthMaterial,
   patchFacade,
   patchRoofProps,
@@ -105,11 +113,64 @@ export const HEALTH_COLOURS = {
   oversized: 0xff9a2e,
   knowledge: 0xffd23f,
   orphan: 0x8a8f99,
+  violation: 0xe0245e,
   healthy: 0x56657a,
 };
+
+// Colours of the survey stakes and the delta lens (analyzer/history.py).
+export const DELTA_COLOURS = { added: 0x3ddc84, grown: 0x4da3ff, shrunk: 0x9aa3ad, unchanged: 0x30343c };
+
+/**
+ * The colour ramps the Filter tab's lens key describes. Each lens is a
+ * function of one building so the key can count how many resident buildings
+ * fall in each band -- the key is the lens, not a second description of it.
+ */
+export const LENS_BANDS = {
+  instability: [
+    { label: 'stable foundation (I < 0.25)', colour: 0x2f9e6e, test: (b) => b.instability >= 0 && b.instability < 0.25 },
+    { label: 'balanced (0.25–0.75)', colour: 0xd9b44a, test: (b) => b.instability >= 0.25 && b.instability <= 0.75 },
+    { label: 'unstable leaf (I > 0.75)', colour: 0xe0533d, test: (b) => b.instability > 0.75 },
+    { label: 'no resolved imports', colour: 0x3a3e46, test: (b) => !(b.instability >= 0) },
+  ],
+  tests: [
+    { label: 'has a linked test', colour: 0x3ddc84, test: (b) => b.testedBy && b.testedBy.length > 0 },
+    { label: 'untested, risky', colour: 0xff5a36, test: (b) => b.untestedRisk },
+    { label: 'untested', colour: 0xc9894a, test: (b) => b.untested && !b.untestedRisk },
+    { label: 'not source code', colour: 0x3a3e46, test: () => true },
+  ],
+  delta: [
+    { label: 'added', colour: DELTA_COLOURS.added, test: (b) => b.delta === 'added' },
+    { label: 'grown', colour: DELTA_COLOURS.grown, test: (b) => b.delta === 'grown' },
+    { label: 'shrunk', colour: DELTA_COLOURS.shrunk, test: (b) => b.delta === 'shrunk' },
+    { label: 'unchanged', colour: DELTA_COLOURS.unchanged, test: () => true },
+  ],
+  complexity: [
+    { label: '30+ decision points in one function', colour: 0xe0245e, test: (b) => (b.braceComplexity || 0) >= 30 },
+    { label: '15–29', colour: 0xff9a2e, test: (b) => (b.braceComplexity || 0) >= 15 },
+    { label: '8–14', colour: 0xd9c24a, test: (b) => (b.braceComplexity || 0) >= 8 },
+    { label: 'under 8', colour: 0x4a6a5a, test: () => true },
+  ],
+};
+
+/** The first band a building falls in, for a banded lens. */
+export function lensBand(lens, building) {
+  const bands = LENS_BANDS[lens];
+  if (!bands) return null;
+  return bands.find((band) => band.test(building)) || bands[bands.length - 1];
+}
+
+// Everything that stands on or around a building rather than being one: the
+// History slider hides these while it replays the past, because a crane or a
+// hazard barrier describes the city as it is now, not as it was then.
+const PROP_PREFIXES = [
+  'roof-props', 'cranes', 'heat-beacons', 'scaffolding', 'antennas', 'sole-tenant-markers', 'knowledge-flags',
+  'hazard-barriers', 'raking-shores', 'vacant-boards', 'cycle-pennants', 'no-entry-signs', 'traffic-cones',
+  'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins',
+];
 export function healthSignal(building, flags = {}) {
   if (flags.hotspots && building.isHotspot) return 'hotspot';
   if (flags.imports && building.cycle) return 'cycle';
+  if (flags.layering && building.violations) return 'violation';
   if (building.oversized) return 'oversized';
   if (flags.knowledge && building.knowledgeRisk) return 'knowledge';
   if (flags.imports && building.orphan) return 'orphan';
@@ -328,6 +389,18 @@ export class CityMesh {
     const shoreCandidates = [];
     const vacantCandidates = [];
     const pennantCandidates = [];
+    const signCandidates = [];
+    const coneCandidates = [];
+    const braceCandidates = [];
+    const stakeCandidates = [];
+    const noticeCandidates = [];
+    const pinCandidates = [];
+    const notes = options.notes || null;
+    const violationEligible = option('violations', flag('layering'));
+    const untestedEligible = option('untested', flag('tests'));
+    const complexityEligible = option('complexity', flag('complexity'));
+    const deltaEligible = option('delta', flag('delta'));
+    const codeownersEligible = option('codeowners', flag('codeowners'));
     const hotspotEligible = option('hotspots', flag('hotspots'));
     const oversizedEligible = option('oversized', true);
     const orphanEligible = option('orphans', flag('imports'));
@@ -483,6 +556,26 @@ export class CityMesh {
         if (detailed && cycleEligible && building.cycle) {
           pennantCandidates.push({ x, z, width, depth, height, cycle: building.cycle });
         }
+        if (detailed && violationEligible && building.violations) {
+          signCandidates.push({ x, z, width, depth, base });
+        }
+        if (detailed && untestedEligible && building.untestedRisk) {
+          coneCandidates.push({ x, z, width, depth, base });
+        }
+        if (detailed && complexityEligible && building.braced) {
+          braceCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && deltaEligible && building.delta) {
+          stakeCandidates.push({ x, z, width, depth, base, delta: building.delta });
+        }
+        if (detailed && codeownersEligible && building.ownerDrift) {
+          noticeCandidates.push({ x, z, width, depth, base });
+        }
+        // A note is the reader's own, so it is drawn at any tier: a pin you
+        // placed should not vanish because you flew away from it.
+        if (notes && notes.has(building.id)) {
+          pinCandidates.push({ x, z, width, depth, height });
+        }
       });
 
       mesh.instanceMatrix.needsUpdate = true;
@@ -515,8 +608,17 @@ export class CityMesh {
     this._addShores(shoreCandidates);
     this._addVacantBoards(vacantCandidates);
     this._addCyclePennants(pennantCandidates);
+    // Kerb-side props at three different corners, so a building carrying all
+    // three signals shows all three.
+    this._addPlotProps(signCandidates, 'no-entry-signs', noEntrySignGeometry, (p) => [p.x - p.width / 2 - 0.9, p.z + p.depth / 2 + 0.9]);
+    this._addPlotProps(coneCandidates, 'traffic-cones', trafficConeGeometry, (p) => [p.x, p.z + p.depth / 2 + 0.8]);
+    this._addPlotProps(noticeCandidates, 'owner-notices', ownerNoticeGeometry, (p) => [p.x + p.width / 2 + 1.0, p.z + p.depth / 2 + 0.9]);
+    this._addBracing(braceCandidates);
+    this._addSurveyStakes(stakeCandidates);
+    this._addNotePins(pinCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addRegions(manifest.regions || []);
+    this._addPlinthShadows(manifest.regions || []);
     this._addStreets(manifest.streets || []);
     this._addDistricts(manifest.districts || []);
     return this.group;
@@ -775,6 +877,15 @@ export class CityMesh {
           colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
         } else if (lens === 'health') {
           colour.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
+        } else if (LENS_BANDS[lens]) {
+          colour.set(lensBand(lens, building).colour);
+        } else if (lens === 'territory') {
+          // One author's territory: brightness is their share of the file's
+          // lines, so where they wrote everything glows and where they wrote
+          // nothing is ghost grey (`this.territoryAuthor` is set by main.js).
+          const share = (building.authorShares || []).find(([name]) => this.source.s(name) === this.territoryAuthor);
+          const value = share ? share[1] : 0;
+          colour.copy(new THREE.Color(0x26282d).lerp(new THREE.Color(0xffc24a), Math.sqrt(value)));
         } else if (lens === 'downtown') {
           const centrality = Math.max(0, Math.min(1, building.centrality || 0));
           colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
@@ -1060,6 +1171,214 @@ export class CityMesh {
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     this.group.add(mesh);
+  }
+
+  /**
+   * A kerb-side prop, one instanced cluster per signal: the no-entry sign (a
+   * layering violation), traffic cones (a risky file with no test) and the
+   * owner notice (CODEOWNERS drift). Real-world size, grown a little with the
+   * plot so it still reads beside a tower, and placed at `corner(plot)` on the
+   * plinth the building stands on -- never stretched by the footprint.
+   */
+  _addPlotProps(candidates, name, geometryFor, corner) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, metalness: 0.1 });
+    const mesh = new THREE.InstancedMesh(geometryFor(THREE), material, list.length);
+    mesh.name = name;
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      const scale = Math.min(3, Math.max(1.2, Math.sqrt(plot.width * plot.depth) * 0.12));
+      const [x, z] = corner(plot);
+      matrix.makeScale(scale, scale, scale);
+      matrix.setPosition(x, plot.base || 0, z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Steel cross-bracing up every face of a building with a branch-heavy
+   * function (S10). Scaled by the building's drawn dimensions, so it meets the
+   * facade from the ground to the roofline.
+   */
+  _addBracing(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({ color: 0xb8c2cc, roughness: 0.45, metalness: 0.7 });
+    const mesh = new THREE.InstancedMesh(crossBracingGeometry(THREE), material, list.length);
+    mesh.name = 'cross-bracing';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      // Bracing stops below the crown: it braces the shaft, not the ornament.
+      matrix.makeScale(plot.width, plot.height * 0.72, plot.depth);
+      matrix.setPosition(plot.x, 0, plot.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A survey stake at the plot corner, flagged by how the file changed. */
+  _addSurveyStakes(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.6,
+      side: THREE.DoubleSide,
+      emissive: new THREE.Color(0x111111),
+    });
+    const mesh = new THREE.InstancedMesh(surveyStakeGeometry(THREE), material, list.length);
+    mesh.name = 'survey-stakes';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+    list.forEach((plot, index) => {
+      const size = Math.min(6, Math.max(2.4, Math.min(plot.width, plot.depth) * 0.5));
+      matrix.makeScale(size, size, size);
+      matrix.setPosition(plot.x + plot.width / 2 + 0.4, plot.base || 0, plot.z - plot.depth / 2 - 0.4);
+      mesh.setMatrixAt(index, matrix);
+      mesh.setColorAt(index, colour.set(DELTA_COLOURS[plot.delta] || DELTA_COLOURS.unchanged));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** The reader's own notes: a pin above each annotated roof. */
+  _addNotePins(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xff5fa2,
+      roughness: 0.35,
+      emissive: new THREE.Color(0xff5fa2),
+      emissiveIntensity: 0.45,
+    });
+    const mesh = new THREE.InstancedMesh(notePinGeometry(THREE), material, candidates.length);
+    mesh.name = 'note-pins';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    candidates.forEach((roof, index) => {
+      const size = Math.min(14, Math.max(5, Math.min(roof.width, roof.depth) * 0.9));
+      matrix.makeScale(size, size, size);
+      matrix.setPosition(roof.x, roof.height + 1, roof.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * A soft dark halo just outside every plinth, on the ground it stands on:
+   * the contact shadow a raised slab casts. Shadow maps are too coarse at
+   * city scale to show a 14 cm step, and without it the nesting reads only
+   * where the camera is low enough to see the curb. One draw call.
+   */
+  _addPlinthShadows(regions) {
+    if (!regions.length) return;
+    const THREE = this.THREE;
+    const geometry = new THREE.PlaneGeometry(1, 1);
+    geometry.rotateX(-Math.PI / 2);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.32,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, regions.length);
+    mesh.name = 'plinth-shadows';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    regions.forEach((region, index) => {
+      const [x, z, w, h] = region.rect;
+      const spread = Math.min(3.5, Math.max(1.2, Math.min(w, h) * 0.02));
+      matrix.makeScale(w + spread * 2, 1, h + spread * 2);
+      matrix.setPosition(x + w / 2, plinthTop((region.level || 1) - 1) + 0.035, z + h / 2);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * The History slider (S7): show the city as it stood `daysBefore` days
+   * before the newest commit. A file appears once its first commit is older
+   * than that; its colour burns with the commits it received that month.
+   * `null` restores the present exactly -- matrices and colours both come back
+   * from the copies taken on the first call, so nothing is recomputed.
+   */
+  setTimeline(daysBefore, { burn = true } = {}) {
+    const THREE = this.THREE;
+    const flags = (this.source.manifest && this.source.manifest.flags) || {};
+    const active = daysBefore !== null && daysBefore !== undefined;
+    const matrix = new THREE.Matrix4();
+    const hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+    const colour = new THREE.Color();
+    const burnColour = new THREE.Color(0xff5a2a);
+    const month = active && burn ? Math.floor(daysBefore / 30) : -1;
+    // Burn is relative to the busiest file that month, so a quiet month still
+    // shows where its few commits went and a busy one does not paint it all.
+    let busiest = 0;
+    if (month >= 0) {
+      for (const members of this.records.values()) {
+        for (const building of members) {
+          busiest = Math.max(busiest, (building.activity && building.activity[month]) || 0);
+        }
+      }
+    }
+    let born = 0;
+    for (const [uuid, members] of this.records) {
+      const mesh = this.meshes.get(uuid);
+      if (!mesh || !mesh.name.startsWith('buildings-')) continue;
+      if (!mesh.userData.baseMatrices) mesh.userData.baseMatrices = Float32Array.from(mesh.instanceMatrix.array);
+      const baseMatrices = mesh.userData.baseMatrices;
+      const baseColors = mesh.userData.baseColors;
+      members.forEach((building, index) => {
+        matrix.fromArray(baseMatrices, index * 16);
+        const exists = !active || !flags.age || (building.ageDays || 0) >= daysBefore;
+        mesh.setMatrixAt(index, exists ? matrix : hidden);
+        if (exists) born++;
+        if (!baseColors || !mesh.instanceColor) return;
+        colour.setRGB(baseColors[index * 3], baseColors[index * 3 + 1], baseColors[index * 3 + 2]);
+        if (active && exists && busiest > 0 && building.activity && month < building.activity.length) {
+          colour.lerp(burnColour, 0.75 * ((building.activity[month] || 0) / busiest));
+        }
+        mesh.setColorAt(index, colour);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+    // Props go dark while the past is on screen; the caller restores them
+    // through its own layer switches afterwards (main.js::applyHiddenLayers),
+    // so a switch flipped in the meantime is honoured.
+    if (active) this.hideProps();
+    this.timeline = active ? daysBefore : null;
+    return born;
+  }
+
+  hideProps() {
+    this._setPropsVisible(false);
+  }
+
+  showProps() {
+    this._setPropsVisible(true);
+  }
+
+  _setPropsVisible(visible) {
+    for (const child of this.group.children) {
+      if (PROP_PREFIXES.some((prefix) => child.name.startsWith(prefix))) child.visible = visible;
+    }
   }
 
   /**

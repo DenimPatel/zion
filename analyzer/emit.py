@@ -85,10 +85,11 @@ LEGEND_SPEC = [
     ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile", "Civic",
      "The most central 5% of files, by how many files change with them, import them, how hot they are and "
      "how many people touch them. They get glass and an antenna. Changes here ripple furthest."),
-    ("skybridges", "Files changed in one commit -> listed under “Changes together with” in the detail report", "pairs",
+    ("skybridges", "Files changed in one commit -> co-change rings around the selected building", "pairs",
      "Civic",
-     "Files that keep changing in the same commits are coupled even if they never import each other. The pairs "
-     "are listed in a building's report, with pairs that cross district lines called out."),
+     "Files that keep changing in the same commits are coupled even if they never import each other. Select a "
+     "building and the files it changes with are ringed in teal on the ground; the pairs are also listed in its "
+     "report, with pairs that cross district lines called out as hidden coupling."),
     ("hotspots", "Change frequency x size -> hazard barriers", "rank", "Health",
      "Striped barriers ring a hotspot: a file in the top 5% by commit frequency times size. Large and "
      "constantly changing is where refactoring pays back first."),
@@ -105,6 +106,42 @@ LEGEND_SPEC = [
     ("knowledge", "Main owner inactive 6+ months -> red corner flag", "bool", "Health",
      "The author who wrote most of this file has not committed anywhere in the repository for six months. "
      "Whoever changes it next is on their own. Pair up or document it."),
+    ("untested", "Risky file with no linked test -> traffic cones", "bool", "Health",
+     "Traffic cones stand around a hotspot, oversized or downtown file that no test is linked to, by import or by "
+     "name (test_layout.py, layout.test.ts, LayoutTest.java). That is where a regression costs the most and is "
+     "caught the least. Linking is best-effort: a test reached another way is not seen."),
+    ("complexity", "15+ decision points in one definition -> cross-bracing", "points", "Health",
+     "Steel cross-bracing on the facade: one definition in the file has at least 15 decision points (if, for, "
+     "while, try, boolean operators). Exact for Python, heuristic elsewhere. Hard to test every path; split it."),
+    ("imports", "Resolved imports -> utility lines from the selected building", "edges", "Structure",
+     "Select a building and its dependencies are drawn as utility lines: blue to the files it imports, amber from "
+     "the files that import it, red for an import that breaks the layering. Only the selection is drawn, never the "
+     "whole graph, so a line can always be followed to its end. Resolution is best-effort (Python, relative JS/TS)."),
+    ("instability", "Share of imports that point outward -> instability lens", "ratio", "Structure",
+     "Instability is fan-out / (fan-in + fan-out): 0 is a foundation many files lean on and that should change "
+     "rarely, 1 is a leaf nothing depends on and that can change freely. The Filter tab's instability lens paints "
+     "it per file; each folder's own value (Robert C. Martin's Ca / Ce) is in its inspector."),
+    ("violations", "Import against the layering -> red no-entry sign", "edges", "Structure",
+     "A red no-entry sign stands at a file with an import that points the wrong way. With a .zion/rules.json in "
+     "the repository the layers are yours; without one, a folder pair that imports both ways is a folder-level "
+     "cycle, and the thinner direction is the edge to break."),
+    ("district_coupling", "Co-change between folders -> links from the selected district", "pairs", "Structure",
+     "Select a district and the folders it keeps changing together with are joined to it by arcs, thicker for "
+     "more shared commits. Hidden coupling between parts: no import says so, the history does."),
+    ("codeowners", "CODEOWNERS names someone else -> an owner notice", "bool", "People",
+     "A purple notice board: the individuals CODEOWNERS names for this file commit to the repository but wrote "
+     "almost none of it. The declared owner has drifted from the real one. Teams cannot be checked from history "
+     "and are never called drifted."),
+    ("experts", "Recency-weighted authorship -> who to ask", "authors", "People",
+     "The people to ask about a file or folder: authors ranked by the lines they added, halved for every six "
+     "months since they last touched it. Listed in the inspector, not drawn."),
+    ("delta", "Changed since the baseline -> survey stakes", "files", "Construction & time",
+     "A survey stake marks a file that changed since the baseline -- the previous build into this directory, or "
+     "the revision given to --compare: green for added, blue for grown, grey for shrunk by 10% or more. The "
+     "Health tab lists what became a hotspot, joined a cycle or broke a rule since."),
+    ("timeline", "First commit dates -> the History slider", "days", "Construction & time",
+     "Drag the History slider, or press play, and the city is rebuilt as it stood on that day: files appear on the "
+     "day of their first commit and burn with that month's commits."),
 ]
 
 
@@ -147,6 +184,10 @@ class EmitOptions:
     single_file: bool = False
     include_source: bool = True
     max_floor_detail: int | None = None
+    # Change tracking (history.py): compare against this summary when given
+    # (``--compare REV``), otherwise against the last build into `out_dir`.
+    baseline: dict | None = None
+    track_history: bool = True
 
 
 @dataclass
@@ -234,7 +275,16 @@ def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
         "knowledge": ids(lists["knowledge"]),
         "orphans": ids(lists["orphans"]),
         "cycles": [ids(c) for c in lists["cycles"]],
+        "violations": ids(lists["violations"]),
+        "untested": ids(lists["untested"]),
+        "drift": ids(lists["drift"]),
+        "complexity": ids(lists["complexity"]),
         "totals": {
+            "violations": sum(1 for f in analysis.files if f.is_violation),
+            "untested": sum(1 for f in analysis.files if f.untested_risk),
+            "drift": sum(1 for f in analysis.files if f.owner_drift),
+            "unowned": sum(1 for f in analysis.files if f.is_unowned),
+            "complexity": sum(1 for f in analysis.files if f.is_braced),
             "hotspots": sum(1 for f in analysis.files if f.is_hotspot),
             "oversized": sum(1 for f in analysis.files if f.is_oversized),
             "knowledge": sum(1 for f in analysis.files if f.knowledge_risk),
@@ -267,6 +317,123 @@ def _subfolders_of(members: list[FileMetrics], district_key: str, depth: int) ->
     return sorted(groups.values(), key=lambda g: -g["loc"])
 
 
+def _district_trend(members: list[FileMetrics]) -> tuple[list[int], list[int]]:
+    """Monthly commits and distinct active authors, most recent month first."""
+    buckets = max((len(f.activity) for f in members), default=0)
+    commits = [0] * buckets
+    authors: list[set[str]] = [set() for _ in range(buckets)]
+    for record in members:
+        for i, value in enumerate(record.activity):
+            commits[i] += value
+        for author, touched in record.author_buckets.items():
+            for i in touched:
+                if 0 <= i < buckets:
+                    authors[i].add(author)
+    return commits, [len(a) for a in authors]
+
+
+def _experts(members: list[FileMetrics], strings: StringTable, limit: int = 3) -> list[dict]:
+    """Who to ask about a folder: recency-weighted authorship summed over its files."""
+    scores: dict[str, float] = {}
+    for record in members:
+        for author, score in record.expert_scores.items():
+            scores[author] = scores.get(author, 0.0) + score
+    total = sum(scores.values())
+    if total <= 0:
+        return []
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return [{"name": strings.add(author), "share": round(score / total, 4)} for author, score in ranked if score > 0]
+
+
+def _district_extras(key: str, members: list[FileMetrics], arch, strings: StringTable, flags) -> dict:
+    deps = arch.districts.get(key) if arch is not None else None
+    commits, active = _district_trend(members)
+    code = [f for f in members if f.is_tested or f.is_untested]
+    return {
+        # Dependency structure (architecture.py): Ca, Ce and I = Ce / (Ca + Ce).
+        "ca": deps.ca if deps else 0,
+        "ce": deps.ce if deps else 0,
+        "instability": deps.instability if deps and deps.instability is not None else -1,
+        "edgesIn": deps.edges_in if deps else 0,
+        "edgesOut": deps.edges_out if deps else 0,
+        "violations": deps.violations if deps else 0,
+        # Trend: commits and distinct active authors per month, newest first.
+        "activity": commits,
+        "activeAuthors": active if flags.authorship else [],
+        "experts": _experts(members, strings) if flags.authorship else [],
+        # Tests, ownership and complexity (testmap.py, owners.py).
+        "sourceFiles": len(code),
+        "testedFiles": sum(1 for f in code if f.is_tested),
+        "untestedRisk": sum(1 for f in members if f.untested_risk),
+        "ownerDrift": sum(1 for f in members if f.owner_drift),
+        "unowned": sum(1 for f in members if f.is_unowned),
+        "braced": sum(1 for f in members if f.is_braced),
+        "changed": sum(1 for f in members if f.delta) if flags.delta else 0,
+    }
+
+
+def _dependencies(analysis: RepoAnalysis, layout: CityLayout, strings: StringTable) -> dict | None:
+    """The folder-level dependency picture, by district id."""
+    arch = analysis.architecture
+    if arch is None or not analysis.flags.imports:
+        return None
+    district_id = {d.key: i for i, d in enumerate(layout.districts)}
+    matrix = sorted(
+        ([district_id[a], district_id[b], n] for (a, b), n in arch.matrix.items() if a in district_id and b in district_id),
+        key=lambda row: (-row[2], row[0], row[1]),
+    )
+    violating_pairs: dict[tuple[int, int], int] = {}
+    by_rel = {f.rel: f for f in analysis.files}
+    for src, dst, _reason in arch.violations:
+        a, b = by_rel[src].district, by_rel[dst].district
+        if a in district_id and b in district_id and a != b:
+            key = (district_id[a], district_id[b])
+            violating_pairs[key] = violating_pairs.get(key, 0) + 1
+    return {
+        # A path inside the repository (".zion/rules.json") or "majority" --
+        # schema, not repository content, but interned all the same.
+        "rules": strings.add(arch.rules) if arch.rules else -1,
+        "rulesError": strings.add(arch.rules_error) if arch.rules_error else -1,
+        "matrix": matrix,
+        "violatingPairs": [[a, b, n] for (a, b), n in sorted(violating_pairs.items(), key=lambda kv: -kv[1])],
+        "coupling": [
+            [district_id[a], district_id[b], n, c] for a, b, n, c in arch.coupling if a in district_id and b in district_id
+        ],
+        "violations": len(arch.violations),
+    }
+
+
+def _delta(analysis: RepoAnalysis, order: dict[str, int], strings: StringTable) -> dict | None:
+    delta = analysis.delta
+    if not delta:
+        return None
+
+    def ids(paths):
+        return [order[p] for p in paths if p in order]
+
+    path_keyed = delta["baseline"].get("keying") == "path"
+    head = delta["baseline"].get("head") or ""
+    return {
+        "baseline": {
+            "generated": delta["baseline"].get("generated", ""),
+            "head": head[:12],
+            "headTs": delta["baseline"].get("headTs", 0.0),
+            "label": strings.add(delta["baseline"]["label"]) if delta["baseline"].get("label") else -1,
+        },
+        "added": ids(delta["added"]),
+        "grown": [[order[p], d] for p, d in delta["grown"] if p in order],
+        "shrunk": [[order[p], d] for p, d in delta["shrunk"] if p in order],
+        # A removed file has no building; name it only when the baseline was
+        # keyed by path (an encrypted city's baseline is keyed by HMAC).
+        "removed": [[strings.add(k) if path_keyed else -1, loc] for k, loc in delta["removed"][:200]],
+        "removedCount": len(delta["removed"]),
+        "became": {name: ids(paths) for name, paths in delta["became"].items()},
+        "resolved": dict(delta["resolved"]),
+        "before": dict(delta["before"]),
+        "after": dict(delta["after"]),
+    }
+
+
 def build_manifest(
     analysis: RepoAnalysis,
     layout: CityLayout,
@@ -276,8 +443,13 @@ def build_manifest(
 ) -> dict:
     buildings_total = len(analysis.files)
     max_height = max((f.height for f in analysis.files), default=0.0)
+    order = _building_order(analysis, layout)
+    git = analysis.git
+    git_first = git.first_ts if git is not None and git.available else 0.0
+    git_last = git.last_ts if git is not None and git.available else 0.0
 
     flags = analysis.flags
+    arch = analysis.architecture
     legend = []
     enable_map = {
         "hotspots": flags.hotspots,
@@ -292,6 +464,16 @@ def build_manifest(
         "heat": flags.churn,
         "downtown": flags.centrality,
         "sole_tenant": flags.authorship,
+        "untested": flags.tests,
+        "complexity": flags.complexity,
+        "imports": flags.imports,
+        "instability": flags.imports,
+        "violations": flags.layering,
+        "district_coupling": flags.coupling and bool(arch is not None and arch.coupling),
+        "codeowners": flags.codeowners,
+        "experts": flags.authorship,
+        "delta": flags.delta,
+        "timeline": flags.age,
     }
     for entry_id, label, unit, group, description in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -375,6 +557,7 @@ def build_manifest(
                 # average -- "this neighbourhood is under active development"
                 # relative to the district's own population.
                 "heat": round(sum(f.heat for f in members) / len(members), 4) if members and flags.churn else 0.0,
+                **_district_extras(district.key, members, arch, strings, flags),
                 "newFiles": sum(1 for f in members if f.is_new) if flags.age else 0,
                 "isCbd": (
                     flags.centrality
@@ -477,6 +660,13 @@ def build_manifest(
             "buildingCount": buildings_total,
             "sourceMode": "full" if options.include_source else "none",
             "encrypted": bool(options.encrypt),
+            # The repository's folder name, interned: it keys the reader's own
+            # notes in the viewer (notes.js) and is withheld while locked.
+            "name": strings.add(os.path.basename(os.path.abspath(analysis.root)) or "repo"),
+            # The span of the history the History slider scrubs, in days back
+            # from the newest commit (the same origin every age is measured from).
+            "historyDays": round(max(0.0, (git_last - git_first) / 86400.0), 1),
+            "headTs": git_last,
         },
         "crypto": crypto_meta,
         "flags": flags.to_dict(),
@@ -493,7 +683,10 @@ def build_manifest(
         ],
         "roads": {"names": list(ROAD_NAMES), "widths": [round(w, 2) for w in layout.road_widths]},
         "regions": _regions(layout, strings),
-        "review": _review(analysis, _building_order(analysis, layout)),
+        "review": _review(analysis, order),
+        "dependencies": _dependencies(analysis, layout, strings),
+        "delta": _delta(analysis, order, strings),
+        "codeowners": strings.add(analysis.codeowners_path) if analysis.codeowners_path else -1,
         "cityHall": layout.city_hall(),
         "camera": _camera(layout.bounds.w, layout.bounds.h, max_height),
         "districts": districts,
@@ -501,6 +694,9 @@ def build_manifest(
         # Only a pointer: the file itself is empty/absent whenever coupling is
         # disabled, so the viewer's "should I fetch this" check is one flag read.
         "bridges": "bridges.json" if flags.coupling else None,
+        # Import edges `[[fromId, toId, violates], ...]`: ids only, so they are
+        # the same bytes in a plain and an encrypted build.
+        "imports": "imports.json" if flags.imports else None,
         "index": "index.json",
         "indexColumns": INDEX_COLUMNS,
         "extTable": "ext.bin",
@@ -586,11 +782,24 @@ FLAG_OVERSIZED = 1 << 10
 FLAG_ORPHAN = 1 << 11
 FLAG_CYCLE = 1 << 12
 FLAG_KNOWLEDGE = 1 << 13
+FLAG_VIOLATION = 1 << 14
+FLAG_UNTESTED = 1 << 15
+FLAG_UNTESTED_RISK = 1 << 16
+FLAG_DRIFT = 1 << 17
+FLAG_ADDED = 1 << 18
+FLAG_GROWN = 1 << 19
+FLAG_SHRUNK = 1 << 20
+FLAG_BRACED = 1 << 21
+FLAG_UNOWNED = 1 << 22
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
 # the viewer reads it by name, not by index literal.
-INDEX_COLUMNS = ["id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path"]
+INDEX_COLUMNS = [
+    "id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path",
+    # Appended for the richer query tokens (owner:, cx>, fanin>, fanout>, delta>).
+    "owner", "cx", "fanin", "fanout", "delta",
+]
 
 
 def _ext_for(rel: str) -> str:
@@ -627,7 +836,9 @@ def _building_record(
     district_id: int,
     placed=None,
     top_churn: frozenset[str] = frozenset(),
+    order: dict[str, int] | None = None,
 ) -> dict:
+    order = order or {}
     placement = {
         "x": round(placed.x, 3) if placed else 0.0,
         "y": round(placed.y, 3) if placed else 0.0,
@@ -695,6 +906,26 @@ def _building_record(
         "knowledgeRisk": record.knowledge_risk,
         "cycle": record.cycle_id,
         "cycleSize": record.cycle_size,
+        # Dependency structure (architecture.py).
+        "importsOut": len(record.imports_resolved),
+        "instability": record.file_instability,
+        "violations": len(record.import_violations),
+        # Ownership (owners.py): shares of lines added, and who to ask.
+        "authorShares": [[strings.add(a), share] for a, share in record.author_shares],
+        "experts": [[strings.add(a), share] for a, share in record.experts],
+        "declaredOwners": [strings.add(o) for o in record.declared_owners],
+        "ownerDrift": record.owner_drift,
+        "unowned": record.is_unowned,
+        # Tests and complexity (testmap.py).
+        "testedBy": [order[t] for t in record.tested_by if t in order][:8],
+        "untested": record.is_untested,
+        "untestedRisk": record.untested_risk,
+        "braced": record.is_braced,
+        "braceComplexity": record.brace_complexity,
+        # Change since the baseline (history.py).
+        "delta": record.delta,
+        "locDelta": record.loc_delta,
+        "became": list(record.became),
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
         "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
@@ -755,6 +986,24 @@ def _build_index(
             flags |= FLAG_CYCLE
         if record.knowledge_risk:
             flags |= FLAG_KNOWLEDGE
+        if record.is_violation:
+            flags |= FLAG_VIOLATION
+        if record.is_untested:
+            flags |= FLAG_UNTESTED
+        if record.untested_risk:
+            flags |= FLAG_UNTESTED_RISK
+        if record.owner_drift:
+            flags |= FLAG_DRIFT
+        if record.delta == "added":
+            flags |= FLAG_ADDED
+        elif record.delta == "grown":
+            flags |= FLAG_GROWN
+        elif record.delta == "shrunk":
+            flags |= FLAG_SHRUNK
+        if record.is_braced:
+            flags |= FLAG_BRACED
+        if record.is_unowned:
+            flags |= FLAG_UNOWNED
         rows.append(
             [
                 index,
@@ -768,6 +1017,11 @@ def _build_index(
                 round(record.age_days, 1),
                 round(record.heat, 4),
                 strings.add(record.rel),
+                strings.add(record.primary_author) if record.primary_author else -1,
+                record.max_complexity,
+                record.import_in_degree,
+                len(record.imports_resolved),
+                record.loc_delta,
             ]
         )
     rows.sort(key=lambda row: row[0])
@@ -954,6 +1208,21 @@ def emit_city(
             raise ValueError("--encrypt requires a passphrase (ZION_PASSPHRASE or prompt)")
         crypto_meta, encryptor = crypto.prepare(options.passphrase)
 
+    # ---- change since the baseline ----
+    #
+    # Measured before anything is written: the delta rides in the manifest,
+    # the chunks and the index, and the previous summary in `out_dir` is only
+    # replaced once this build has used it.
+    from . import history
+
+    summary_key, keying = history.key_function(options.passphrase if options.encrypt else None)
+    current_summary = history.summarize(analysis, summary_key, keying)
+    baseline = options.baseline
+    if baseline is None and options.track_history:
+        baseline = history.previous_baseline(out_dir, current_summary)
+    analysis.delta = history.apply_delta(analysis, baseline, summary_key)
+    analysis.flags.delta = bool(analysis.delta)
+
     manifest = build_manifest(analysis, layout, strings, options, crypto_meta)
 
     # ---- district chunks ----
@@ -978,7 +1247,7 @@ def emit_city(
         district_id = district_order.get(key, 0)
         records = [
             _building_record(
-                building_index[m.rel], m, strings, district_id, placement.get(m.rel), top_churn
+                building_index[m.rel], m, strings, district_id, placement.get(m.rel), top_churn, building_index
             )
             for m in sorted(members, key=lambda f: f.rel)
         ]
@@ -1015,6 +1284,26 @@ def emit_city(
             if len(bridges) >= MAX_BRIDGES:
                 break
         bytes_written += _write(os.path.join(out_dir, "bridges.json"), _json(bridges))
+
+    # ---- import edges ----
+    #
+    # Drawn only for the selected building (viewer/js/parts/structure.js), so
+    # the whole list is shipped once and never rendered at once.
+    MAX_IMPORT_EDGES = 300_000
+    if analysis.flags.imports:
+        violating = {(f.rel, t) for f in analysis.files for t in f.import_violations}
+        edges = []
+        for record in analysis.files:
+            src = building_index.get(record.rel)
+            if src is None:
+                continue
+            for target in record.imports_resolved:
+                dst = building_index.get(target)
+                if dst is None:
+                    continue
+                edges.append([src, dst, 1 if (record.rel, target) in violating else 0])
+        edges.sort()
+        bytes_written += _write(os.path.join(out_dir, "imports.json"), _json(edges[:MAX_IMPORT_EDGES]))
 
     # ---- whole-repo facet index ----
     ext_strings = StringTable()
@@ -1075,6 +1364,8 @@ def emit_city(
         "encrypted": bool(encryptor is not None),
     }
     bytes_written += _write(os.path.join(out_dir, "city.json"), _json(manifest))
+    if options.track_history:
+        bytes_written += history.write_summaries(out_dir, current_summary)
 
     bytes_written += install_viewer(out_dir)
 
@@ -1154,7 +1445,7 @@ def build_single_file(out_dir: str, manifest: dict, result: "EmitResult") -> tup
 
     buildings = manifest["meta"]["buildingCount"]
     payload_paths: list[str] = ["city.json", "strings.bin"]
-    for extra in ("index.json", "ext.bin", "bridges.json"):
+    for extra in ("index.json", "ext.bin", "bridges.json", "imports.json"):
         if os.path.exists(os.path.join(out_dir, extra)):
             payload_paths.append(extra)
     for subdir in ("d", "f"):

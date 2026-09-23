@@ -1,5 +1,84 @@
 # Visualization roadmap: reading more of a repo from the skyline alone
 
+## Next layer: architect insights (tracks A–E)
+
+The first roadmap (S1–S19 below) taught the city to answer questions about *files*: new or old, hot or
+stable, central, owned by one person. The next layer answers questions about the *parts* of a repository
+and its *direction over time*, which is what an architect needs to keep a codebase healthy for years:
+which folders depend on which and in what direction, where the declared ownership no longer matches the
+real one, which risky code has no test, what changed since the last release, and how to share a finding
+or gate a pull request on it.
+
+Every item keeps the project's rule: "X looks like Y because Z", with Z a number the analyzer already
+had or can compute in one pass. Each new signal has its own degeneration flag (`RepoFlags.layering`,
+`codeowners`, `tests`, `complexity`, `delta`), a `LEGEND_SPEC` row and a `LEGEND_KEYS` row.
+
+| Item | Status | Where |
+|---|---|---|
+| A1 import edge list (`imports.json`, ids only) | **Shipped** | `analyzer/emit.py`, `viewer/js/loader.js::imports` |
+| A2 utility lines for the selected building (S11, revised: selection only, never the whole graph) | **Shipped** | `viewer/js/selection.js` |
+| A3 folder Ca / Ce / instability, dependency matrix, instability lens, DSM in City Hall | **Shipped** | `analyzer/architecture.py`, `viewer/js/tour.js`, `city.js::LENS_BANDS` |
+| A4 layering violations: `.zion/rules.json` (layers + forbid) or the majority direction; red no-entry signs; `is:violation` | **Shipped** | `architecture.py`, `parts/structure.js` |
+| A5 cross-folder co-change, drawn as arcs from the selected district | **Shipped** | `architecture.py`, `selection.js` |
+| B6 build-to-build delta (`summary.json`, HMAC-keyed when encrypted), survey stakes, Health card, `is:added/grown/shrunk`, delta lens | **Shipped**, except ghost footprints for removed files (they are counted and, in a plain build, named — a removed file has no plot left in the new layout to stand on) | `analyzer/history.py` |
+| B7 `--compare REV` for `build`, `serve` and `report` (`git archive` into a temp dir) | **Shipped** | `history.py::analyze_revision`, `zion.py` |
+| B8 History slider and playback (S7) | **Shipped** (the monthly burn colour is skipped for a history shorter than ~45 days, where months mean nothing) | `city.js::setTimeline`, `main.js::setupHistory` |
+| B9 district trends: commits and distinct active people per month | **Shipped** | `emit.py::_district_trend`, `inspector.js::trendChart` |
+| C10 CODEOWNERS drift and unowned files, owner notices, `is:drift`, `is:unowned` | **Shipped** | `analyzer/owners.py` |
+| C11 who to ask, per file and per folder (recency-weighted authorship) | **Shipped** | `owners.py`, inspector, City Hall, report |
+| C12 author territory lens, `owner:` query word | **Shipped** | `city.js::recolour`, `facets.js` |
+| D13 test links (import + same-language name), traffic cones on untested risk, tests-per-folder, tests lens | **Shipped** | `analyzer/testmap.py` |
+| D14 complexity cross-bracing (S10) and floor-band tinting in interiors (S9) | **Shipped** | `parts/structure.js`, `interior.js::plateColour` |
+| D15 query words: `owner:`, `district:`, `imports:`, `importedby:`, `cx>`, `fanin>`, `fanout>`, `delta>`, `OR` | **Shipped** | `viewer/js/facets.js` |
+| E16 saved views in the URL hash (*Copy view link*) | **Shipped** | `viewer/js/views.js` |
+| E17 notes on buildings: localStorage, map pins, Health list, JSON export/import | **Shipped** | `viewer/js/notes.js` |
+| E18 `zion.py report` (Markdown/JSON) and `--fail-on` CI gate | **Shipped** | `analyzer/report.py` |
+| R focus fade for a selected folder (S14) | **Shipped** | `main.js::applyActiveFilter` |
+| R lens key with per-band counts of the buildings on screen | **Shipped** | `main.js::renderLensKey` |
+| R contact shadows under plinths | **Shipped** (one draw call) | `city.js::_addPlinthShadows` |
+| R inspector charts: author-share bar, floor-size bars, commit/people trend | **Shipped** | `inspector.js` |
+| R map labels: bigger borough wins a collision among regions | **Shipped** | `labels.js` |
+| R hover dims unrelated districts | **Not built**: the focus fade covers the selected case; on hover it would fight the district-hover marker |
+
+Verification: `tests/test_insights.py` pins every analyzer signal on hand-built histories (folder coupling
+numbers, the majority rule, a rules file, byte-identical `imports.json` under `--encrypt`, CODEOWNERS
+semantics and drift, recency-weighted experts, test linking, the delta across two builds and a `--compare`,
+that summaries of an encrypted city carry no path, the report and its gate, and that the analyzed repository
+is never written). The headless self-test adds eighteen interactive checks: the overlay appears, follows its
+switch and clears; the folder fade; district arcs; every new lens recolours and its key counts; `OR`,
+`district:`, `imports:` and `owner:`; the History slider replays and restores; a view round-trips through the
+hash; a note pins a building; every new prop cluster is drawn where it should be.
+
+### Suggestions not yet built
+
+Worth doing next, in rough order of value per effort. Each would follow the same pattern: one analyzer pass,
+one flag, one legend row, one prop or lens.
+
+1. **Abstractness and the main sequence.** Martin's other axis: the share of a folder's definitions that are
+   abstract (ABCs, Protocols, interfaces, `abstract` classes). With instability already computed, distance
+   from the main sequence (|A + I − 1|) flags folders that are both concrete and depended on ("zone of
+   pain") or abstract and unused ("zone of uselessness"). Python's AST knows ABCs exactly; the brace parser
+   can see `interface`/`abstract`.
+2. **External dependencies as a harbour.** Imports that do not resolve inside the repository are third-party
+   packages. Counting them per file and per folder, and reading `requirements*.txt`/`pyproject.toml`/
+   `package.json`, gives "which parts lean on which libraries" — drawn as cargo at a waterfront, or as a
+   lens. It also finds a package imported but not declared, and one declared but never imported.
+3. **TODO/FIXME/HACK density** as a stain on the facade, and a Health list — cheap to count in the parsers
+   that already strip comments.
+4. **Coverage import.** When a `coverage.xml`/`lcov.info` is present, replace the heuristic test links with
+   measured line coverage: lit floors become covered floors.
+5. **Per-function churn** via `git log -L` for the floors of the top hotspots only (it is one git call per
+   function, so it must stay bounded): which floor of a hotspot is the hot one.
+6. **Public surface.** Names re-exported from `__init__.py` / `index.ts` or listed in `__all__`: a folder's
+   front door. Imports that bypass it into a folder's internals are a boundary violation of their own.
+7. **Review latency and PR size** from a hosted-git export, if one is provided: which neighbourhoods wait
+   longest for review.
+8. **Ghost footprints** for files removed since the baseline, drawn where their folder still stands.
+
+---
+
+## Original roadmap (S1–S19)
+
 ## Implementation status
 Phases 0–3, and the cheap/high-value parts of Phase 4, have since been implemented on
 `claude/city-repo-visualization-5293bc` (S1–S6, S8, S9's data + entrypoint marker, S10's complexity
@@ -12,16 +91,16 @@ plain status per item; the rest of this document is the original plan and is kep
 | S6 co-change pairs | **Shipped, revised**: originally drawn as an arc ("skybridge") between every resident pair, which at any real building count read as an unlabelled tangle with no way to tell one pair from another and was removed on user feedback. The data (`bridges.json`) and degeneration rule are unchanged; it now surfaces only as a named, clickable "Changes together with" list in a building's detail report (`viewer/js/detail.js`) |
 | rooftop beacon (part of S4) | **Shipped** (was missing entirely before this revision — the legend promised it, nothing drew it; now a 3-tier graded beacon, separate from the crane which still marks only the top decile) |
 | S8 downtown/centrality | **Shipped** (import resolution is best-effort: exact-ish for Python via `ast`, a relative-path regex for JS/TS) |
-| S9 floors that mean something | **Partly shipped**: entrypoint marker and complexity are computed and shown in the detail report; floor-band tinting inside the 3D interior itself is not done |
-| S10 complexity bracing | **Data only**: `Floor.complexity` is computed and shown in the detail report; the 3D cross-bracing geometry on the facade is not built |
-| S11 underground utilities | **Not implemented** — needs the import edge list (only in-degree counts were kept) plus a new toggle and tunnel geometry; real remaining work |
+| S9 floors that mean something | **Shipped** (floor-band tinting in interiors added by track D14 above); originally **partly shipped**: entrypoint marker and complexity are computed and shown in the detail report; floor-band tinting inside the 3D interior itself is not done |
+| S10 complexity bracing | **Shipped** as cross-bracing (track D14 above); originally **data only**: `Floor.complexity` is computed and shown in the detail report; the 3D cross-bracing geometry on the facade is not built |
+| S11 underground utilities | **Shipped, revised** as selection-only utility lines (track A2 above); originally **not implemented** — needs the import edge list (only in-degree counts were kept) plus a new toggle and tunnel geometry; real remaining work |
 | S12 bus-factor-1 | **Shipped** |
 | S13 nested districts | **Shipped**: `analyzer/layout.py` lays the leaf districts (same keys, same members, same chunks) out as a nested treemap over their folder tree. Every folder that splits becomes a region (`manifest.regions`, drawn as a raised plinth one step per level), roads carry a class (`streets[i][4]`: highway → avenue → street → alley) by how far apart the folders they separate are, and single-child folder chains collapse. The plaza, frame and band spreading still run once over the top-level folders; the 60 m–3.2 km plan-size test passes unmodified, and `tests/test_nesting.py` pins leaf identity, region nesting, road narrowing and "no building on a road". Region and district names are drawn on the map by camera distance (`viewer/js/labels.js`) |
 | S14 drill-down/breadcrumb | **Shipped** as a breadcrumb + clickable sub-folder narrowing in the inspector/detail report, plus clickable region plinths with their own folder report (`Inspector.showRegion`); a fade-outside-the-region effect is not built |
 | Architect's signals (new) | **Shipped**: `analyzer/health.py` — hotspots (commit frequency × size), oversized files, orphan candidates, import cycles (Tarjan over the resolved import edges `_finalize_downtown` now keeps), knowledge risk (main owner inactive 6+ months), first author / last editor / bus factor. Drawn as hazard barriers, raking shores, boarded-up fronts, cycle pennants and a red corner flag; listed in the City Guide's Health tab and the manifest's `review` block; a `health` colour lens. Vendored code is excluded |
 | S15 facet index, S16 filter bar, S17 colour lens, S18 chips | **Shipped** |
 | S19 detail window | **Shipped as a report**, not a second orbiting 3D render of the selected building — a text/table report with metrics, floors, activity, co-changed files and (for a district) sub-folders and largest files. The lasso/rectangle-select extension in overview mode is not built |
-| S7 time-lapse | **Not implemented** — the monthly `activity` data it needs exists (S4), but the scrub slider and per-instance appear-at-birth animation are not built |
+| S7 time-lapse | **Shipped** as the History slider (track B8 above); originally **not implemented** — the monthly `activity` data it needs exists (S4), but the scrub slider and per-instance appear-at-birth animation are not built |
 
 **Why the gaps**: this session has no browser, so nothing in `viewer/` could be verified visually —
 every shipped viewer change was checked with `node --check` (syntax) and by tracing it against an

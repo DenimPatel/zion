@@ -314,6 +314,29 @@ class FileMetrics:
     is_orphan: bool = False
     cycle_id: int = 0
     cycle_size: int = 0
+    # Dependency structure (analyzer/architecture.py), filled once districts exist.
+    import_violations: list[str] = field(default_factory=list)  # imports that break a layering rule
+    is_violation: bool = False
+    file_instability: float = -1.0  # fan-out / (fan-in + fan-out); -1 with no imports either way
+    # Ownership (analyzer/owners.py).
+    author_shares: list[tuple[str, float]] = field(default_factory=list)
+    expert_scores: dict[str, float] = field(default_factory=dict)
+    experts: list[tuple[str, float]] = field(default_factory=list)
+    author_buckets: dict[str, set[int]] = field(default_factory=dict)
+    declared_owners: list[str] = field(default_factory=list)
+    owner_drift: bool = False
+    is_unowned: bool = False
+    # Tests and complexity (analyzer/testmap.py).
+    tested_by: list[str] = field(default_factory=list)
+    is_tested: bool = False
+    is_untested: bool = False
+    untested_risk: bool = False
+    is_braced: bool = False
+    brace_complexity: int = 0  # the most decision points in one function or method
+    # Change since a baseline (analyzer/history.py).
+    delta: str = ""  # "" | "added" | "grown" | "shrunk"
+    loc_delta: int = 0
+    became: list[str] = field(default_factory=list)  # signals gained since the baseline
 
     @property
     def weight(self) -> float:
@@ -339,6 +362,12 @@ class RepoFlags:
     hotspots: bool = False
     knowledge: bool = False
     imports: bool = False
+    # Next layer (architecture.py, owners.py, testmap.py, history.py).
+    layering: bool = False
+    codeowners: bool = False
+    tests: bool = False
+    complexity: bool = False
+    delta: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -352,6 +381,11 @@ class RepoFlags:
             "hotspots": self.hotspots,
             "knowledge": self.knowledge,
             "imports": self.imports,
+            "layering": self.layering,
+            "codeowners": self.codeowners,
+            "tests": self.tests,
+            "complexity": self.complexity,
+            "delta": self.delta,
             "notes": list(self.notes),
         }
 
@@ -368,6 +402,9 @@ class RepoAnalysis:
     languages: dict[str, int] = field(default_factory=dict)
     total_bytes: int = 0
     cycles: list[list[str]] = field(default_factory=list)  # import cycles, largest first
+    architecture: object = None  # architecture.Architecture, once a layout exists
+    codeowners_path: str = ""
+    delta: dict | None = None  # history.apply_delta's result, when a baseline exists
 
     @property
     def total_logical_loc(self) -> int:
@@ -499,6 +536,7 @@ def analyze(
             record.first_ts = file_git.first_ts
             record.activity = list(file_git.activity)
             record.recent_churn = file_git.recent_churn
+            record.author_buckets = {a: set(b) for a, b in file_git.author_buckets.items()}
         else:
             record.confidence["authorship"] = "unknown"
 
@@ -520,8 +558,12 @@ def analyze(
         for record in analysis.files:
             record.sole_tenant = record.ownership_share >= SOLE_TENANT_SHARE and record.commits >= SOLE_TENANT_MIN_COMMITS
     from .health import finalize_health
+    from .owners import finalize_owners
+    from .testmap import finalize_tests
 
     finalize_health(analysis, git)
+    finalize_owners(analysis, git)
+    finalize_tests(analysis)
     return analysis
 
 

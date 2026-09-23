@@ -61,6 +61,14 @@ class FileGit:
     # only long enough to derive `activity`/`recent_churn` below -- it is not
     # itself exposed past gitmeta.py.
     commit_log: list[tuple[float, int]] = field(default_factory=list)
+    # author -> timestamp of their newest commit to *this* file, so "who to
+    # ask" can prefer the people who worked on it recently over the ones who
+    # wrote it years ago (see analyzer/owners.py).
+    author_last: dict[str, float] = field(default_factory=dict)
+    # author -> the activity buckets (months back from the repo head) in which
+    # they touched this file; summed per district into an active-author trend.
+    author_buckets: dict[str, set[int]] = field(default_factory=dict)
+    _author_log: list[tuple[float, str]] = field(default_factory=list)
     # Filled by `_finalize_activity` once the repo's newest commit is known:
     # monthly commit counts, most recent first, and an exponentially
     # decayed churn score (half-life `HEAT_HALF_LIFE_DAYS`).
@@ -100,6 +108,11 @@ class GitIndex:
     # author -> timestamp of their newest commit anywhere in the repo, so a
     # file's owner can be told apart from an owner who has since moved on.
     author_last_ts: dict[str, float] = field(default_factory=dict)
+    # author name -> every email address they committed with, so CODEOWNERS
+    # handles (which are GitHub logins or emails, not display names) can be
+    # matched to the people git actually records.
+    author_emails: dict[str, set[str]] = field(default_factory=dict)
+    head: str = ""  # the commit the history was read up to
 
     # -- derived confidence signals -------------------------------------
     @property
@@ -132,12 +145,13 @@ def _run_git(root: str, args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
+def read_git_index(root: str, candidates: set[str] | None = None, rev: str | None = None) -> GitIndex:
     """Read all git-derived metrics in one pass.
 
     ``candidates`` is the set of paths the walker decided belong to the project;
     commits are still read in full so coupling can see relationships, but only
-    candidate paths are recorded.
+    candidate paths are recorded. ``rev`` reads the history as of an older
+    commit instead of HEAD (``zion.py --compare``); nothing is checked out.
     """
     index = GitIndex()
 
@@ -146,7 +160,9 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
         index.reason = "not a git working tree"
         return index
 
-    tracked = _run_git(root, ["ls-files"])
+    tracked = (
+        _run_git(root, ["ls-tree", "-r", "--name-only", rev]) if rev else _run_git(root, ["ls-files"])
+    )
     tracked_count = len([p for p in tracked.stdout.decode("utf-8", "replace").split("\n") if p])
     if tracked_count == 0:
         index.reason = "no tracked files"
@@ -158,10 +174,11 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
         root,
         [
             "log",
-            f"--pretty=format:{RECORD}%H{FIELD}%an{FIELD}%aI{FIELD}%s",
+            f"--pretty=format:{RECORD}%H{FIELD}%an{FIELD}%aI{FIELD}%ae{FIELD}%s",
             "--numstat",
             "--no-renames",
             "--date-order",
+            *([rev] if rev else []),
         ],
     )
     if proc.returncode != 0:
@@ -177,9 +194,13 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
             continue
         lines = block.split("\n")
         header = lines[0].split(FIELD)
-        if len(header) < 4:
+        if len(header) < 5:
             continue
-        commit_hash, author, iso_date, message = header[0], header[1], header[2], header[3]
+        commit_hash, author, iso_date, email = header[0], header[1], header[2], header[3]
+        # The subject is last, so a stray separator inside it cannot shift fields.
+        message = FIELD.join(header[4:])
+        if not index.head:
+            index.head = commit_hash
 
         entries: list[tuple[str, int, int]] = []
         for line in lines[1:]:
@@ -210,6 +231,8 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
             dates_seen.add(iso_date[:10])
             if ts > index.author_last_ts.get(author, 0.0):
                 index.author_last_ts[author] = ts
+        if email:
+            index.author_emails.setdefault(author, set()).add(email.lower())
 
         if len(entries) > eligible_limit:
             index.bulk_commits += 1
@@ -237,6 +260,9 @@ def read_git_index(root: str, candidates: set[str] | None = None) -> GitIndex:
                     record.first_author = author
                 record.first_ts = ts if not record.first_ts else min(record.first_ts, ts)
                 record.commit_log.append((ts, added + deleted))
+                record._author_log.append((ts, author))
+                if ts > record.author_last.get(author, 0.0):
+                    record.author_last[author] = ts
             if ts >= record.last_ts:
                 record.last_ts = ts
                 record.last_author = author
@@ -267,8 +293,13 @@ def _finalize_activity(index: "GitIndex") -> None:
             bucket = min(ACTIVITY_BUCKETS - 1, int(days_ago // BUCKET_DAYS))
             record.activity[bucket] += 1
             record.recent_churn += churn * (0.5 ** (days_ago / HEAT_HALF_LIFE_DAYS))
-        # The raw log is only a scratch pad for the two derived fields above.
+        for ts, author in record._author_log:
+            days_ago = max(0.0, (now - ts) / 86400.0)
+            if days_ago < ACTIVITY_BUCKETS * BUCKET_DAYS:
+                record.author_buckets.setdefault(author, set()).add(int(days_ago // BUCKET_DAYS))
+        # The raw logs are only a scratch pad for the derived fields above.
         record.commit_log = []
+        record._author_log = []
 
 
 def _iso_to_ts(iso: str) -> float:
