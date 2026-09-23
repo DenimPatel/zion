@@ -18,8 +18,14 @@
 
 <div id="hud">
   <header id="titlebar">
-    <h1 id="city-name">Zion</h1>
-    <p id="city-subtitle">loading&hellip;</p>
+    <div id="titlebar-text">
+      <h1 id="city-name">Zion</h1>
+      <p id="city-subtitle">loading&hellip;</p>
+    </div>
+    <button id="panels-toggle" type="button" aria-pressed="false"
+            aria-controls="legend xray" title="Toggle legend and keys (L)">
+      <span id="panels-toggle-label">Hide legend &amp; keys</span>
+    </button>
   </header>
 
   <section id="legend" aria-label="Legend">
@@ -40,6 +46,8 @@
   <section id="xray" aria-label="Legend key">
     <h2>Keys</h2>
     <table id="xray-table"></table>
+    <button id="xray-reset" type="button" hidden>Show every form</button>
+    <p id="xray-hint" class="hint">Click a row to show or hide that form.</p>
   </section>
 
   <section id="cityhall" hidden aria-label="City Hall">
