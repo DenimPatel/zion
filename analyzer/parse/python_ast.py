@@ -148,6 +148,45 @@ def _entrypoint_names(tree: ast.AST) -> set[str]:
     return names
 
 
+_ABSTRACT_BASES = {"ABC", "ABCMeta", "Protocol"}
+
+
+def _name_of(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript):  # Protocol[T], Generic[T]
+        return _name_of(node.value)
+    return ""
+
+
+def _abstractness(tree: ast.AST) -> tuple[int, int]:
+    """(classes, abstract classes) anywhere in the module.
+
+    Abstract means declared so: an ``ABC``/``Protocol`` base, an ``ABCMeta``
+    metaclass, or at least one ``@abstractmethod``. Exact, since it is read
+    off the AST rather than guessed from names.
+    """
+    classes = 0
+    abstract = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        classes += 1
+        bases = {_name_of(b) for b in node.bases}
+        meta = {_name_of(k.value) for k in node.keywords if k.arg == "metaclass"}
+        decorated = any(
+            _name_of(d) in ("abstractmethod", "abstractproperty")
+            for child in node.body
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for d in child.decorator_list
+        )
+        if bases & _ABSTRACT_BASES or meta & _ABSTRACT_BASES or decorated:
+            abstract += 1
+    return classes, abstract
+
+
 def parse_python(source: str) -> ParseResult:
     tree = ast.parse(source)
     comments = _comment_lines(source)
@@ -180,6 +219,7 @@ def parse_python(source: str) -> ParseResult:
                     floors.append(method)
                     symbols += 1
 
+    classes, abstract = _abstractness(tree)
     return ParseResult(
         language="python",
         logical_loc=logical,
@@ -188,4 +228,6 @@ def parse_python(source: str) -> ParseResult:
         doc_lines=len(comments | docstrings),
         confidence="high",
         imports=_imports_from(tree),
+        classes=classes,
+        abstract_classes=abstract,
     )

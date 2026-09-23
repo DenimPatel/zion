@@ -16,6 +16,7 @@ skybridges -- so bulk commits are excluded from coupling by an explicit rule.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,21 @@ BUCKET_DAYS = 30.0
 # used before this) and *recent* churn tell different stories.
 HEAT_HALF_LIFE_DAYS = 30.0
 
+# A commit whose subject says it repairs something. Conventional-commit
+# prefixes (`fix:`, `fix(api):`), the words people actually write, and issue
+# references with a closing verb. Deliberately narrow: "prefix" and "debug"
+# are not fixes, which is why every word is anchored on a boundary.
+FIX_RE = re.compile(
+    r"^(?:fix|hotfix|bugfix)(?:\([^)]*\))?!?:"
+    r"|\b(?:fix(?:e[sd])?|fixing|bug|bugs|hotfix|bugfix|regression|revert(?:s|ed)?|patch(?:e[sd])?|crash(?:es)?)\b"
+    r"|\b(?:close[sd]?|resolve[sd]?)\s+#\d+",
+    re.IGNORECASE,
+)
+
+
+def is_fix(message: str) -> bool:
+    return bool(FIX_RE.search(message or ""))
+
 
 @dataclass
 class FileGit:
@@ -57,6 +73,7 @@ class FileGit:
     # walked (renames are not followed, so a moved file is "made" by the move).
     first_author: str = ""
     hashes: list[str] = field(default_factory=list)
+    fix_commits: int = 0  # commits whose subject reads as a fix (see FIX_RE)
     # (timestamp, added+deleted) for every commit touching this file. Kept
     # only long enough to derive `activity`/`recent_churn` below -- it is not
     # itself exposed past gitmeta.py.
@@ -113,6 +130,7 @@ class GitIndex:
     # matched to the people git actually records.
     author_emails: dict[str, set[str]] = field(default_factory=dict)
     head: str = ""  # the commit the history was read up to
+    fix_commits: int = 0  # repo-wide, for the defect degeneration rule
 
     # -- derived confidence signals -------------------------------------
     @property
@@ -224,6 +242,9 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
             continue
 
         index.commit_count += 1
+        fix = is_fix(message)
+        if fix:
+            index.fix_commits += 1
         ts = _iso_to_ts(iso_date)
         if ts:
             index.first_ts = ts if not index.first_ts else min(index.first_ts, ts)
@@ -255,6 +276,8 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
             record.added += added
             record.deleted += deleted
             record.hashes.append(commit_hash)
+            if fix:
+                record.fix_commits += 1
             if ts:
                 if not record.first_ts or ts <= record.first_ts:
                     record.first_author = author

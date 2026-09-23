@@ -337,6 +337,22 @@ class FileMetrics:
     delta: str = ""  # "" | "added" | "grown" | "shrunk"
     loc_delta: int = 0
     became: list[str] = field(default_factory=list)  # signals gained since the baseline
+    # Deeper signals (health.py, architecture.py, clones.py, owners.py).
+    fix_commits: int = 0  # commits whose subject reads as a fix
+    fix_ratio: float = 0.0  # fix_commits / commits
+    is_defect: bool = False  # defect-prone: fix ratio in the top decile, enough commits to say so
+    trend: int = 0  # -1 cooling, 0 steady, 1 rising: last quarter's commits against the one before
+    is_rising_hotspot: bool = False  # a hotspot that is getting busier
+    is_hub: bool = False  # top decile of both fan-in and fan-out: a change ripples both ways
+    import_depth: int = 0  # longest chain of imports reachable from this file (cycles collapsed)
+    classes: int = 0
+    abstract_classes: int = 0
+    debt: list[tuple[int, str, str]] = field(default_factory=list)  # (line, marker, text)
+    fingerprints: list[int] = field(default_factory=list)  # scratch for clones.py, emptied after
+    clone_of: list[tuple[str, float]] = field(default_factory=list)  # (other rel, shared ratio)
+    is_clone: bool = False
+    hidden_coupling: list[tuple[str, int]] = field(default_factory=list)  # (other rel, co-commits)
+    is_hidden_coupling: bool = False
 
     @property
     def weight(self) -> float:
@@ -368,6 +384,15 @@ class RepoFlags:
     tests: bool = False
     complexity: bool = False
     delta: bool = False
+    # Deeper signals.
+    defects: bool = False
+    trend: bool = False
+    hubs: bool = False
+    debt: bool = False
+    abstractness: bool = False
+    hidden_coupling: bool = False
+    clones: bool = False
+    teams: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -386,6 +411,14 @@ class RepoFlags:
             "tests": self.tests,
             "complexity": self.complexity,
             "delta": self.delta,
+            "defects": self.defects,
+            "trend": self.trend,
+            "hubs": self.hubs,
+            "debt": self.debt,
+            "abstractness": self.abstractness,
+            "hiddenCoupling": self.hidden_coupling,
+            "clones": self.clones,
+            "teams": self.teams,
             "notes": list(self.notes),
         }
 
@@ -405,6 +438,8 @@ class RepoAnalysis:
     architecture: object = None  # architecture.Architecture, once a layout exists
     codeowners_path: str = ""
     delta: dict | None = None  # history.apply_delta's result, when a baseline exists
+    clones: list[tuple[str, str, float, int]] = field(default_factory=list)  # clones.py pairs
+    hidden_couplings: list[tuple[str, str, int]] = field(default_factory=list)  # architecture.py
 
     @property
     def total_logical_loc(self) -> int:
@@ -521,6 +556,10 @@ def analyze(
         )
 
         record.raw_imports = result.imports
+        record.classes = result.classes
+        record.abstract_classes = result.abstract_classes
+        record.debt = list(result.debt)
+        record.fingerprints = result.fingerprints
 
         file_git = git.files.get(entry.rel)
         if file_git is not None:
@@ -537,6 +576,8 @@ def analyze(
             record.activity = list(file_git.activity)
             record.recent_churn = file_git.recent_churn
             record.author_buckets = {a: set(b) for a, b in file_git.author_buckets.items()}
+            record.fix_commits = file_git.fix_commits
+            record.fix_ratio = round(file_git.fix_commits / file_git.commits, 3) if file_git.commits else 0.0
         else:
             record.confidence["authorship"] = "unknown"
 
@@ -561,9 +602,12 @@ def analyze(
     from .owners import finalize_owners
     from .testmap import finalize_tests
 
+    from .clones import finalize_clones
+
     finalize_health(analysis, git)
     finalize_owners(analysis, git)
     finalize_tests(analysis)
+    finalize_clones(analysis)
     return analysis
 
 

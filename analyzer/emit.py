@@ -139,6 +139,37 @@ LEGEND_SPEC = [
      "A survey stake marks a file that changed since the baseline -- the previous build into this directory, or "
      "the revision given to --compare: green for added, blue for grown, grey for shrunk by 10% or more. The "
      "Health tab lists what became a hotspot, joined a cycle or broke a rule since."),
+    ("defects", "High share of fix commits -> red warning lamp", "ratio", "Health",
+     "A red warning lamp on the roof: an unusually large share of this file's commits read as fixes (\"fix\", "
+     "\"bug\", \"hotfix\", \"revert\", \"closes #12\"). Top decile of the repository, at least five commits and two "
+     "fixes. Bugs cluster; this is where the next one is most likely."),
+    ("hubs", "Top 10% of both importers and imports -> steel collar", "edges", "Structure",
+     "A steel collar rings a hub: a file in the top tenth of the repository both for how many files import it and "
+     "for how many it imports. A change there ripples up and down the import graph at once. Split it along its "
+     "callers."),
+    ("debt", "TODO / FIXME / HACK comments -> yellow tags", "count", "Health",
+     "Yellow tags hang on the facade of a file whose comments carry TODO, FIXME, HACK or XXX markers, one per "
+     "marker up to five. The report lists each one with its line. Debt that was written down."),
+    ("trend", "Last quarter's commits vs the quarter before -> trend lens", "commits", "Construction & time",
+     "Rising, steady or cooling: the commits in the last three months against the three before. A hotspot that "
+     "is rising is the refactor that gets more expensive every week. Filter tab: colour by trend, or is:rising."),
+    ("hidden_coupling", "Changed together, no import -> dashed arcs from the selected building", "pairs",
+     "Structure",
+     "Two files in different folders that change in the same commits at least half the time although neither "
+     "imports the other. The dependency is real -- a format, a protocol, a copy -- but the code does not say "
+     "so. Select a building to see its partners as dashed violet arcs."),
+    ("clones", "Copied code -> twin links from the selected building", "pairs", "Structure",
+     "Two files that share a long run of near-identical code, found by fingerprinting the normalised source "
+     "(renamed variables and reformatting still match). A fix made in one is easily missed in the other. "
+     "Select a building to see its twins linked in cyan."),
+    ("abstractness", "Abstract share vs instability -> the main sequence", "ratio", "Structure",
+     "For each folder, A is the share of its type definitions that are abstract (interfaces, ABCs, protocols) and "
+     "D = |A + I - 1| its distance from the main sequence. Stable and concrete is the zone of pain: everything "
+     "leans on it and nothing in it bends. City Hall plots every folder; the Filter tab colours by it."),
+    ("teams", "Recent authors per folder -> coordination cost", "authors", "People",
+     "How many people worked in a folder in the last three months, how much of its work also had to touch "
+     "another folder in the same commit, and whether anyone leads it. Many recent authors and nobody above 40% "
+     "is \"many cooks\". Shown in the folder's inspector."),
     ("timeline", "First commit dates -> the History slider", "days", "Construction & time",
      "Drag the History slider, or press play, and the city is rebuilt as it stood on that day: files appear on the "
      "day of their first commit and burn with that month's commits."),
@@ -279,7 +310,19 @@ def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
         "untested": ids(lists["untested"]),
         "drift": ids(lists["drift"]),
         "complexity": ids(lists["complexity"]),
+        "defects": ids(lists["defects"]),
+        "rising": ids(lists["rising"]),
+        "hubs": ids(lists["hubs"]),
+        "debt": ids(lists["debt"]),
+        "clones": [ids(pair) for pair in lists["clones"]],
+        "hiddenCoupling": [ids(pair) for pair in lists["hiddenCoupling"]],
         "totals": {
+            "defects": sum(1 for f in analysis.files if f.is_defect),
+            "rising": sum(1 for f in analysis.files if f.is_rising_hotspot),
+            "hubs": sum(1 for f in analysis.files if f.is_hub),
+            "debt": sum(len(f.debt) for f in analysis.files),
+            "clones": len(analysis.clones),
+            "hiddenCoupling": len(analysis.hidden_couplings),
             "violations": sum(1 for f in analysis.files if f.is_violation),
             "untested": sum(1 for f in analysis.files if f.untested_risk),
             "drift": sum(1 for f in analysis.files if f.owner_drift),
@@ -369,6 +412,21 @@ def _district_extras(key: str, members: list[FileMetrics], arch, strings: String
         "unowned": sum(1 for f in members if f.is_unowned),
         "braced": sum(1 for f in members if f.is_braced),
         "changed": sum(1 for f in members if f.delta) if flags.delta else 0,
+        # The deeper signals, per folder.
+        "classes": deps.classes if deps else 0,
+        "abstractClasses": deps.abstract_classes if deps else 0,
+        "abstractness": deps.abstractness if deps and deps.abstractness is not None else -1,
+        "distance": deps.distance if deps and deps.distance is not None else -1,
+        "zone": deps.zone if deps else "",
+        "recentAuthors": deps.recent_authors if deps else 0,
+        "crossShare": deps.cross_share if deps else 0.0,
+        "topShare": deps.top_share if deps else 0.0,
+        "manyCooks": bool(deps and deps.many_cooks),
+        "defects": sum(1 for f in members if f.is_defect),
+        "rising": sum(1 for f in members if f.is_rising_hotspot),
+        "hubs": sum(1 for f in members if f.is_hub),
+        "clones": sum(1 for f in members if f.is_clone),
+        "debt": sum(len(f.debt) for f in members),
     }
 
 
@@ -474,6 +532,14 @@ def build_manifest(
         "experts": flags.authorship,
         "delta": flags.delta,
         "timeline": flags.age,
+        "defects": flags.defects,
+        "hubs": flags.hubs,
+        "debt": flags.debt,
+        "trend": flags.trend,
+        "hidden_coupling": flags.hidden_coupling,
+        "clones": flags.clones,
+        "abstractness": flags.abstractness,
+        "teams": flags.teams,
     }
     for entry_id, label, unit, group, description in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -791,6 +857,11 @@ FLAG_GROWN = 1 << 19
 FLAG_SHRUNK = 1 << 20
 FLAG_BRACED = 1 << 21
 FLAG_UNOWNED = 1 << 22
+FLAG_DEFECT = 1 << 23
+FLAG_RISING = 1 << 24
+FLAG_HUB = 1 << 25
+FLAG_CLONE = 1 << 26
+FLAG_HIDDEN_COUPLING = 1 << 27
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
@@ -799,6 +870,8 @@ INDEX_COLUMNS = [
     "id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path",
     # Appended for the richer query tokens (owner:, cx>, fanin>, fanout>, delta>).
     "owner", "cx", "fanin", "fanout", "delta",
+    # Appended for the deeper signals (fixes>, trend, todo>, depth>).
+    "fixes", "trend", "debt", "depth",
 ]
 
 
@@ -926,6 +999,22 @@ def _building_record(
         "delta": record.delta,
         "locDelta": record.loc_delta,
         "became": list(record.became),
+        # The deeper signals (health.py, architecture.py, clones.py).
+        "fixCommits": record.fix_commits,
+        "fixRatio": record.fix_ratio,
+        "isDefect": record.is_defect,
+        "trend": record.trend,
+        "risingHotspot": record.is_rising_hotspot,
+        "isHub": record.is_hub,
+        "importDepth": record.import_depth,
+        "classes": record.classes,
+        "abstractClasses": record.abstract_classes,
+        # Comment text goes through the string table: a locked city shows the
+        # count and the line, never what the comment said.
+        "debt": [[line, marker, strings.add(text) if text else -1] for line, marker, text in record.debt],
+        # Partners are building ids, so an encrypted city leaks no path.
+        "cloneOf": [[order[o], ratio] for o, ratio in record.clone_of if o in order],
+        "hiddenCoupling": [[order[o], count] for o, count in record.hidden_coupling if o in order],
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
         "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
@@ -1004,6 +1093,16 @@ def _build_index(
             flags |= FLAG_BRACED
         if record.is_unowned:
             flags |= FLAG_UNOWNED
+        if record.is_defect:
+            flags |= FLAG_DEFECT
+        if record.is_rising_hotspot:
+            flags |= FLAG_RISING
+        if record.is_hub:
+            flags |= FLAG_HUB
+        if record.is_clone:
+            flags |= FLAG_CLONE
+        if record.is_hidden_coupling:
+            flags |= FLAG_HIDDEN_COUPLING
         rows.append(
             [
                 index,
@@ -1022,6 +1121,10 @@ def _build_index(
                 record.import_in_degree,
                 len(record.imports_resolved),
                 record.loc_delta,
+                record.fix_commits,
+                record.trend,
+                len(record.debt),
+                record.import_depth,
             ]
         )
     rows.sort(key=lambda row: row[0])

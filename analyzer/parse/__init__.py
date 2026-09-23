@@ -16,6 +16,7 @@ because a city with a missing building is worse than a city with a plain one.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------
@@ -57,6 +58,17 @@ class ParseResult:
     # specifiers only ("./foo", "../bar/baz") -- a bare package name like
     # 'react' cannot resolve to a repo file and is not worth carrying.
     imports: list[str] = field(default_factory=list)
+    # Abstractness (architecture.py's A in Martin's A/I/D): type definitions
+    # found, and how many of them are abstract -- an ABC/Protocol or a class
+    # with an @abstractmethod in Python (exact), `interface`/`trait`/
+    # `protocol`/`abstract class` in brace languages (a keyword count, medium).
+    classes: int = 0
+    abstract_classes: int = 0
+    # Debt markers in comments: (line, marker, text) for TODO/FIXME/HACK/XXX.
+    debt: list[tuple[int, str, str]] = field(default_factory=list)
+    # Winnowed fingerprints of the normalised source, for clone detection
+    # (analyzer/clones.py); empty for anything that is not code.
+    fingerprints: list[int] = field(default_factory=list)
 
 
 DOC_TRUNCATE = 160
@@ -161,11 +173,56 @@ def generic_parse(source: str, language: str) -> ParseResult:
     )
 
 
+# Languages whose comments are scanned for debt markers and whose source is
+# fingerprinted for clones: code, not prose, config or data.
+CODE_LANGUAGES = {
+    "python", "javascript", "typescript", "java", "go", "c", "cpp", "csharp", "rust", "kotlin",
+    "swift", "php", "scala", "dart", "objectivec", "groovy", "solidity", "zig", "ruby", "shell",
+    "lua", "perl", "r", "julia", "sql", "vue", "svelte",
+}
+DEBT_LIMIT = 50
+# A marker counts only inside a comment, and only as a marker: the first word
+# after the comment opener (`# TODO fix`, `// FIXME(ana): ...`, `/* HACK */`),
+# or anywhere in the comment when a colon or owner follows (`# see TODO: x`).
+# A comment that merely mentions the word is not debt, and `todo_list = []`
+# is not a comment.
+_DEBT_RE = re.compile(
+    r"(?:#|//|/\*+|^\s*\*|--|<!--)\s*@?(TODO|FIXME|HACK|XXX)\b(?:\([^)]*\))?[:\s]*([^\n]*)"
+    r"|(?:#|//|/\*|^\s*\*|--|<!--)[^\n]*?\b(TODO|FIXME|HACK|XXX)(?:\([^)]*\))?:\s*([^\n]*)"
+)
+
+
+def scan_debt(source: str) -> list[tuple[int, str, str]]:
+    """TODO/FIXME/HACK/XXX markers in comments, with the text after them."""
+    found: list[tuple[int, str, str]] = []
+    if "TODO" not in source and "FIXME" not in source and "HACK" not in source and "XXX" not in source:
+        return found
+    for number, line in enumerate(source.splitlines(), 1):
+        match = _DEBT_RE.search(line)
+        if not match:
+            continue
+        marker = match.group(1) or match.group(3)
+        text = (match.group(2) if match.group(1) else match.group(4)) or ""
+        text = text.strip().rstrip("*/-> ").strip()
+        found.append((number, marker, _shorten(text, 100)))
+        if len(found) >= DEBT_LIMIT:
+            break
+    return found
+
+
 def parse_text(name: str, source: str) -> ParseResult:
     """Parse a decoded text file.  Never raises."""
     result = _parse_text_inner(name, source)
     if not result.physical_lines:
         result.physical_lines = _count_physical(source)
+    if result.language in CODE_LANGUAGES:
+        try:
+            result.debt = scan_debt(source)
+            from ..clones import fingerprint
+
+            result.fingerprints = fingerprint(source)
+        except Exception:  # pragma: no cover - extras never break a parse
+            pass
     return result
 
 

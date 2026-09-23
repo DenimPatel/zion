@@ -20,6 +20,17 @@ each is gated on the same degeneration flag as the data it stands on:
   one import in this repo *did* resolve.
 - **Import cycle**: strongly connected components of the resolved import
   graph with more than one member.
+- **Defect-prone**: an unusually high share of the file's commits read as
+  fixes (`gitmeta.FIX_RE`). Top decile, at least five commits and two fixes,
+  and only when the repo's commit subjects say "fix" often enough to mean it.
+- **Trend**: the last quarter's commits against the quarter before; a
+  hotspot that is *rising* is the refactor that gets more expensive by the
+  week.
+- **Hub**: top decile of both fan-in and fan-out -- a change there ripples
+  up and down the import graph at once.
+- **Import depth**: the longest chain of imports reachable from a file, with
+  cycles collapsed to one step. Deep chains are where a leaf change travels.
+- **Debt markers**: TODO/FIXME/HACK/XXX comments, counted per file.
 
 Vendored third-party code (`vendor/`, `third_party/`, `*.min.js`, ...) is left
 out of every signal: it is not this repository's to split or own.
@@ -36,6 +47,16 @@ OVERSIZED_MIN_LOC = 400
 STALE_DAYS = 180.0
 OWNER_AWAY_DAYS = 180.0
 REVIEW_LIMIT = 15
+MIN_HISTORY_COMMITS = 10
+DEFECT_PERCENTILE = 0.9
+DEFECT_MIN_COMMITS = 5
+DEFECT_MIN_FIXES = 2
+DEFECT_MIN_RATIO = 0.3
+DEFECT_REPO_SHARE = 0.05  # at least 5% of all commits must read as fixes
+TREND_MONTHS = 3  # a quarter, in gitmeta's 30-day buckets
+TREND_MIN_SPAN_DAYS = 150.0
+HUB_PERCENTILE = 0.9
+HUB_MIN_DEGREE = 3
 
 # Third-party code copied into the tree: not this repository's to refactor, so
 # it is never a hotspot, oversized, an orphan or a knowledge risk.
@@ -198,6 +219,14 @@ def finalize_health(analysis, git) -> None:
             record.is_hotspot = rank <= cutoff
     flags.hotspots = flags.churn and any(f.is_hotspot for f in files)
 
+    _finalize_defects(analysis, git, code)
+    _finalize_trend(analysis, git, code)
+    # Vendored code's TODOs are its upstream's, not this repository's.
+    for record in files:
+        if record.debt and is_vendored(record.rel):
+            record.debt = []
+    flags.debt = any(f.debt for f in code)
+
     # -- imports: orphans and cycles -----------------------------------------
     flags.imports = any(f.imports_resolved for f in files)
     # A submodule importing its own package's __init__ (to reach a re-export)
@@ -236,6 +265,114 @@ def finalize_health(analysis, git) -> None:
                 record.cycle_id = cycle_id
                 record.cycle_size = len(members)
 
+    _finalize_hubs(analysis, code)
+    _finalize_depth(analysis, edges, by_rel)
+
+
+def _finalize_defects(analysis, git, code) -> None:
+    """Defect-prone files: an unusually high share of fix commits."""
+    flags = analysis.flags
+    total = git.commit_count if git is not None and git.available else 0
+    fixes = getattr(git, "fix_commits", 0) if git is not None else 0
+    flags.defects = bool(total >= MIN_HISTORY_COMMITS and fixes >= 3 and fixes >= total * DEFECT_REPO_SHARE)
+    if not flags.defects:
+        if total >= MIN_HISTORY_COMMITS:
+            flags.notes.append("Too few commit subjects read as fixes - defect-prone flags disabled.")
+        return
+    busy = [f for f in code if f.commits >= DEFECT_MIN_COMMITS and not is_vendored(f.rel)]
+    ranks = _rank([(f.rel, f.fix_ratio) for f in busy])
+    for record in busy:
+        record.is_defect = (
+            ranks.get(record.rel, 0.0) >= DEFECT_PERCENTILE
+            and record.fix_commits >= DEFECT_MIN_FIXES
+            and record.fix_ratio >= DEFECT_MIN_RATIO
+        )
+    flags.defects = any(f.is_defect for f in busy)
+
+
+def _finalize_trend(analysis, git, code) -> None:
+    """Rising, steady or cooling: the last quarter against the one before."""
+    flags = analysis.flags
+    available = git is not None and git.available
+    span = (git.last_ts - git.first_ts) / 86400.0 if available else 0.0
+    # Its own rule, not the crane's: a history of one-file commits still has
+    # a shape over time.
+    flags.trend = bool(available and git.commit_count >= MIN_HISTORY_COMMITS and span >= TREND_MIN_SPAN_DAYS)
+    if not flags.trend:
+        return
+    for record in code:
+        activity = record.activity or []
+        recent = sum(activity[:TREND_MONTHS])
+        before = sum(activity[TREND_MONTHS : TREND_MONTHS * 2])
+        if recent >= 2 and recent >= before * 1.5 + 1:
+            record.trend = 1
+        elif before >= 2 and recent * 2 <= before:
+            record.trend = -1
+        record.is_rising_hotspot = record.is_hotspot and record.trend == 1
+
+
+def _finalize_hubs(analysis, code) -> None:
+    """Hubs: top decile of both fan-in and fan-out, past an absolute floor."""
+    eligible = [f for f in code if not is_vendored(f.rel) and not f.is_test]
+    fan_in = _rank([(f.rel, float(f.import_in_degree)) for f in eligible if f.import_in_degree > 0])
+    fan_out = _rank([(f.rel, float(len(f.imports_resolved))) for f in eligible if f.imports_resolved])
+    for record in eligible:
+        record.is_hub = (
+            record.import_in_degree >= HUB_MIN_DEGREE
+            and len(record.imports_resolved) >= HUB_MIN_DEGREE
+            and fan_in.get(record.rel, 0.0) >= HUB_PERCENTILE
+            and fan_out.get(record.rel, 0.0) >= HUB_PERCENTILE
+        )
+    analysis.flags.hubs = any(f.is_hub for f in eligible)
+
+
+def _finalize_depth(analysis, edges: dict[str, set[str]], by_rel: dict) -> None:
+    """Longest import chain from every file, on the graph with cycles collapsed.
+
+    Iterative, so a 50,000-file repository cannot hit the recursion limit.
+    """
+    component: dict[str, int] = {}
+    for cycle_id, members in enumerate(analysis.cycles, start=1):
+        for rel in members:
+            component[rel] = -cycle_id
+    nodes = set(edges) | {t for targets in edges.values() for t in targets}
+    ids = {}
+    for rel in sorted(nodes):
+        key = component.get(rel)
+        ids[rel] = key if key is not None else len(ids) + 1
+    dag: dict[int, set[int]] = {}
+    for source, targets in edges.items():
+        a = ids[source]
+        for target in targets:
+            b = ids[target]
+            if a != b:
+                dag.setdefault(a, set()).add(b)
+    depth: dict[int, int] = {}
+    for start in dag:
+        if start in depth:
+            continue
+        stack = [(start, iter(dag.get(start, ())))]
+        on_path = {start}
+        while stack:
+            node, children = stack[-1]
+            advanced = False
+            for child in children:
+                if child in depth or child in on_path:
+                    continue
+                stack.append((child, iter(dag.get(child, ()))))
+                on_path.add(child)
+                advanced = True
+                break
+            if advanced:
+                continue
+            stack.pop()
+            on_path.discard(node)
+            depth[node] = 1 + max((depth.get(c, 0) for c in dag.get(node, ())), default=-1)
+    for rel, key in ids.items():
+        record = by_rel.get(rel)
+        if record is not None:
+            record.import_depth = max(0, depth.get(key, 0))
+
 
 def review(analysis) -> dict:
     """The ranked lists City Hall's Architect's review shows, as file paths."""
@@ -256,4 +393,11 @@ def review(analysis) -> dict:
         "untested": top(lambda f: f.untested_risk, lambda f: (f.hotspot_rank or 10**9, -f.logical_loc, f.rel)),
         "drift": top(lambda f: f.owner_drift, lambda f: (-f.logical_loc, f.rel)),
         "complexity": top(lambda f: f.is_braced, lambda f: (-f.brace_complexity, f.rel)),
+        # The deeper layer.
+        "defects": top(lambda f: f.is_defect, lambda f: (-f.fix_ratio, -f.fix_commits, f.rel)) if flags.defects else [],
+        "rising": top(lambda f: f.is_rising_hotspot, lambda f: (f.hotspot_rank, f.rel)) if flags.trend else [],
+        "hubs": top(lambda f: f.is_hub, lambda f: (-(f.import_in_degree + len(f.imports_resolved)), f.rel)),
+        "debt": top(lambda f: bool(f.debt), lambda f: (-len(f.debt), f.rel)) if flags.debt else [],
+        "clones": [[a, b] for a, b, _, _ in getattr(analysis, "clones", [])[:REVIEW_LIMIT]],
+        "hiddenCoupling": [[a, b] for a, b, _ in getattr(analysis, "hidden_couplings", [])[:REVIEW_LIMIT]],
     }
