@@ -55,8 +55,32 @@ const WINDOWED = new Set(['tower', 'slab', 'warehouse', 'silo', 'town_hall', 'ru
 
 const LANDMARK_SCALE = { town_hall: 1.15 };
 
-/** Archetypes whose geometry carries its own per-vertex colour zones. */
-const VERTEX_COLOURED = new Set(['town_hall']);
+/**
+ * Archetypes whose detailed geometry carries per-vertex material colours: every
+ * form. Massing forms are painted by part (a stone podium, a darker setback, a
+ * metal crown, pale trim) over their archetype colour; parks, monuments and
+ * the town hall paint every piece (lawn, water, marble, bronze, roof tiles).
+ * The colours show only under the archetype lens -- any data lens turns them
+ * off so each building is one flat colour again (see `recolour`).
+ */
+const PAINTED = new Set(['tower', 'slab', 'warehouse', 'silo', 'monument', 'town_hall', 'park', 'ruin']);
+
+/**
+ * Forms whose paint *is* their colour: multiplying a green lawn by a green
+ * instance colour would go muddy, so under the archetype lens their detailed
+ * tier takes a near-white base, still leaning toward its author's tint. The
+ * town hall is not one of them: its stone was designed under its gold.
+ */
+const SELF_COLOURED = new Set(['park', 'monument']);
+const PAINTED_BASE = 0xf2efe8;
+
+/** The instance colour the archetype lens gives one building. */
+function baseColourFor(THREE, archetype, detailed, multicolour, author) {
+  if (detailed && multicolour && SELF_COLOURED.has(archetype)) {
+    return tintFor(THREE, PAINTED_BASE, author, author ? 0.25 : 0);
+  }
+  return tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0);
+}
 
 /**
  * Where a flat roof actually is, as a fraction of the building's height.
@@ -358,6 +382,9 @@ export class CityMesh {
     const option = (name, fallback) =>
       options[name] === undefined ? fallback : Boolean(options[name]);
     const authorTint = option('authorTint', flag('authorship'));
+    // Material colours under the archetype lens; one flat colour under any other.
+    this.multicolour = options.multicolour === undefined ? true : Boolean(options.multicolour);
+    const multicolour = this.multicolour;
     const litCap = options.litCap === undefined ? 1 : options.litCap;
 
     // Level of detail: one instanced mesh per archetype per tier, so draw calls
@@ -450,12 +477,12 @@ export class CityMesh {
         metalness: archetype === 'monument' ? 0.5 : 0.08,
         emissive: new THREE.Color(0xffffff),
         emissiveIntensity: 0,
-        // A town hall paints its own stone, trim, roof and glazing in vertex
-        // colours -- see `civic.js` -- so one material can carry the material
-        // separation that makes City Hall read as built rather than extruded.
-        // Only the detailed tier: the far tier is a plain box with no colour
-        // attribute, and a material that expects one renders it black.
-        vertexColors: detailed && VERTEX_COLOURED.has(archetype),
+        // Every detailed form paints its own materials in vertex colours --
+        // see `parts/` -- so one material can carry the separation that makes a
+        // building read as built rather than extruded. Only the detailed tier:
+        // the far tier is a plain box with no colour attribute, and a material
+        // that expects one renders it black. Off under a data lens.
+        vertexColors: detailed && multicolour && PAINTED.has(archetype),
       });
       patchFacade(material, { hasWindows: WINDOWED.has(archetype), detail: detailed });
 
@@ -504,7 +531,7 @@ export class CityMesh {
         mesh.setMatrixAt(index, matrix);
 
         const author = authorTint ? this.source.s(building.author) : '';
-        colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+        colour.copy(baseColourFor(THREE, archetype, detailed, multicolour, author));
         // Downtown: a glass tint on top of whatever archetype/author colour
         // already applies, so "this file is structurally central" reads
         // alongside the existing tint rather than replacing it.
@@ -895,11 +922,21 @@ export class CityMesh {
     const manifest = this.source.manifest;
     const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
     const colour = new THREE.Color();
+    // Materials read only under the archetype lens: a data lens is a single
+    // colour per building, so the paint is switched off rather than tinted.
+    const multicolour = !lens || lens === 'archetype';
+    this.multicolour = multicolour;
 
     for (const [uuid, members] of this.records) {
       const mesh = this.meshes.get(uuid);
       if (!mesh || !mesh.userData.baseColors) continue;
       const archetype = mesh.name.replace(/^buildings-/, '').replace(/-far$/, '');
+      const detailed = !mesh.name.endsWith('-far');
+      const painted = detailed && PAINTED.has(archetype) && Boolean(mesh.geometry.attributes.color);
+      if (painted && mesh.material.vertexColors !== multicolour) {
+        mesh.material.vertexColors = multicolour;
+        mesh.material.needsUpdate = true;
+      }
       const base = mesh.userData.baseColors;
       members.forEach((building, index) => {
         if (lens === 'language') {
@@ -934,7 +971,7 @@ export class CityMesh {
           colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
         } else {
           const author = authorTint ? this.source.s(building.author) : '';
-          colour.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+          colour.copy(baseColourFor(THREE, archetype, detailed, multicolour, author));
           const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
           if (downtownEligible && building.downtown) colour.lerp(new THREE.Color(0x8fd6ff), 0.4);
         }

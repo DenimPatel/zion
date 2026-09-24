@@ -77,12 +77,13 @@ LEGEND_SPEC = [
     ("town_hall", "README in folder -> Town Hall", "bool", "Civic",
      "A folder with its own README gets a Town Hall. A neighbourhood without one has no public notice board."),
     ("parks", "Test files -> parks", "bool", "Civic",
-     "Test code is green space: low parks, not towers."),
+     "Test code is green space: low parks, not towers. Under the archetype colour lens a park is drawn in its own "
+     "materials -- lawn, paving, water, hedges, trees and a bandstand; any other lens paints it one flat colour."),
     ("silos", "Data files -> silos (height = rows)", "rows", "Civic",
      "CSV/TSV/JSONL and other data files are silos. Height is rows, streamed and counted, never loaded."),
     ("monuments", "Binary artefacts -> monuments", "bool", "Civic",
      "Images, archives and other binaries are monuments. They have no floors because there is no source to "
-     "read."),
+     "read. Under the archetype lens they are granite, marble and bronze; any other lens paints them one colour."),
     ("downtown", "Co-change degree + import in-degree + heat + author count -> downtown towers", "percentile", "Civic",
      "The most central 5% of files, by how many files change with them, import them, how hot they are and "
      "how many people touch them. They get glass and an antenna. Changes here ripple furthest."),

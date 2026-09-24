@@ -242,3 +242,26 @@ export function mergeColouredParts(THREE, parts) {
   merged.computeBoundingSphere();
   return merged;
 }
+
+/**
+ * Paint a merged massing by its part tags: one colour per PART_* slot, read
+ * from the packed `aMassing` attribute `mergeParts` already writes. For the
+ * forms whose pieces are tagged by what they are -- a podium, a shaft, a
+ * setback band, a crown, a cornice -- this gives each its own finish without
+ * touching a single piece. `palette` is indexed by part (BODY, SETBACK, CROWN,
+ * PODIUM, FIXED); like `paint`, each colour is a multiplier over the instance
+ * colour, so BODY near 1 leaves the wall to the archetype and author tint.
+ */
+export function paintByPart(THREE, geometry, palette) {
+  const massing = geometry.attributes.aMassing.array;
+  const count = geometry.attributes.position.count;
+  const color = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const rgb = palette[Math.round(massing[i * 3])] || palette[PART_BODY];
+    color[i * 3] = rgb[0];
+    color[i * 3 + 1] = rgb[1];
+    color[i * 3 + 2] = rgb[2];
+  }
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(color, 3));
+  return geometry;
+}

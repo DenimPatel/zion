@@ -30,7 +30,7 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (79 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (81 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
@@ -134,7 +134,11 @@ traffic cones, cross-bracing, survey stake, owner notice, note pin, smoke plume,
   everything past it would keep its far-tier box (`lod-follows-camera` guards this).
 - Vertex colours are only valid on the detailed tier. `farGeometry` is a plain box with no colour
   attribute, so a material with `vertexColors: true` renders it black — enable vertex colours as
-  `detailed && …` (see the town hall material in `viewer/js/city.js`).
+  `detailed && …` (see `PAINTED` in `viewer/js/city.js`). Every near form is painted (massing forms by part tag
+  via `primitives.js::paintByPart`, park/monument/town hall piece by piece via `paint` + `mergeColouredParts`),
+  and the paint shows only under the `archetype` lens: `CityMesh.recolour` flips `material.vertexColors` off for any
+  data lens so each building is one flat colour. Park and monument take a near-white base (`SELF_COLOURED`) under
+  the archetype lens so their palette is not multiplied by their legend colour. A new form must be painted too.
 - Drawn size is not measured size. `LANDMARK_SCALE` enlarges a civic form's massing on screen, so
   anything placed on it (props, cranes, beacons) must be positioned from the scaled dimensions, while
   collision, hover and the detail report keep the real footprint.

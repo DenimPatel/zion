@@ -1281,6 +1281,12 @@ function disposeGroup(group) {
   });
 }
 
+/** The colour lens in the Filter tab; "archetype" before the guide exists. */
+function currentLens() {
+  const lens = document.getElementById('lens-select');
+  return lens ? lens.value : 'archetype';
+}
+
 function rebuildCity(buildings) {
   const previous = context.city;
   const mesh = new CityMesh(THREE, state.source);
@@ -1300,6 +1306,8 @@ function rebuildCity(buildings) {
     downtown: !state.hiddenLayers.has('downtown'),
     orphans: !state.hiddenLayers.has('orphans'),
     litCap: state.hiddenLayers.has('lit_windows') ? 0 : 1,
+    // Material colours only under the archetype lens, from the very first frame.
+    multicolour: currentLens() === 'archetype',
     notes: pinnedIds(),
   });
   // Stand-in massing for districts that are not resident, so streaming does not
@@ -3759,6 +3767,23 @@ async function runSelfTest() {
       .filter(([name]) => !context.city.group.getObjectByName(name))
       .map(([name]) => name);
     check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
+  }
+
+  // 5h. Materials by default, one flat colour under a data lens.
+  {
+    const buildingMeshes = [...context.city.meshes.values()].filter((m) => m.name.startsWith('buildings-'));
+    const detailed = buildingMeshes.filter((m) => !m.name.endsWith('-far'));
+    const far = buildingMeshes.filter((m) => m.name.endsWith('-far'));
+    applyLens('archetype');
+    const painted = detailed.filter((m) => m.geometry.attributes.color && m.material.vertexColors === true);
+    check('multicolour-default',
+      detailed.length > 0 && painted.length === detailed.length && far.every((m) => !m.material.vertexColors),
+      `${painted.length}/${detailed.length} detailed forms painted, far tier ${far.filter((m) => m.material.vertexColors).length} painted`);
+    applyLens('author');
+    const flat = detailed.every((m) => m.material.vertexColors === false);
+    applyLens('archetype');
+    const back = detailed.every((m) => m.material.vertexColors === true);
+    check('lens-flattens', flat && back, `flat under "author": ${flat}, painted again under "archetype": ${back}`);
   }
 
   // 5g. The third layer: blast radius, the new lenses and query words, and

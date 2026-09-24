@@ -411,6 +411,17 @@ offset out of the building's own source blob, so what you read is exactly what
 produced the height. A notebook's interior shows cell source, not the `.ipynb`
 wrapper.
 
+**Materials by default, one colour per reading.** Under the default *archetype*
+colour lens every building near the camera is drawn in its own materials: a
+park is lawn, paving, water, hedges, trees and a red-roofed bandstand; a
+monument is granite steps, a marble shaft, bronze and a gilded point; towers,
+slabs, warehouses and silos keep their archetype and author colour on the walls
+over a stone podium, a darker setback band, a metal or tiled crown and pale
+trim. Switch the lens to anything else -- owner, health, heat -- and the
+materials are switched off: each building is one flat colour, so the data
+reads without them. Distant buildings are plain boxes in the archetype colour
+either way.
+
 **Day/night** is the metaphor made visible. At noon the city is lit plainly so the
 data reads as geometry. At dusk the only windows glowing are the documented
 buildings, so *lit = documented* is legible in one glance. There is a slider for
