@@ -133,6 +133,7 @@ export class CityHall {
 
     this._dependencyMatrix(manifest, s);
     this._folderHealth(manifest);
+    this._harbour(manifest, s);
 
     this.panel.hidden = false;
   }
@@ -240,7 +241,9 @@ CityHall.prototype._folderHealth = function _folderHealth(manifest) {
   const table = document.createElement('table');
   table.className = 'hall-table';
   const head = document.createElement('tr');
-  head.innerHTML = '<td>folder</td><td class="num">Ca</td><td class="num">Ce</td><td class="num">I</td><td class="num">tested</td><td>ask</td>';
+  head.innerHTML = '<td>folder</td><td class="num">Ca</td><td class="num">Ce</td><td class="num">I</td>' +
+    '<td class="num" title="abstractness: share of abstract classes">A</td>' +
+    '<td class="num" title="distance from the main sequence |A + I - 1|">D</td><td class="num">tested</td><td>ask</td>';
   table.append(head);
   const rows = [...manifest.districts].sort((a, b) => (b.ca + b.ce) - (a.ca + a.ce) || b.logicalLoc - a.logicalLoc).slice(0, 24);
   for (const district of rows) {
@@ -249,11 +252,42 @@ CityHall.prototype._folderHealth = function _folderHealth(manifest) {
     const inst = district.instability >= 0 ? district.instability.toFixed(2) : '—';
     const tested = district.sourceFiles ? `${district.testedFiles}/${district.sourceFiles}` : '—';
     const ask = (district.experts || []).map((e) => this.source.s(e.name)).filter(Boolean).slice(0, 2).join(', ') || '—';
+    const abst = district.abstractness >= 0 ? district.abstractness.toFixed(2) : '—';
+    const dist = district.distance >= 0 ? district.distance.toFixed(2) : '—';
+    const zone = district.zone ? ` title="zone of ${district.zone}" class="num zone-${district.zone}"` : ' class="num"';
     tr.innerHTML = `<td>${escapeHtml(this.source.districtLabel(district))}</td><td class="num">${district.ca || 0}</td>` +
-      `<td class="num">${district.ce || 0}</td><td class="num">${inst}</td><td class="num">${tested}</td><td>${escapeHtml(ask)}</td>`;
+      `<td class="num">${district.ce || 0}</td><td class="num">${inst}</td><td class="num">${abst}</td>` +
+      `<td${zone}>${dist}</td><td class="num">${tested}</td><td>${escapeHtml(ask)}</td>`;
     tr.addEventListener('click', () => {
       if (this.onTeleport) this.onTeleport({ kind: 'district', district });
     });
+    table.append(tr);
+  }
+  this.body.append(table);
+};
+
+/** The harbour: third-party packages by how many files import them. */
+CityHall.prototype._harbour = function _harbour(manifest, s) {
+  const ext = manifest.externals;
+  if (!ext || !ext.packages || !ext.packages.length) return;
+  const h = document.createElement('h3');
+  h.textContent = `Harbour: ${ext.total} external package${ext.total === 1 ? '' : 's'}`;
+  this.body.append(h);
+  const manifests = (ext.manifests || []).map(s).filter(Boolean);
+  const note = document.createElement('p');
+  note.className = 'hall-note';
+  note.textContent = manifests.length
+    ? `Checked against ${manifests.join(', ')}. ` +
+      `${ext.undeclared.length} imported but not declared, ${ext.unused.length} declared but never imported.`
+    : 'No requirements / pyproject / package.json found, so nothing can be called undeclared.';
+  this.body.append(note);
+  const table = document.createElement('table');
+  table.className = 'hall-table';
+  for (const [name, ecosystem, files, folders, declared] of ext.packages.slice(0, 20)) {
+    const tr = document.createElement('tr');
+    const flag = manifests.length ? (declared ? 'declared' : 'NOT declared') : '';
+    tr.innerHTML = `<td>${escapeHtml(s(name))}</td><td>${escapeHtml(ecosystem)}</td>` +
+      `<td class="num">${files}</td><td class="num">${folders}</td><td${declared ? '' : ' class="zone-pain"'}>${flag}</td>`;
     table.append(tr);
   }
   this.body.append(table);

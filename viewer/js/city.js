@@ -32,9 +32,12 @@ import {
   vacantBoardGeometry,
 } from './parts/health.js';
 import {
+  codeNoticeGeometry,
   crossBracingGeometry,
   noEntrySignGeometry,
   notePinGeometry,
+  potholeGeometry,
+  smokePlumeGeometry,
   ownerNoticeGeometry,
   surveyStakeGeometry,
   trafficConeGeometry,
@@ -114,7 +117,12 @@ export const HEALTH_COLOURS = {
   knowledge: 0xffd23f,
   orphan: 0x8a8f99,
   violation: 0xe0245e,
+  bugprone: 0xa0522d,
+  codes: 0x2ec4b6,
   healthy: 0x56657a,
+  // Not a health-lens band (every file with a TODO would drown the lens);
+  // kept here so the pothole's colour has one home.
+  debt: 0xdbbd38,
 };
 
 // Colours of the survey stakes and the delta lens (analyzer/history.py).
@@ -144,6 +152,18 @@ export const LENS_BANDS = {
     { label: 'shrunk', colour: DELTA_COLOURS.shrunk, test: (b) => b.delta === 'shrunk' },
     { label: 'unchanged', colour: DELTA_COLOURS.unchanged, test: () => true },
   ],
+  impact: [
+    { label: 'reaches 50+ files', colour: 0x5b21b6, test: (b) => (b.impact || 0) >= 50 },
+    { label: '10–49 files', colour: 0x8b5cf6, test: (b) => (b.impact || 0) >= 10 },
+    { label: '1–9 files', colour: 0xc4b5fd, test: (b) => (b.impact || 0) >= 1 },
+    { label: 'nothing imports it', colour: 0x33363d, test: () => true },
+  ],
+  defects: [
+    { label: 'bug-prone', colour: 0xa0522d, test: (b) => b.bugprone },
+    { label: 'half or more of its commits are fixes', colour: 0xd9822b, test: (b) => (b.fixCommits || 0) >= 1 && (b.fixRatio || 0) >= 0.5 },
+    { label: 'some fix commits', colour: 0xd9c9a3, test: (b) => (b.fixCommits || 0) >= 1 },
+    { label: 'never fixed', colour: 0x3a3e46, test: () => true },
+  ],
   complexity: [
     { label: '30+ decision points in one function', colour: 0xe0245e, test: (b) => (b.braceComplexity || 0) >= 30 },
     { label: '15–29', colour: 0xff9a2e, test: (b) => (b.braceComplexity || 0) >= 15 },
@@ -165,13 +185,15 @@ export function lensBand(lens, building) {
 const PROP_PREFIXES = [
   'roof-props', 'cranes', 'heat-beacons', 'scaffolding', 'antennas', 'sole-tenant-markers', 'knowledge-flags',
   'hazard-barriers', 'raking-shores', 'vacant-boards', 'cycle-pennants', 'no-entry-signs', 'traffic-cones',
-  'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins',
+  'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins', 'smoke-plumes', 'potholes', 'code-notices',
 ];
 export function healthSignal(building, flags = {}) {
   if (flags.hotspots && building.isHotspot) return 'hotspot';
   if (flags.imports && building.cycle) return 'cycle';
   if (flags.layering && building.violations) return 'violation';
+  if (flags.defects && building.bugprone) return 'bugprone';
   if (building.oversized) return 'oversized';
+  if (flags.codes && building.codeViolations && building.codeViolations.length) return 'codes';
   if (flags.knowledge && building.knowledgeRisk) return 'knowledge';
   if (flags.imports && building.orphan) return 'orphan';
   return 'healthy';
@@ -395,6 +417,9 @@ export class CityMesh {
     const stakeCandidates = [];
     const noticeCandidates = [];
     const pinCandidates = [];
+    const smokeCandidates = [];
+    const potholeCandidates = [];
+    const codeCandidates = [];
     const notes = options.notes || null;
     const violationEligible = option('violations', flag('layering'));
     const untestedEligible = option('untested', flag('tests'));
@@ -409,6 +434,9 @@ export class CityMesh {
     const churnEligible = option('churn', flag('churn'));
     const ageEligible = option('age', flag('age'));
     const downtownEligible = option('downtown', flag('downtown'));
+    const bugproneEligible = option('bugprone', flag('defects'));
+    const debtEligible = option('debt', flag('debt'));
+    const codesEligible = option('codes', flag('codes'));
     const glass = new THREE.Color(0x8fd6ff);
 
     for (const [archetype, tiers] of byArchetype) {
@@ -571,6 +599,15 @@ export class CityMesh {
         if (detailed && codeownersEligible && building.ownerDrift) {
           noticeCandidates.push({ x, z, width, depth, base });
         }
+        if (detailed && bugproneEligible && building.bugprone) {
+          smokeCandidates.push({ x, z, width, depth, height, base });
+        }
+        if (detailed && debtEligible && building.debt > 0) {
+          potholeCandidates.push({ x, z, width, depth, base, debt: building.debt });
+        }
+        if (detailed && codesEligible && building.codeViolations && building.codeViolations.length) {
+          codeCandidates.push({ x, z, width, depth, base });
+        }
         // A note is the reader's own, so it is drawn at any tier: a pin you
         // placed should not vanish because you flew away from it.
         if (notes && notes.has(building.id)) {
@@ -613,6 +650,12 @@ export class CityMesh {
     this._addPlotProps(signCandidates, 'no-entry-signs', noEntrySignGeometry, (p) => [p.x - p.width / 2 - 0.9, p.z + p.depth / 2 + 0.9]);
     this._addPlotProps(coneCandidates, 'traffic-cones', trafficConeGeometry, (p) => [p.x, p.z + p.depth / 2 + 0.8]);
     this._addPlotProps(noticeCandidates, 'owner-notices', ownerNoticeGeometry, (p) => [p.x + p.width / 2 + 1.0, p.z + p.depth / 2 + 0.9]);
+    // The third layer: potholes in the road behind the plot, a code notice at
+    // the back-right corner, so neither sits on a kerb prop above.
+    this._addPlotProps(potholeCandidates, 'potholes', potholeGeometry, (p) => [p.x - p.width / 2 - 0.8, p.z - p.depth / 2 - 0.8],
+      (p) => Math.min(3, 1.3 + Math.log2(1 + p.debt) * 0.4));
+    this._addPlotProps(codeCandidates, 'code-notices', codeNoticeGeometry, (p) => [p.x + p.width / 2 + 1.0, p.z - p.depth / 2 - 0.9]);
+    this._addSmoke(smokeCandidates);
     this._addBracing(braceCandidates);
     this._addSurveyStakes(stakeCandidates);
     this._addNotePins(pinCandidates);
@@ -1180,7 +1223,7 @@ export class CityMesh {
    * plot so it still reads beside a tower, and placed at `corner(plot)` on the
    * plinth the building stands on -- never stretched by the footprint.
    */
-  _addPlotProps(candidates, name, geometryFor, corner) {
+  _addPlotProps(candidates, name, geometryFor, corner, scaleOf = null) {
     if (!candidates.length) return;
     const THREE = this.THREE;
     const list = candidates.slice(0, MAX_HEALTH_PROPS);
@@ -1190,7 +1233,7 @@ export class CityMesh {
     mesh.raycast = () => {};
     const matrix = new THREE.Matrix4();
     list.forEach((plot, index) => {
-      const scale = Math.min(3, Math.max(1.2, Math.sqrt(plot.width * plot.depth) * 0.12));
+      const scale = scaleOf ? scaleOf(plot) : Math.min(3, Math.max(1.2, Math.sqrt(plot.width * plot.depth) * 0.12));
       const [x, z] = corner(plot);
       matrix.makeScale(scale, scale, scale);
       matrix.setPosition(x, plot.base || 0, z);
@@ -1218,6 +1261,29 @@ export class CityMesh {
       // Bracing stops below the crown: it braces the shaft, not the ornament.
       matrix.makeScale(plot.width, plot.height * 0.72, plot.depth);
       matrix.setPosition(plot.x, 0, plot.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * Smoke rising off the roof of a bug-prone building, sized by its plot so a
+   * burning tower and a burning kiosk both read: 7 to 22 m of smoke.
+   */
+  _addSmoke(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0, flatShading: true });
+    const mesh = new THREE.InstancedMesh(smokePlumeGeometry(THREE), material, list.length);
+    mesh.name = 'smoke-plumes';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      const size = Math.min(22, Math.max(7, Math.sqrt(plot.width * plot.depth) * 1.1));
+      matrix.makeScale(size, size, size);
+      matrix.setPosition(plot.x, (plot.base || 0) + plot.height * 0.97, plot.z);
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;

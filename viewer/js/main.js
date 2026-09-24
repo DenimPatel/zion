@@ -34,7 +34,7 @@ import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
 import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
-import { SelectionOverlay, LINK_COLOURS } from './selection.js';
+import { SelectionOverlay, LINK_COLOURS, IMPACT_COLOURS, blastRadius } from './selection.js';
 import { Notes } from './notes.js';
 import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
 import { MapLabels } from './labels.js';
@@ -187,6 +187,9 @@ const LEGEND_KEYS = {
   untested: { kind: 'mesh', target: 'traffic-cones', short: 'Traffic cones — untested risk', colour: 0xff6a1a, query: 'is:untestedrisk' },
   complexity: { kind: 'mesh', target: 'cross-bracing', short: 'Cross-bracing — branch-heavy', colour: 0xb8c2cc, query: 'is:braced' },
   imports: { kind: 'overlay', target: 'import-lines', short: 'Utility lines — imports', colour: LINK_COLOURS.out, query: 'fanout>0' },
+  impact: { kind: 'overlay', target: 'impact-rings', short: 'Flood map — blast radius', colour: IMPACT_COLOURS[0], query: 'impact>0' },
+  main_sequence: { kind: null, short: 'Main sequence', colour: 0xc77dff, reason: 'folder inspector and City Hall', query: 'zone:pain OR zone:useless' },
+  externals: { kind: null, short: 'Harbour — packages', colour: 0x3f8fb0, reason: 'listed in the inspector and City Hall, not drawn' },
   instability: { kind: null, short: 'Instability', colour: 0xd9b44a, reason: 'a colour lens: Filter tab → instability' },
   violations: { kind: 'mesh', target: 'no-entry-signs', short: 'No-entry signs — layering', colour: HEALTH_COLOURS.violation, query: 'is:violation' },
   district_coupling: { kind: 'overlay', target: 'district-links', short: 'Folder links', colour: LINK_COLOURS.cochange },
@@ -194,6 +197,9 @@ const LEGEND_KEYS = {
   experts: { kind: null, short: 'Who to ask', colour: 0xb28ad6, reason: 'listed in the inspector, not drawn' },
   delta: { kind: 'mesh', target: 'survey-stakes', short: 'Survey stakes — changed', colour: DELTA_COLOURS.added, query: 'is:added OR is:grown OR is:shrunk' },
   timeline: { kind: null, short: 'History', colour: 0xe8b04b, reason: 'the History slider replays it' },
+  bugprone: { kind: 'mesh', target: 'smoke-plumes', short: 'Smoke — bug-prone', colour: HEALTH_COLOURS.bugprone, query: 'is:bugprone' },
+  debt: { kind: 'mesh', target: 'potholes', short: 'Potholes — debt markers', colour: HEALTH_COLOURS.debt, query: 'is:debt' },
+  codes: { kind: 'mesh', target: 'code-notices', short: 'Code notices — building codes', colour: HEALTH_COLOURS.codes, query: 'is:codes' },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
@@ -323,6 +329,7 @@ function disabledReason(id) {
     downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
     untested: /test/i, imports: /import/i, instability: /import/i, district_coupling: /coupling/i,
     codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i,
+    impact: /import/i, bugprone: /fix|repairs/i, debt: /debt|TODO/i, codes: /building codes/i, externals: /harbour|package/i,
   }[id];
   const note = words ? notes.find((n) => words.test(n)) : null;
   if (note) return note;
@@ -331,6 +338,8 @@ function disabledReason(id) {
   if (id === 'complexity') return 'No function has 15 or more decision points.';
   if (id === 'codeowners') return 'No CODEOWNERS file in the repository.';
   if (id === 'district_coupling') return 'No two folders keep changing together.';
+  if (id === 'main_sequence') return 'No folder has both classes and imports in or out, so none can be placed on the main sequence.';
+  if (id === 'bugprone') return 'No file has enough commits that say they fix it.';
   if (id === 'delta') return 'No baseline yet: build again after the repository changes, or build with --compare REV.';
   return 'Not drawn: the repository history is too thin for this signal to mean anything.';
 }
@@ -554,6 +563,22 @@ const HEALTH_SECTIONS = [
     id: 'drift', title: 'CODEOWNERS drift', colour: 0x8c5ce6, flag: 'codeowners',
     text: 'The people CODEOWNERS names for these files wrote almost none of them.',
   },
+  {
+    id: 'impact', title: 'Widest blast radius', colour: IMPACT_COLOURS[0], flag: 'imports', column: 'impact', unit: 'files',
+    text: 'A change here reaches the most files: everything that imports it, directly or through others. Select one to see the flood map.',
+  },
+  {
+    id: 'bugprone', title: 'Bug-prone', colour: HEALTH_COLOURS.bugprone, flag: 'defects', column: 'fixes', unit: 'fixes',
+    text: 'Commits keep saying they fix these files. Churn says a file changes; this says it keeps breaking.',
+  },
+  {
+    id: 'debt', title: 'Written-down debt', colour: HEALTH_COLOURS.debt, flag: 'debt', column: 'debt', unit: 'markers',
+    text: 'TODO, FIXME, HACK and XXX in comments: the authors already said what is wrong.',
+  },
+  {
+    id: 'codes', title: 'Building-code breaches', colour: HEALTH_COLOURS.codes, flag: 'codes',
+    text: 'Files over a limit declared under "codes" in .zion/rules.json. The inspector names the limit.',
+  },
 ];
 
 // Extra Health cards that are not one ranked list of files.
@@ -568,7 +593,7 @@ function indexRowById() {
   return map;
 }
 
-function healthItem(id) {
+function healthItem(id, column = null, unit = '') {
   const row = indexRowById().get(id);
   const col = columnIndex(state.source.manifest.indexColumns);
   const button = document.createElement('button');
@@ -579,7 +604,9 @@ function healthItem(id) {
   const loc = row ? row[col.loc] : 0;
   const meta = document.createElement('span');
   meta.className = 'meta';
-  meta.textContent = `${Number(loc || 0).toLocaleString()} ln`;
+  meta.textContent = column && row && col[column] !== undefined
+    ? `${Number(row[col[column]] || 0).toLocaleString()} ${unit}`
+    : `${Number(loc || 0).toLocaleString()} ln`;
   button.append(meta, document.createTextNode(path || `building ${id}`));
   return button;
 }
@@ -632,7 +659,7 @@ function renderHealth() {
       } else {
         for (const id of review[section.id] || []) {
           const li = document.createElement('li');
-          li.append(healthItem(id));
+          li.append(healthItem(id, section.column, section.unit));
           list.append(li);
         }
       }
@@ -651,6 +678,9 @@ function renderHealth() {
   if (delta) panel.prepend(intro, delta);
   const deps = renderDependencyCard(manifest);
   if (deps) panel.append(deps);
+  for (const extra of [renderZonesCard(manifest), renderHarbourCard(manifest), renderCensusCard(manifest)]) {
+    if (extra) panel.append(extra);
+  }
   panel.append(renderNotesCard());
 }
 
@@ -689,7 +719,8 @@ function renderDeltaCard(manifest) {
   const rows = [
     ['hotspots', 'Hotspots'], ['cycles', 'Import cycles'], ['violations', 'Layering violations'],
     ['untested', 'Untested risk'], ['oversized', 'Oversized'], ['knowledge', 'Knowledge risk'],
-    ['orphans', 'Possible dead code'], ['files', 'Files'], ['loc', 'Logical lines'],
+    ['orphans', 'Possible dead code'], ['bugprone', 'Bug-prone'], ['codes', 'Code breaches'], ['debt', 'Debt markers'],
+    ['files', 'Files'], ['loc', 'Logical lines'],
   ];
   const table = document.createElement('table');
   table.className = 'delta-table';
@@ -774,6 +805,193 @@ function renderDependencyCard(manifest) {
     node.append(sub);
   }
   return node;
+}
+
+/** A district button for a Health card: clicking it flies to that folder. */
+function districtItem(manifest, id, metaText) {
+  const d = manifest.districts[id];
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'health-item dep-item';
+  button.dataset.district = String(id);
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  meta.textContent = metaText;
+  button.append(meta, document.createTextNode(d ? state.source.districtLabel(d) : `district ${id}`));
+  return button;
+}
+
+/**
+ * Martin's main sequence: every folder with both axes known, drawn as a small
+ * A/I scatter with the ideal line, and the folders far off it listed.
+ */
+function renderZonesCard(manifest) {
+  const rows = manifest.mainSequence || [];
+  if (!rows.length) return null;
+  const off = rows.filter((r) => r[4]);
+  const node = card('Main sequence', 0xc77dff, off.length);
+  node.dataset.section = 'zones';
+  const text = document.createElement('p');
+  text.textContent =
+    'Abstractness (share of abstract classes) against instability, per folder. On the diagonal is healthy. ' +
+    'Bottom-left is the zone of pain: concrete code everything leans on. Top-right is the zone of uselessness: abstractions nothing uses.';
+  node.append(text);
+  node.append(mainSequencePlot(manifest, rows));
+  const list = document.createElement('ol');
+  for (const [id, a, i, dist, zone] of off.sort((x, y) => y[3] - x[3]).slice(0, 10)) {
+    const li = document.createElement('li');
+    li.append(districtItem(manifest, id, `${zone} · D ${dist.toFixed(2)}`));
+    li.title = `A ${a.toFixed(2)}, I ${i.toFixed(2)}`;
+    list.append(li);
+  }
+  if (list.children.length) node.append(list);
+  else {
+    const none = document.createElement('p');
+    none.className = 'health-empty';
+    none.textContent = 'No folder is far enough off the main sequence to call it a zone.';
+    node.append(none);
+  }
+  return node;
+}
+
+/** The A/I plane as inline SVG: one dot per folder, sized by its buildings. */
+function mainSequencePlot(manifest, rows, highlight = -1) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const size = 150;
+  const pad = 18;
+  const span = size - pad * 2;
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+  svg.setAttribute('class', 'main-sequence');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Abstractness against instability per folder');
+  const el = (name, attrs, text) => {
+    const node = document.createElementNS(NS, name);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    if (text) node.textContent = text;
+    svg.append(node);
+    return node;
+  };
+  const px = (i) => pad + i * span;
+  const py = (a) => pad + (1 - a) * span;
+  el('rect', { x: pad, y: pad, width: span, height: span, class: 'ms-frame' });
+  el('path', { d: `M${px(0)},${py(0)} L${px(0.5)},${py(0)} L${px(0)},${py(0.5)} Z`, class: 'ms-pain' });
+  el('path', { d: `M${px(1)},${py(1)} L${px(0.5)},${py(1)} L${px(1)},${py(0.5)} Z`, class: 'ms-useless' });
+  el('line', { x1: px(0), y1: py(1), x2: px(1), y2: py(0), class: 'ms-ideal' });
+  el('text', { x: px(0.5), y: size - 3, 'text-anchor': 'middle', class: 'ms-axis' }, 'instability →');
+  el('text', { x: 9, y: px(0.5), 'text-anchor': 'middle', class: 'ms-axis', transform: `rotate(-90 9 ${px(0.5)})` }, 'abstractness →');
+  const most = Math.max(1, ...rows.map(([id]) => (manifest.districts[id] || {}).buildings || 1));
+  for (const [id, a, i, , zone] of rows) {
+    const d = manifest.districts[id];
+    const r = 2 + 4 * Math.sqrt(((d && d.buildings) || 1) / most);
+    const dot = el('circle', { cx: px(i), cy: py(a), r, class: `ms-dot${zone ? ` ms-${zone}` : ''}${id === highlight ? ' ms-here' : ''}` });
+    const title = document.createElementNS(NS, 'title');
+    title.textContent = `${d ? state.source.districtLabel(d) : id}: A ${a.toFixed(2)}, I ${i.toFixed(2)}`;
+    dot.append(title);
+  }
+  return svg;
+}
+
+/** City Hall's harbour: the third-party packages the repository trades with. */
+function renderHarbourCard(manifest) {
+  const ext = manifest.externals;
+  if (!ext || !ext.packages || !ext.packages.length) return null;
+  const node = card('Harbour — external packages', 0x3f8fb0, ext.total);
+  node.dataset.section = 'externals';
+  const text = document.createElement('p');
+  const manifests = (ext.manifests || []).map((m) => state.source.s(m)).filter(Boolean);
+  text.textContent = manifests.length
+    ? `Packages imported from outside the repository, most-used first. Declared in ${manifests.join(', ')}.`
+    : 'Packages imported from outside the repository, most-used first. No requirements, pyproject or package.json was found to check them against.';
+  node.append(text);
+  const table = document.createElement('table');
+  table.className = 'delta-table harbour-table';
+  for (const [name, ecosystem, files, folders, declared] of ext.packages.slice(0, 12)) {
+    const tr = document.createElement('tr');
+    tr.className = !declared && manifests.length ? 'worse' : 'same';
+    const td = (value, cls) => {
+      const cell = document.createElement('td');
+      if (cls) cell.className = cls;
+      cell.textContent = value;
+      tr.append(cell);
+    };
+    td(state.source.s(name) || '(locked)');
+    td(ecosystem);
+    td(`${files} file${files === 1 ? '' : 's'}`, 'num');
+    td(`${folders} folder${folders === 1 ? '' : 's'}`, 'num');
+    table.append(tr);
+  }
+  node.append(table);
+  const add = (label, ids) => {
+    if (!ids || !ids.length) return;
+    const p = document.createElement('p');
+    p.className = 'health-empty';
+    p.textContent = `${label}: ${ids.map((i) => state.source.s(i)).join(', ')}`;
+    node.append(p);
+  };
+  add('Imported but not declared', ext.undeclared);
+  add('Declared but never imported', ext.unused);
+  return node;
+}
+
+/** One tiny line per signal across the builds in this output directory. */
+function renderCensusCard(manifest) {
+  const census = manifest.census || [];
+  if (census.length < 2) return null;
+  const node = card('Census across builds', 0x9aa3ad, census.length);
+  node.dataset.section = 'census';
+  const text = document.createElement('p');
+  text.textContent = `The last ${census.length} builds into this directory, oldest on the left. Rising is worse for every row but files and lines.`;
+  node.append(text);
+  const rows = [
+    ['hotspots', 'Hotspots'], ['cycles', 'Cycles'], ['violations', 'Layering'], ['untested', 'Untested risk'],
+    ['bugprone', 'Bug-prone'], ['debt', 'Debt markers'], ['codes', 'Code breaches'], ['zonePain', 'Zone of pain'],
+    ['files', 'Files'], ['loc', 'Logical lines'],
+  ];
+  const table = document.createElement('table');
+  table.className = 'delta-table census-table';
+  for (const [key, label] of rows) {
+    const values = census.map((e) => Number((e.totals || {})[key] || 0));
+    if (!values.some((v) => v)) continue;
+    const last = values[values.length - 1];
+    const change = last - values[0];
+    const tr = document.createElement('tr');
+    const neutral = key === 'files' || key === 'loc';
+    tr.className = change === 0 ? 'same' : neutral ? 'info' : change > 0 ? 'worse' : 'better';
+    const name = document.createElement('td');
+    name.textContent = label;
+    const spark = document.createElement('td');
+    spark.append(sparkline(values));
+    const now = document.createElement('td');
+    now.className = 'num';
+    now.textContent = `${last.toLocaleString()} (${change > 0 ? '+' : ''}${change.toLocaleString()})`;
+    tr.append(name, spark, now);
+    table.append(tr);
+  }
+  node.append(table);
+  return node;
+}
+
+function sparkline(values) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const w = 90;
+  const h = 18;
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('class', 'sparkline');
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const x = (i) => (values.length === 1 ? w / 2 : (i / (values.length - 1)) * (w - 4) + 2);
+  const y = (v) => (hi === lo ? h / 2 : h - 2 - ((v - lo) / (hi - lo)) * (h - 4));
+  const line = document.createElementNS(NS, 'polyline');
+  line.setAttribute('points', values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '));
+  svg.append(line);
+  const dot = document.createElementNS(NS, 'circle');
+  dot.setAttribute('cx', x(values.length - 1));
+  dot.setAttribute('cy', y(values[values.length - 1]));
+  dot.setAttribute('r', 1.8);
+  svg.append(dot);
+  return svg;
 }
 
 /** The reader's notes, with export/import so they can travel. */
@@ -890,14 +1108,16 @@ function renderLensKey() {
   // you are looking at falls in each band, not a legend in the abstract.
   const resident = context.resident || [];
   if (lens.value === 'health') {
-    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', oversized: 'oversized', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', bugprone: 'bug-prone', oversized: 'oversized', codes: 'breaks a building code', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
     const flags = state.source.manifest.flags || {};
     const counts = {};
     for (const b of resident) {
       const signal = healthSignal(b, flags);
       counts[signal] = (counts[signal] || 0) + 1;
     }
-    for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) item(colour, names[signal], counts[signal] || 0);
+    for (const [signal, colour] of Object.entries(HEALTH_COLOURS)) {
+      if (names[signal]) item(colour, names[signal], counts[signal] || 0);
+    }
   } else if (LENS_BANDS[lens.value]) {
     const counts = new Map();
     for (const b of resident) {
@@ -1133,6 +1353,7 @@ function compileQuery(text) {
       const district = manifest.districts[id];
       return district ? state.source.s(district.key) : '';
     },
+    districtZone: (id) => (manifest.districts[id] && manifest.districts[id].zone) || '',
   });
 }
 
@@ -1342,7 +1563,17 @@ async function updateSelection(selection) {
         partners = [];
       }
     }
-    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, positionOf });
+    // Tests are not dependents (the analyzer's impact count leaves them out too).
+    const testBit = 1 << 0;
+    const flagsCol = columnIndex(manifest.indexColumns).flags;
+    const rows = indexRowById();
+    const impact = edges
+      ? blastRadius(edges.importers, b.id).filter(([id]) => {
+          const row = rows.get(id);
+          return !row || !(row[flagsCol] & testBit);
+        })
+      : [];
+    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, impact, positionOf });
   } else if (selection.kind === 'district') {
     const d = selection.district;
     const deps = manifest.dependencies;
@@ -3360,7 +3591,10 @@ async function runSelfTest() {
     }
     const cards = document.querySelectorAll('#guide-health .health-card').length;
     const expected = HEALTH_SECTIONS.length + (manifest.delta ? 1 : 0) +
-      (manifest.dependencies && manifest.dependencies.matrix && manifest.dependencies.matrix.length ? 1 : 0) + 1;
+      (manifest.dependencies && manifest.dependencies.matrix && manifest.dependencies.matrix.length ? 1 : 0) +
+      ((manifest.mainSequence || []).length ? 1 : 0) +
+      (manifest.externals && manifest.externals.packages && manifest.externals.packages.length ? 1 : 0) +
+      ((manifest.census || []).length >= 2 ? 1 : 0) + 1;
     check('health-tab', manifest.review ? cards === expected : cards === 0, `${cards} health cards of ${expected}`);
   }
 
@@ -3508,13 +3742,80 @@ async function runSelfTest() {
       ['cross-bracing', flags.complexity, (x) => x.braced],
       ['survey-stakes', flags.delta, (x) => Boolean(x.delta)],
       ['owner-notices', flags.codeowners, (x) => x.ownerDrift],
+      ['smoke-plumes', flags.defects, (x) => x.bugprone],
+      ['potholes', flags.debt, (x) => x.debt > 0],
+      ['code-notices', flags.codes, (x) => x.codeViolations && x.codeViolations.length > 0],
       ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
     ];
+    // Props stand on the detailed tier only (a far-tier box has no kerb or
+    // facade to hold them), so only a building drawn in detail must carry one.
+    const detailed = [];
+    for (const [uuid, members] of context.city.records) {
+      const m = context.city.meshes.get(uuid);
+      if (m && m.name.startsWith('buildings-') && !m.name.endsWith('-far')) detailed.push(...members);
+    }
     const missing = expectations
-      .filter(([, on, test]) => on && context.resident.some(test))
+      .filter(([, on, test]) => on && detailed.some(test))
       .filter(([name]) => !context.city.group.getObjectByName(name))
       .map(([name]) => name);
     check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
+  }
+
+  // 5g. The third layer: blast radius, the new lenses and query words, and
+  //     the Health cards for zones, the harbour and the census.
+  {
+    const manifest = state.source.manifest;
+    const flags = manifest.flags || {};
+    const overlay = context.overlay;
+    const foundation = context.resident
+      .filter((b) => (b.impact || 0) > 0)
+      .sort((x, y) => (y.impact || 0) - (x.impact || 0))[0];
+    if (foundation && context.edges) {
+      await updateSelection({ kind: 'building', building: foundation });
+      const floods = overlay.group.children.filter((c) => c.name.startsWith('impact-rings'));
+      const summary = overlay.summary || {};
+      check('impact-rings', floods.length > 0 && (summary.impact || 0) >= 1,
+        `${summary.impact || 0} downstream (analyzer: ${foundation.impact}), ${summary.flooded || 0} discs in ${floods.length} meshes`);
+      state.hiddenLayers.add('impact');
+      applyHiddenLayers();
+      const hidden = floods.every((m) => !m.visible);
+      state.hiddenLayers.delete('impact');
+      applyHiddenLayers();
+      check('impact-switch', hidden && floods.every((m) => m.visible), 'flood discs follow their City Guide switch');
+      await updateSelection(null);
+    } else {
+      check('impact-rings', !flags.imports || !context.resident.some((b) => b.impact > 0), 'nothing imports anything resident');
+    }
+
+    const mesh = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 1);
+    if (mesh) {
+      const changed = {};
+      for (const lens of ['impact', 'defects']) {
+        const before = Array.from(mesh.userData.baseColors);
+        applyLens(lens);
+        changed[lens] = before.some((v, i) => Math.abs(v - mesh.userData.baseColors[i]) > 1e-3);
+      }
+      applyLens('archetype');
+      check('third-lenses-recolour', changed.impact || !flags.imports, JSON.stringify(changed));
+    }
+
+    // New query words: counts agree with the analyzer's own totals.
+    const totals = (manifest.review && manifest.review.totals) || {};
+    const bugprone = countFor('is:bugprone') || 0;
+    const coded = countFor('is:codes') || 0;
+    const reach = countFor('impact>0 -is:test') || 0;
+    check('query-third-layer', bugprone === (totals.bugprone || 0) && coded === (totals.codes || 0) && reach >= (totals.impact || 0),
+      `is:bugprone ${bugprone}/${totals.bugprone || 0}, is:codes ${coded}/${totals.codes || 0}, impact>0 ${reach}/${totals.impact || 0}`);
+    const zones = (manifest.mainSequence || []).filter((r) => r[4]).length;
+    check('query-zone', !zones || (countFor('zone:pain OR zone:useless') || 0) > 0, `${zones} folder(s) in a zone`);
+
+    const panel = document.getElementById('guide-health');
+    const wantZones = (manifest.mainSequence || []).length > 0;
+    const wantHarbour = Boolean(manifest.externals && manifest.externals.packages && manifest.externals.packages.length);
+    const hasZones = Boolean(panel && panel.querySelector('[data-section="zones"] svg.main-sequence'));
+    const hasHarbour = Boolean(panel && panel.querySelector('[data-section="externals"] table'));
+    check('health-third-cards', hasZones === wantZones && hasHarbour === wantHarbour,
+      `zones ${hasZones}/${wantZones}, harbour ${hasHarbour}/${wantHarbour}, census ${(manifest.census || []).length} build(s)`);
   }
 
   // 5e. Detail follows the camera. A building beyond the opening camera's LOD
