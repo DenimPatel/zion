@@ -16,6 +16,7 @@ skybridges -- so bulk commits are excluded from coupling by an explicit rule.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,12 @@ BUCKET_DAYS = 30.0
 HEAT_HALF_LIFE_DAYS = 30.0
 
 
+# A commit subject that names a repair. Word-bounded and case-insensitive, so
+# "Fix typo" and "bugfix: x" count and "prefix" or "debug" do not.
+FIX_SUBJECT = re.compile(r"\b(?:fix(?:e[sd])?|bug(?:fix)?|bugs|hotfix|regression)\b", re.IGNORECASE)
+REVERT_SUBJECT = re.compile(r"^\s*(?:revert\b|back(?:ed)?\s*out\b)", re.IGNORECASE)
+
+
 @dataclass
 class FileGit:
     authors: dict[str, int] = field(default_factory=dict)  # author -> lines added
@@ -53,6 +60,10 @@ class FileGit:
     last_ts: float = 0.0
     last_author: str = ""
     last_message: str = ""
+    # Commits whose subject says they repair something (fix, bug, hotfix,
+    # regression) and, separately, ones that undo an earlier commit.
+    fix_commits: int = 0
+    revert_commits: int = 0
     # Who made the file: the author of its oldest commit in the history
     # walked (renames are not followed, so a moved file is "made" by the move).
     first_author: str = ""
@@ -100,6 +111,8 @@ class GitIndex:
     authors: dict[str, int] = field(default_factory=dict)
     commit_count: int = 0
     bulk_commits: int = 0
+    fix_commits: int = 0  # commits whose subject names a repair
+    revert_commits: int = 0
     eligible_commits: int = 0
     first_ts: float = 0.0
     last_ts: float = 0.0
@@ -223,7 +236,11 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
         if not entries:
             continue
 
+        is_revert = bool(REVERT_SUBJECT.search(message))
+        is_fix = not is_revert and bool(FIX_SUBJECT.search(message))
         index.commit_count += 1
+        index.fix_commits += is_fix
+        index.revert_commits += is_revert
         ts = _iso_to_ts(iso_date)
         if ts:
             index.first_ts = ts if not index.first_ts else min(index.first_ts, ts)
@@ -255,6 +272,8 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
             record.added += added
             record.deleted += deleted
             record.hashes.append(commit_hash)
+            record.fix_commits += is_fix
+            record.revert_commits += is_revert
             if ts:
                 if not record.first_ts or ts <= record.first_ts:
                     record.first_author = author

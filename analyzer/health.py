@@ -20,6 +20,16 @@ each is gated on the same degeneration flag as the data it stands on:
   one import in this repo *did* resolve.
 - **Import cycle**: strongly connected components of the resolved import
   graph with more than one member.
+- **Blast radius** (impact): how many files transitively import this one --
+  everything a change here can reach. Tests and vendored code are not counted
+  as dependents. Exact, and near-linear: one pass over the import graph's
+  strongly connected components, carrying each one's dependents as an integer
+  bitset that is dropped as soon as the last component that needs it is done.
+- **Bug-prone**: the files whose commits most often say they fix something
+  (fix, bug, hotfix, regression in the subject). Churn says a file changes;
+  this says it keeps *breaking*. Top 5% by fix commits, with at least two of
+  them and a quarter of the file's commits.
+- **Debt markers**: TODO / FIXME / HACK / XXX written in comments.
 
 Vendored third-party code (`vendor/`, `third_party/`, `*.min.js`, ...) is left
 out of every signal: it is not this repository's to split or own.
@@ -36,6 +46,11 @@ OVERSIZED_MIN_LOC = 400
 STALE_DAYS = 180.0
 OWNER_AWAY_DAYS = 180.0
 REVIEW_LIMIT = 15
+# int.bit_count is Python 3.10+; the fallback is only ever slower, never wrong.
+_popcount = int.bit_count if hasattr(int, "bit_count") else (lambda value: bin(value).count("1"))
+BUGPRONE_FRACTION = 0.05
+BUGPRONE_MIN_FIXES = 2
+BUGPRONE_MIN_RATIO = 0.25
 
 # Third-party code copied into the tree: not this repository's to refactor, so
 # it is never a hotspot, oversized, an orphan or a knowledge risk.
@@ -92,9 +107,12 @@ def bus_factor(authors: dict[str, int]) -> int:
     return len(authors)
 
 
-def strongly_connected(edges: dict[str, set[str]]) -> list[list[str]]:
+def strongly_connected(edges: dict[str, set[str]], all_components: bool = False) -> list[list[str]]:
     """Tarjan's algorithm, iterative so a deep import chain cannot hit the
-    recursion limit. Returns only components with more than one member."""
+    recursion limit. Returns only components with more than one member,
+    largest first -- or, with ``all_components``, every component in the
+    order Tarjan finishes them: a component always after every component it
+    has an edge to."""
     index_of: dict[str, int] = {}
     low: dict[str, int] = {}
     on_stack: set[str] = set()
@@ -139,9 +157,10 @@ def strongly_connected(edges: dict[str, set[str]]) -> list[list[str]]:
                     members.append(member)
                     if member == node:
                         break
-                if len(members) > 1:
+                if all_components or len(members) > 1:
                     components.append(sorted(members))
-    components.sort(key=lambda c: (-len(c), c[0]))
+    if not all_components:
+        components.sort(key=lambda c: (-len(c), c[0]))
     return components
 
 
@@ -198,6 +217,12 @@ def finalize_health(analysis, git) -> None:
             record.is_hotspot = rank <= cutoff
     flags.hotspots = flags.churn and any(f.is_hotspot for f in files)
 
+    # -- defects and debt ------------------------------------------------------
+    _finalize_defects(analysis, git, code)
+    flags.debt = any(f.debt_markers for f in code)
+    if not flags.debt:
+        flags.notes.append("No TODO / FIXME / HACK / XXX markers in code comments - debt potholes disabled.")
+
     # -- imports: orphans and cycles -----------------------------------------
     flags.imports = any(f.imports_resolved for f in files)
     # A submodule importing its own package's __init__ (to reach a re-export)
@@ -228,6 +253,7 @@ def finalize_health(analysis, git) -> None:
         record.is_orphan = True
 
     by_rel = {f.rel: f for f in files}
+    _finalize_impact(files, by_rel)
     analysis.cycles = strongly_connected(edges)
     for cycle_id, members in enumerate(analysis.cycles, start=1):
         for rel in members:
@@ -235,6 +261,114 @@ def finalize_health(analysis, git) -> None:
             if record is not None:
                 record.cycle_id = cycle_id
                 record.cycle_size = len(members)
+
+
+def _finalize_defects(analysis, git, code) -> None:
+    """Bug-prone files: the top slice by commits whose subject names a repair."""
+    flags = analysis.flags
+    total_fixes = git.fix_commits if git is not None and git.available else 0
+    flags.defects = flags.churn and total_fixes >= 1
+    if not flags.defects:
+        flags.notes.append(
+            "No commit subject names a fix (fix, bug, hotfix, regression) - bug-prone smoke disabled."
+            if flags.churn
+            else "Too little history to tell repairs from features - bug-prone smoke disabled."
+        )
+        return
+    for record in code:
+        record.fix_ratio = round(record.fix_commits / record.commits, 4) if record.commits else 0.0
+    ranked = sorted(
+        (f for f in code if f.fix_commits >= BUGPRONE_MIN_FIXES and f.fix_ratio >= BUGPRONE_MIN_RATIO),
+        key=lambda f: (-f.fix_commits, -f.fix_ratio, f.rel),
+    )
+    cutoff = max(1, round(len(code) * BUGPRONE_FRACTION))
+    for record in ranked[:cutoff]:
+        record.is_bugprone = True
+
+
+def _is_dependent(record) -> bool:
+    """A file whose import counts toward another's blast radius."""
+    return not (record.is_test or is_vendored(record.rel))
+
+
+def _finalize_impact(files, by_rel) -> None:
+    """Every file's transitive importers (``impact``) and their folders.
+
+    Imports run importer -> imported, and a file's dependents are its
+    importers plus theirs. Tarjan finishes a component after everything it
+    imports, so walking its output backwards visits every importer before
+    what it imports; each component's dependents are then the union of its
+    importers' components and their dependents. Files and folders are bits
+    in two Python ints, so a union is one C-level OR, and a component's
+    bitset is released once every component it feeds has been computed.
+    """
+    imports: dict[str, set[str]] = {}
+    for record in files:
+        if not _is_dependent(record):
+            continue
+        targets = {t for t in record.imports_resolved if t != record.rel and t in by_rel}
+        if targets:
+            imports[record.rel] = targets
+    if not imports:
+        return
+    components = strongly_connected(imports, all_components=True)
+    comp_of: dict[str, int] = {}
+    for index, members in enumerate(components):
+        for rel in members:
+            comp_of[rel] = index
+    file_bit = {rel: 1 << i for i, rel in enumerate(sorted(comp_of))}
+    folder_index: dict[str, int] = {}
+    folder_bit: dict[str, int] = {}
+    for rel in comp_of:
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        folder_bit[rel] = 1 << folder_index.setdefault(folder, len(folder_index))
+
+    # Condensation: which components import which, and how many consumers
+    # each component's bitset has left.
+    feeds: list[set[int]] = [set() for _ in components]
+    for src, targets in imports.items():
+        a = comp_of[src]
+        for dst in targets:
+            b = comp_of[dst]
+            if a != b:
+                feeds[a].add(b)
+    importers_of: list[set[int]] = [set() for _ in components]
+    for a, targets in enumerate(feeds):
+        for b in targets:
+            importers_of[b].add(a)
+    pending = [len(targets) for targets in feeds]
+    files_of: dict[int, int] = {}
+    folders_of: dict[int, int] = {}
+    for index in range(len(components) - 1, -1, -1):
+        members = components[index]
+        # Upstream components never contain this one's members (that would
+        # make them one component), so this is exactly "outside dependents".
+        outside_files = 0
+        outside_folders = 0
+        for source in importers_of[index]:
+            outside_files |= files_of[source]
+            outside_folders |= folders_of[source]
+            pending[source] -= 1
+            if pending[source] == 0:
+                del files_of[source], folders_of[source]
+        for rel in members:
+            reach_files = outside_files
+            reach_folders = outside_folders
+            if len(members) > 1:  # a cycle: every member reaches every other
+                for other in members:
+                    if other != rel:
+                        reach_files |= file_bit[other]
+                        reach_folders |= folder_bit[other]
+            record = by_rel.get(rel)
+            if record is not None:
+                record.impact = _popcount(reach_files)
+                record.impact_folders = _popcount(reach_folders)
+        if pending[index]:
+            files_of[index] = outside_files
+            folders_of[index] = outside_folders
+            for rel in members:
+                files_of[index] |= file_bit[rel]
+                folders_of[index] |= folder_bit[rel]
 
 
 def review(analysis) -> dict:
@@ -256,4 +390,9 @@ def review(analysis) -> dict:
         "untested": top(lambda f: f.untested_risk, lambda f: (f.hotspot_rank or 10**9, -f.logical_loc, f.rel)),
         "drift": top(lambda f: f.owner_drift, lambda f: (-f.logical_loc, f.rel)),
         "complexity": top(lambda f: f.is_braced, lambda f: (-f.brace_complexity, f.rel)),
+        # Third layer: impact, defects, debt, building codes.
+        "impact": top(lambda f: f.impact > 0 and _is_code(f), lambda f: (-f.impact, f.rel)) if flags.imports else [],
+        "bugprone": top(lambda f: f.is_bugprone, lambda f: (-f.fix_commits, -f.fix_ratio, f.rel)),
+        "debt": top(lambda f: f.debt_markers > 0 and _is_code(f), lambda f: (-f.debt_markers, f.rel)),
+        "codes": top(lambda f: bool(f.code_violations), lambda f: (-len(f.code_violations), -f.logical_loc, f.rel)),
     }

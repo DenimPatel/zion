@@ -15,22 +15,55 @@ import ast
 import io
 import tokenize
 
-from . import Floor, ParseResult, _shorten
+from . import DEBT_MARKER, Floor, ParseResult, _shorten
 
 
-def _comment_lines(source: str) -> set[int]:
-    """Exact line numbers occupied by ``#`` comments."""
+def _comments(source: str) -> tuple[set[int], int]:
+    """Exact line numbers occupied by ``#`` comments, and the debt markers
+    (TODO/FIXME/HACK/XXX) written inside them."""
     found: set[int] = set()
+    debt = 0
     try:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type == tokenize.COMMENT:
                 found.add(tok.start[0])
+                debt += len(DEBT_MARKER.findall(tok.string))
     except (tokenize.TokenError, IndentationError, SyntaxError):
         # Broken file: fall back to a line-level heuristic.
+        found.clear()
+        debt = 0
         for i, line in enumerate(source.splitlines(), 1):
             if line.strip().startswith("#"):
                 found.add(i)
-    return found
+                debt += len(DEBT_MARKER.findall(line))
+    return found, debt
+
+
+# Base classes and metaclasses that make a class abstract: an interface to be
+# implemented rather than code to be run.
+_ABSTRACT_BASES = {"ABC", "ABCMeta", "Protocol"}
+
+
+def _dotted_tail(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript):  # Protocol[T], Generic[T]
+        return _dotted_tail(node.value)
+    return ""
+
+
+def _is_abstract_class(node: ast.ClassDef) -> bool:
+    if any(_dotted_tail(base) in _ABSTRACT_BASES for base in node.bases):
+        return True
+    if any(kw.arg == "metaclass" and _dotted_tail(kw.value) == "ABCMeta" for kw in node.keywords):
+        return True
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if any(_dotted_tail(d) in ("abstractmethod", "abstractproperty") for d in child.decorator_list):
+                return True
+    return False
 
 
 def _docstring_lines(tree: ast.AST) -> set[int]:
@@ -69,8 +102,11 @@ def _floor_from(node: ast.AST, kind: str, depth: int, docstring: str) -> Floor:
     )
 
 
-def _imports_from(tree: ast.AST) -> list[str]:
+def _imports_from(tree: ast.AST, classes: list | None = None) -> list[str]:
     """Raw import specifiers, resolved to repo paths later (metrics.py).
+
+    The same walk collects every ``ClassDef`` into ``classes`` when given, so
+    abstractness costs no second pass over the tree.
 
     ``import a.b.c`` yields ``"a.b.c"``. ``from a.b import c`` yields
     ``"a.b"`` -- the module, not the names pulled from it, since a symbol
@@ -82,7 +118,9 @@ def _imports_from(tree: ast.AST) -> list[str]:
     """
     imports: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+        if classes is not None and isinstance(node, ast.ClassDef):
+            classes.append(node)
+        elif isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
@@ -150,7 +188,7 @@ def _entrypoint_names(tree: ast.AST) -> set[str]:
 
 def parse_python(source: str) -> ParseResult:
     tree = ast.parse(source)
-    comments = _comment_lines(source)
+    comments, debt = _comments(source)
     docstrings = _docstring_lines(tree)
     total = len(source.splitlines())
 
@@ -161,6 +199,8 @@ def parse_python(source: str) -> ParseResult:
     entrypoints = _entrypoint_names(tree)
     floors: list[Floor] = []
     symbols = 0
+    classes: list[ast.ClassDef] = []
+    imports = _imports_from(tree, classes)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             floor = _floor_from(node, "function", 0, ast.get_docstring(node) or "")
@@ -187,5 +227,8 @@ def parse_python(source: str) -> ParseResult:
         comment_lines=len(comments),
         doc_lines=len(comments | docstrings),
         confidence="high",
-        imports=_imports_from(tree),
+        imports=imports,
+        debt_markers=debt,
+        class_count=len(classes),
+        abstract_count=sum(1 for node in classes if _is_abstract_class(node)),
     )

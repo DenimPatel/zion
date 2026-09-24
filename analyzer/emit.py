@@ -18,6 +18,7 @@ import os
 from dataclasses import dataclass, field
 
 from . import parse as parse_pkg
+from .health import _is_code as is_code_file
 from .health import review as health_review
 from .layout import ROAD_NAMES, ROOT_DISTRICT, CityLayout, DistrictLayout, build_layout
 from .metrics import FileMetrics, RepoAnalysis
@@ -139,6 +140,30 @@ LEGEND_SPEC = [
      "A survey stake marks a file that changed since the baseline -- the previous build into this directory, or "
      "the revision given to --compare: green for added, blue for grown, grey for shrunk by 10% or more. The "
      "Health tab lists what became a hotspot, joined a cycle or broke a rule since."),
+    ("impact", "Transitive importers -> flood rings around the selected building", "files", "Structure",
+     "Select a building and the files a change to it can reach are ringed on the ground like a flood map: deep blue "
+     "for the files that import it directly, paler for each further hop. Its report counts every file and folder "
+     "downstream. The impact lens paints the blast radius of every file at once; foundations light up."),
+    ("main_sequence", "Abstractness vs instability -> zone of pain / uselessness", "distance", "Structure",
+     "A folder is placed on Robert C. Martin's main sequence: abstractness (the share of its classes that are "
+     "ABCs, Protocols, interfaces or traits) plus instability should be about 1. Concrete code that everything "
+     "depends on sits in the zone of pain -- a listed building nobody may renovate; abstract code nothing uses "
+     "sits in the zone of uselessness -- an empty show home. Shown in the folder's inspector and City Hall."),
+    ("externals", "Third-party packages -> the harbour manifest", "packages", "Structure",
+     "Imports that leave the repository are trade with the outside world. Each file's report lists the packages it "
+     "leans on; City Hall's harbour lists every package by how many files import it, and flags one imported but not "
+     "declared in requirements / pyproject / package.json, or declared and never imported."),
+    ("bugprone", "Commits that fix it -> smoke from the roof", "commits", "Health",
+     "Smoke rises off the roof of a file whose commits keep saying they fix something (fix, bug, hotfix, "
+     "regression in the subject): the top 5% by fix commits, with at least two and a quarter of all its commits. "
+     "Churn says a file changes; smoke says it keeps catching fire."),
+    ("debt", "TODO / FIXME / HACK in comments -> potholes", "markers", "Health",
+     "Potholes in front of the building, one per few markers: debt the authors wrote down themselves as TODO, "
+     "FIXME, HACK or XXX in a comment. Cheap to find, and the author already said what is wrong."),
+    ("codes", "Breaks a declared building code -> a code-violation notice", "rules", "Health",
+     "An orange notice is posted on a building that breaks a limit declared under \"codes\" in .zion/rules.json: "
+     "logical lines, files imported, importers, decision points in one definition, floors or debt markers. The "
+     "budgets are yours; the city enforces them."),
     ("timeline", "First commit dates -> the History slider", "days", "Construction & time",
      "Drag the History slider, or press play, and the city is rebuilt as it stood on that day: files appear on the "
      "day of their first commit and burn with that month's commits."),
@@ -279,6 +304,10 @@ def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
         "untested": ids(lists["untested"]),
         "drift": ids(lists["drift"]),
         "complexity": ids(lists["complexity"]),
+        "impact": ids(lists["impact"]),
+        "bugprone": ids(lists["bugprone"]),
+        "debt": ids(lists["debt"]),
+        "codes": ids(lists["codes"]),
         "totals": {
             "violations": sum(1 for f in analysis.files if f.is_violation),
             "untested": sum(1 for f in analysis.files if f.untested_risk),
@@ -290,6 +319,11 @@ def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
             "knowledge": sum(1 for f in analysis.files if f.knowledge_risk),
             "orphans": sum(1 for f in analysis.files if f.is_orphan),
             "cycles": len(analysis.cycles),
+            "impact": sum(1 for f in analysis.files if f.impact > 0 and is_code_file(f)),
+            "bugprone": sum(1 for f in analysis.files if f.is_bugprone),
+            "debt": sum(f.debt_markers for f in analysis.files if is_code_file(f)),
+            "debtFiles": sum(1 for f in analysis.files if f.debt_markers and is_code_file(f)),
+            "codes": sum(1 for f in analysis.files if f.code_violations),
         },
     }
 
@@ -369,7 +403,58 @@ def _district_extras(key: str, members: list[FileMetrics], arch, strings: String
         "unowned": sum(1 for f in members if f.is_unowned),
         "braced": sum(1 for f in members if f.is_braced),
         "changed": sum(1 for f in members if f.delta) if flags.delta else 0,
+        # Main sequence (architecture.py): A, D = |A + I - 1| and its zone.
+        "classes": deps.classes if deps else 0,
+        "abstractClasses": deps.abstract if deps else 0,
+        "abstractness": deps.abstractness if deps and deps.abstractness is not None else -1,
+        "distance": deps.distance if deps and deps.distance is not None else -1,
+        "zone": deps.zone if deps else "",
+        # Defects, debt, codes and trade (health.py, architecture.py, deps.py).
+        "bugprone": sum(1 for f in members if f.is_bugprone),
+        "fixCommits": sum(f.fix_commits for f in members if is_code_file(f)),
+        "debt": sum(f.debt_markers for f in members if is_code_file(f)),
+        "codeViolations": sum(1 for f in members if f.code_violations),
+        "packages": [[strings.add(name), n] for name, n in _district_packages(members)],
     }
+
+
+def _district_packages(members: list[FileMetrics], limit: int = 8) -> list[tuple[str, int]]:
+    """The packages a folder leans on most, by importing files."""
+    counts: dict[str, int] = {}
+    for record in members:
+        for name in record.packages:
+            counts[name] = counts.get(name, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:limit]
+
+
+def _externals(analysis: RepoAnalysis, strings: StringTable) -> dict | None:
+    """City Hall's harbour: third-party packages, and what the manifests miss."""
+    ext = analysis.externals
+    if not ext or not analysis.flags.externals:
+        return None
+    return {
+        "packages": [
+            [strings.add(p["name"]), p["ecosystem"], p["files"], p["folders"], p["declared"]] for p in ext["packages"]
+        ],
+        "total": ext["total"],
+        "undeclared": [strings.add(n) for n in ext["undeclared"]],
+        "unused": [strings.add(n) for n in ext["unused"]],
+        "manifests": [strings.add(m) for m in ext["manifests"]],
+    }
+
+
+def _main_sequence(analysis: RepoAnalysis, layout: CityLayout) -> list[list]:
+    """[districtId, A, I, D, zone] for every folder with both axes known."""
+    arch = analysis.architecture
+    if arch is None:
+        return []
+    rows = []
+    for index, district in enumerate(layout.districts):
+        deps = arch.districts.get(district.key)
+        if deps is None or deps.distance is None:
+            continue
+        rows.append([index, deps.abstractness, deps.instability, deps.distance, deps.zone])
+    return rows
 
 
 def _dependencies(analysis: RepoAnalysis, layout: CityLayout, strings: StringTable) -> dict | None:
@@ -474,6 +559,12 @@ def build_manifest(
         "experts": flags.authorship,
         "delta": flags.delta,
         "timeline": flags.age,
+        "impact": flags.imports,
+        "main_sequence": bool(arch is not None and any(d.distance is not None for d in arch.districts.values())),
+        "externals": flags.externals,
+        "bugprone": flags.defects and any(f.is_bugprone for f in analysis.files),
+        "debt": flags.debt,
+        "codes": flags.codes,
     }
     for entry_id, label, unit, group, description in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -685,6 +776,13 @@ def build_manifest(
         "regions": _regions(layout, strings),
         "review": _review(analysis, order),
         "dependencies": _dependencies(analysis, layout, strings),
+        "mainSequence": _main_sequence(analysis, layout),
+        "externals": _externals(analysis, strings),
+        "codesDeclared": bool(arch is not None and arch.codes_declared),
+        # Totals of the last builds into this directory, oldest first: the census.
+        "census": [
+            {"headTs": e.get("headTs", 0.0), "totals": e.get("totals", {})} for e in getattr(analysis, "census", [])
+        ],
         "delta": _delta(analysis, order, strings),
         "codeowners": strings.add(analysis.codeowners_path) if analysis.codeowners_path else -1,
         "cityHall": layout.city_hall(),
@@ -791,6 +889,9 @@ FLAG_GROWN = 1 << 19
 FLAG_SHRUNK = 1 << 20
 FLAG_BRACED = 1 << 21
 FLAG_UNOWNED = 1 << 22
+FLAG_BUGPRONE = 1 << 23
+FLAG_DEBT = 1 << 24
+FLAG_CODES = 1 << 25
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
@@ -799,6 +900,8 @@ INDEX_COLUMNS = [
     "id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path",
     # Appended for the richer query tokens (owner:, cx>, fanin>, fanout>, delta>).
     "owner", "cx", "fanin", "fanout", "delta",
+    # Appended for the third layer (impact>, fixes>, debt>).
+    "impact", "fixes", "debt",
 ]
 
 
@@ -926,6 +1029,18 @@ def _building_record(
         "delta": record.delta,
         "locDelta": record.loc_delta,
         "became": list(record.became),
+        # Third layer: blast radius, repairs, debt, abstractness, trade, codes.
+        "impact": record.impact,
+        "impactFolders": record.impact_folders,
+        "fixCommits": record.fix_commits,
+        "revertCommits": record.revert_commits,
+        "fixRatio": record.fix_ratio,
+        "bugprone": record.is_bugprone,
+        "debt": record.debt_markers if is_code_file(record) else 0,
+        "classes": record.class_count,
+        "abstractClasses": record.abstract_count,
+        "packages": [strings.add(p) for p in record.packages],
+        "codeViolations": [strings.add(v) for v in record.code_violations],
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
         "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
@@ -1004,6 +1119,12 @@ def _build_index(
             flags |= FLAG_BRACED
         if record.is_unowned:
             flags |= FLAG_UNOWNED
+        if record.is_bugprone:
+            flags |= FLAG_BUGPRONE
+        if record.debt_markers and is_code_file(record):
+            flags |= FLAG_DEBT
+        if record.code_violations:
+            flags |= FLAG_CODES
         rows.append(
             [
                 index,
@@ -1022,6 +1143,9 @@ def _build_index(
                 record.import_in_degree,
                 len(record.imports_resolved),
                 record.loc_delta,
+                record.impact,
+                record.fix_commits,
+                record.debt_markers if is_code_file(record) else 0,
             ]
         )
     rows.sort(key=lambda row: row[0])
@@ -1222,6 +1346,9 @@ def emit_city(
         baseline = history.previous_baseline(out_dir, current_summary)
     analysis.delta = history.apply_delta(analysis, baseline, summary_key)
     analysis.flags.delta = bool(analysis.delta)
+    # Totals across builds (counts only, never a path): City Hall's census.
+    census = history.census(out_dir, current_summary) if options.track_history else []
+    analysis.census = census
 
     manifest = build_manifest(analysis, layout, strings, options, crypto_meta)
 
@@ -1366,6 +1493,7 @@ def emit_city(
     bytes_written += _write(os.path.join(out_dir, "city.json"), _json(manifest))
     if options.track_history:
         bytes_written += history.write_summaries(out_dir, current_summary)
+        bytes_written += history.write_census(out_dir, current_summary, census)
 
     bytes_written += install_viewer(out_dir)
 

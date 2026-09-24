@@ -8,6 +8,12 @@ it, and ``zion.py build --compare REV`` compares against the repository as it
 was at any commit, analysed in a temporary directory (``git archive``, read
 only -- nothing is checked out in the analyzed repository).
 
+Every build also appends its totals to ``census.json`` in the same directory
+(the last ``CENSUS_LIMIT`` builds, one entry per commit): no path, only
+counts, so it is the same in a plain and an encrypted city. City Hall draws it
+as the census -- the direction of every signal across builds, not just the
+one step since the last.
+
 The result is a *delta*: files added, grown and shrunk; files that became a
 hotspot, joined a cycle or broke a layering rule; files that stopped being
 one; removed files; and the before/after totals for the trend line.
@@ -31,6 +37,8 @@ import tempfile
 
 SUMMARY_FILE = "summary.json"
 PREVIOUS_FILE = "summary.prev.json"
+CENSUS_FILE = "census.json"
+CENSUS_LIMIT = 30
 SUMMARY_FORMAT = "zion-summary"
 
 # Per-file signal bits in a summary. Append-only.
@@ -43,6 +51,8 @@ SIGNALS = (
     ("knowledge", lambda f: f.knowledge_risk),
     ("untested", lambda f: f.untested_risk),
     ("drift", lambda f: f.owner_drift),
+    ("bugprone", lambda f: f.is_bugprone),
+    ("codes", lambda f: bool(f.code_violations)),
 )
 GROWTH_MIN_LINES = 10
 GROWTH_MIN_FRACTION = 0.1
@@ -64,6 +74,8 @@ def _bits(record) -> int:
 
 
 def totals(analysis) -> dict:
+    from .health import _is_code
+
     files = analysis.files
     arch = getattr(analysis, "architecture", None)
     return {
@@ -78,6 +90,11 @@ def totals(analysis) -> dict:
         "knowledge": sum(1 for f in files if f.knowledge_risk),
         "untested": sum(1 for f in files if f.untested_risk),
         "drift": sum(1 for f in files if f.owner_drift),
+        "bugprone": sum(1 for f in files if f.is_bugprone),
+        "debt": sum(f.debt_markers for f in files if _is_code(f)),
+        "codes": sum(1 for f in files if f.code_violations),
+        "zonePain": sum(1 for d in arch.districts.values() if d.zone == "pain") if arch is not None else 0,
+        "undeclared": len((getattr(analysis, "externals", None) or {}).get("undeclared", [])),
     }
 
 
@@ -125,6 +142,46 @@ def previous_baseline(out_dir: str, current: dict) -> dict | None:
         if before is not None and before.get("root") == current.get("root") and before.get("keying") == current.get("keying"):
             return before
     return last
+
+
+def census(out_dir: str, current: dict) -> list[dict]:
+    """Earlier builds' totals plus this one's, oldest first, one per commit."""
+    entries: list[dict] = []
+    try:
+        with open(os.path.join(out_dir, CENSUS_FILE), encoding="utf-8") as fh:
+            data = json.load(fh)
+        if (
+            isinstance(data, dict)
+            and data.get("root") == current.get("root")
+            and data.get("keying") == current.get("keying")
+            and isinstance(data.get("entries"), list)
+        ):
+            entries = [e for e in data["entries"] if isinstance(e, dict) and isinstance(e.get("totals"), dict)]
+    except (OSError, ValueError):
+        entries = []
+    head = current.get("head") or ""
+    entries = [e for e in entries if not head or e.get("head") != head[:12]]
+    entries.append(
+        {
+            "generated": current.get("generated", ""),
+            "head": head[:12],
+            "headTs": current.get("headTs", 0.0),
+            "totals": dict(current.get("totals") or {}),
+        }
+    )
+    entries.sort(key=lambda e: (e.get("headTs") or 0.0, e.get("generated") or ""))
+    return entries[-CENSUS_LIMIT:]
+
+
+def write_census(out_dir: str, current: dict, entries: list[dict]) -> int:
+    data = json.dumps(
+        {"format": "zion-census", "root": current.get("root"), "keying": current.get("keying"), "entries": entries},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, CENSUS_FILE), "wb") as fh:
+        fh.write(data)
+    return len(data)
 
 
 def write_summaries(out_dir: str, current: dict) -> int:
