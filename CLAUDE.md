@@ -19,7 +19,7 @@ python3 zion.py build  /path/to/repo --compare REV   # delta against a revision 
 python3 bench/generate_repo.py bench/tmp/repo-50000 --files 50000 --commits 40   # synthetic repo for scale testing
 ```
 
-Tests (121 tests, stdlib only, no test runner dependency):
+Tests (134 tests, stdlib only, no test runner dependency):
 
 ```
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -30,21 +30,24 @@ python3 -m unittest tests.test_golden.GoldenTest.test_town_hall_flags   # single
 `tests/capture.py` is a developer tool for screenshotting the HUD via the Chrome DevTools Protocol
 (needs `websocket-client`); it is **not** collected by `test_*.py` discovery.
 
-Headless viewer self-test (73 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
+Headless viewer self-test (79 interactive checks on a plain city, more when encrypted; dumps `ZION_SELFTEST {…}` JSON):
 
 ```
 "/path/to/Chrome" --headless=new --no-sandbox --enable-unsafe-swiftshader \
   --virtual-time-budget=60000 --dump-dom "http://127.0.0.1:PORT/?selftest=1"
 ```
 
-`--enable-unsafe-swiftshader` is required or Chrome reports `NO_WEBGL` and renders nothing.
+`--enable-unsafe-swiftshader` is required or Chrome reports `NO_WEBGL` and renders nothing. For an encrypted city pass
+`&rawkey=<base64url key>` (derive it with `analyzer.crypto.derive_key` and the manifest's salt): `&pass=` runs the
+310k-iteration PBKDF2 in the page, which never settles under the virtual clock. `tour-no-jumps` also fails headless on
+the unmodified tree (virtual-time frame pacing).
 
 Encrypted build: `ZION_PASSPHRASE='…' python3 zion.py build /path/to/repo --encrypt`.
 
 ## Architecture
 
 **Pipeline (all Python, all in `analyzer/`):** `walk.py` → `gitmeta.py` → `metrics.py` (→ `health.py`, `owners.py`,
-`testmap.py`) → `layout.py` (→ `architecture.py`) → `history.py` + `crypto.py` (if `--encrypt`) → `emit.py`; `report.py`
+`testmap.py`, `deps.py`) → `layout.py` (→ `architecture.py`) → `history.py` + `crypto.py` (if `--encrypt`) → `emit.py`; `report.py`
 renders the same analysis as Markdown/JSON for `zion.py report`. The viewer never parses source — it only receives numbers
 (the manifest + chunk JSON emitted by `emit.py`). `zion.py` is the CLI that wires this pipeline together
 for `stats`/`build`/`serve`/`bench`.
@@ -53,7 +56,7 @@ for `stats`/`build`/`serve`/`bench`.
   call); `.gitignore` semantics are never reimplemented. `--include-noise` switches to a filesystem walk
   and marks excluded files as ruins instead of buildings.
 - `gitmeta.py` — one `git log --numstat` pass produces authorship, churn, recency, and co-change coupling
-  for every file in a single pass (not one call per file).
+  for every file in a single pass (not one call per file), plus per-file fix and revert commits from the subject line.
 - `analyzer/parse/` — per-language floor/line extraction: `python_ast` (real AST), `notebook` (cell source
   only, ignores base64 outputs), `brace` (heuristic string/comment-stripping + brace-depth tracking for
   js/ts/java/go/c/cpp/cs/rs/kt/swift/php/scala — marked `confidence: "medium"`, not semantically trustworthy),
@@ -63,21 +66,28 @@ for `stats`/`build`/`serve`/`bench`.
   history is too degenerate to support it (e.g. single author, single commit date).
 - `health.py` — the architect's signals, from numbers `metrics.py` already has: first/last author, bus
   factor, owner-inactive knowledge risk, hotspots (commit frequency × size), oversized files, orphan
-  candidates and import cycles (iterative Tarjan). Each gated on its own flag (`hotspots`, `knowledge`,
-  `imports`); vendored paths are excluded.
+  candidates and import cycles (iterative Tarjan), blast radius (`impact`: exact transitive importers via SCC
+  condensation + int bitsets -- never a per-file BFS, which is quadratic on a long chain), bug-prone files (fix
+  commits) and debt markers (TODO/FIXME/HACK/XXX, counted by the parsers inside comments only). Each gated on its own
+  flag (`hotspots`, `knowledge`, `imports`, `defects`, `debt`); vendored paths are excluded.
 - `architecture.py` — dependency structure between leaf districts, run at the end of `build_layout` (it needs districts):
-  per-folder Ca/Ce/instability, the folder matrix, layering violations (from a read-only `.zion/rules.json` /
-  `zion.rules.json`, else "the thinner direction of a folder pair that imports both ways") and cross-folder
-  co-change. Tests and vendored code are not design dependencies.
+  per-folder Ca/Ce/instability, abstractness and distance from the main sequence (zone of pain / uselessness), the
+  folder matrix, layering violations (from a read-only `.zion/rules.json` / `zion.rules.json` with `layers`/`forbid`,
+  else "the thinner direction of a folder pair that imports both ways"), building codes (`codes` in the same file:
+  per-file limits, checked whether or not imports resolved) and cross-folder co-change. Tests and vendored code are not design dependencies.
 - `owners.py` — recency-weighted experts ("who to ask", half-life 180 days), author shares, and CODEOWNERS parsing
   (gitignore semantics, last match wins) with drift = the named individuals commit but did not write the file. Teams
   are never called drifted. Needs `gitmeta`'s author emails.
 - `testmap.py` — links tests to sources by resolved import and by same-language name stem; `untested_risk` only for
   hotspot/oversized/downtown files and only when at least one link exists (`flags.tests`). Also `is_braced`
   (a *function or method* with ≥ 15 decision points — class totals are sums, not one definition).
+- `deps.py` — external trade: unresolved Python imports (minus stdlib and the repo's own folder/module names) and
+  bare JS/TS specifiers become package names, checked against `requirements*.txt`, `pyproject.toml`, `package.json`
+  (read-only) for undeclared and unused packages. Only ecosystems whose imports the parsers collect are judged.
 - `history.py` — `summary.json` per build (paths HMAC-keyed under `--encrypt`), the delta against the last build in
   the same output dir (or the one before it when the head did not move), and `analyze_revision` for `--compare REV`
-  (`git archive` into a temp dir; never touches the analyzed working tree).
+  (`git archive` into a temp dir; never touches the analyzed working tree). `census.json` keeps the totals of the last 30
+  builds (one per commit, counts only) for the Health tab's census sparklines.
 - `layout.py` — chooses district depth (most structure within a readable district-count band, preferring
   no single-building district, ties toward shallower), then lays the leaf districts out as a *nested*
   treemap over their folder tree: each folder that splits becomes a region (raised plinth) and the roads
@@ -101,10 +111,10 @@ from; `facade.js` renders windows per-fragment from a building's own metrics (no
 window rows equal parsed floor counts; `interior.js` builds/destroys building interiors on enter/leave
 (max 2 cached), slicing source by byte offset so displayed text matches exactly what was measured;
 `labels.js` projects region/district names as DOM labels, revealed by camera distance per level;
-`selection.js` draws what the current selection is connected to (import lines, co-change rings, district arcs) —
+`selection.js` draws what the current selection is connected to (import lines, co-change rings, the blast-radius flood map, district arcs) —
 only for the selection, as its own scene group; `notes.js` (localStorage, keyed by repo name + path) and
 `views.js` (URL-hash saved views) are the reader's own state; `parts/structure.js` holds the no-entry sign,
-traffic cones, cross-bracing, survey stake, owner notice and note pin;
+traffic cones, cross-bracing, survey stake, owner notice, note pin, smoke plume, potholes and code notice;
 `inspector.js` is the explaining building/district/region report; `cityhall/`, `tour.js`, `cameras.js`,
 `collision.js`, `sky.js` are self-explanatory;
 `vault.js` handles client-side WebCrypto decryption of encrypted cities.
@@ -140,7 +150,8 @@ traffic cones, cross-bracing, survey stake, owner notice and note pin;
   edges are building ids, summaries are HMAC-keyed, names go through the string table.
 - Streets are `[x, y, w, h, class]` and regions carry `level`; anything drawn on the ground (district
   plates, roads, ground props) must sit on `plinthTop(level)` from `viewer/js/city.js`, or it is buried
-  inside the plinth.
+  inside the plinth. Anything flat laid *on* a district plate needs real clearance above it (the selection overlay
+  uses `GROUND_LIFT` = 0.3 m plus polygon offset): with a 0.5 m near plane a few centimetres z-fights away at range.
 - Geometry must stay byte-identical between plain and encrypted builds; only labels/text change under
   `--encrypt`. Don't let `crypto.py` changes touch coordinates, sizes, or IDs.
 - `analyzer/` must never write into the analyzed repo; output goes to `-o DIR` or the cache dir computed
