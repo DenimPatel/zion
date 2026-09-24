@@ -37,6 +37,7 @@ import {
   mergeParts,
   obelisk,
   paint,
+  paintByPart,
   pennant,
   tag,
 } from '../primitives.js';
@@ -188,6 +189,16 @@ export function townHallGeometry(THREE) {
   return mergeColouredParts(THREE, parts);
 }
 
+// [BODY, SETBACK, CROWN, PODIUM, FIXED] over the silo's own ochre: a concrete
+// footing, a galvanised cap and grey steel ribs, ladder and catwalk.
+const SILO_PALETTE = [
+  [1.0, 1.0, 1.0],
+  [0.9, 0.9, 0.9],
+  [0.95, 1.05, 1.18],
+  [1.12, 1.14, 1.16],
+  [0.72, 0.78, 0.86],
+];
+
 export function siloGeometry(THREE) {
   // Banding ribs every few metres up the drum: the single detail that makes a
   // smooth cylinder read as a grain silo rather than as a tank. Twelve-sided
@@ -284,7 +295,7 @@ export function siloGeometry(THREE) {
     }));
   }
 
-  return mergeParts(THREE, [
+  return paintByPart(THREE, mergeParts(THREE, [
     box(THREE, { w: 1.0, d: 1.0, y0: 0, y1: 0.05, part: PART_PODIUM }),
     // CRITICAL: the drum, with its top at y = 0.86 exactly as before.
     cylinder(THREE, { rTop: 0.44, rBottom: 0.46, y0: 0.03, y1: 0.86, part: PART_BODY }),
@@ -309,28 +320,37 @@ export function siloGeometry(THREE) {
     }),
     ...catwalk,
     ...ladder,
-  ]);
+  ]), SILO_PALETTE);
 }
+
+// A monument paints its own materials (its instance colour is near white under
+// the archetype lens): graded granite steps, a sandstone base, a marble shaft,
+// bronze fittings and a gilded point.
+const GRANITE = [[0.46, 0.47, 0.5], [0.54, 0.55, 0.58], [0.62, 0.63, 0.66]];
+const SANDSTONE = [0.82, 0.74, 0.6];
+const MARBLE = [0.93, 0.92, 0.88];
+const BRONZE = [0.55, 0.4, 0.22];
+const GILT = [1.0, 0.84, 0.42];
 
 export function monumentGeometry(THREE) {
   // Three shallow steps, each a little narrower than the one below: a single
   // plinth reads as a base, three read as something deliberately built up to,
   // the way real monuments are.
   const steps = [
-    box(THREE, { w: 1.0, d: 1.0, y0: 0, y1: 0.05, part: PART_PODIUM }),
-    box(THREE, { w: 0.84, d: 0.84, y0: 0.045, y1: 0.09, part: PART_FIXED }),
-    box(THREE, { w: 0.68, d: 0.68, y0: 0.085, y1: 0.13, part: PART_FIXED }),
+    paint(THREE, box(THREE, { w: 1.0, d: 1.0, y0: 0, y1: 0.05, part: PART_PODIUM }), GRANITE[0]),
+    paint(THREE, box(THREE, { w: 0.84, d: 0.84, y0: 0.045, y1: 0.09, part: PART_FIXED }), GRANITE[1]),
+    paint(THREE, box(THREE, { w: 0.68, d: 0.68, y0: 0.085, y1: 0.13, part: PART_FIXED }), GRANITE[2]),
   ];
   const base = [
-    box(THREE, { w: 0.52, d: 0.52, y0: 0.125, y1: 0.21, part: PART_FIXED }),
-    box(THREE, { w: 0.58, d: 0.58, y0: 0.2, y1: 0.235, part: PART_FIXED }),
+    paint(THREE, box(THREE, { w: 0.52, d: 0.52, y0: 0.125, y1: 0.21, part: PART_FIXED }), SANDSTONE),
+    paint(THREE, box(THREE, { w: 0.58, d: 0.58, y0: 0.2, y1: 0.235, part: PART_FIXED }), MARBLE),
   ];
   // Corner posts on the base: the shafts that make the base a base and not
   // another step, holding the shaft as if it were carried rather than set down.
   const posts = [];
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
-      posts.push(box(THREE, {
+      posts.push(paint(THREE, box(THREE, {
         w: 0.07,
         d: 0.07,
         x: sx * 0.2,
@@ -338,7 +358,7 @@ export function monumentGeometry(THREE) {
         y0: 0.2,
         y1: 0.32,
         part: PART_FIXED,
-      }));
+      }), BRONZE));
     }
   }
   // A bronze wreath on the base's front face: eight short bars stood on a
@@ -347,28 +367,28 @@ export function monumentGeometry(THREE) {
   const wreath = [];
   for (let i = 0; i < 8; i += 1) {
     const a = (i / 8) * Math.PI * 2;
-    wreath.push(tag(
+    wreath.push(paint(THREE, tag(
       new THREE.BoxGeometry(0.022, 0.06, 0.016)
         .rotateZ(a)
         .translate(Math.cos(a) * 0.055, 0.17 + Math.sin(a) * 0.055, -0.266),
       PART_FIXED,
       0.09,
       0.25
-    ));
+    ), BRONZE));
   }
 
-  return mergeParts(THREE, [
+  return mergeColouredParts(THREE, [
     ...steps,
     ...base,
     ...posts,
     // CRITICAL: the tapered obelisk shaft, with its top at y = 0.86.
-    obelisk(THREE, { rTop: 0.2, rBottom: 0.32, y0: 0.22, y1: 0.86, part: PART_BODY }),
+    paint(THREE, obelisk(THREE, { rTop: 0.2, rBottom: 0.32, y0: 0.22, y1: 0.86, part: PART_BODY }), MARBLE),
     // A cornice collar at the shaft/pyramidion seam -- the detail line real
     // obelisks carry at exactly that transition.
-    obelisk(THREE, { rTop: 0.23, rBottom: 0.23, y0: 0.85, y1: 0.885, part: PART_FIXED }),
-    obelisk(THREE, { rTop: 0.001, rBottom: 0.2, y0: 0.87, y1: 0.98, part: PART_CROWN }),
+    paint(THREE, obelisk(THREE, { rTop: 0.23, rBottom: 0.23, y0: 0.85, y1: 0.885, part: PART_FIXED }), BRONZE),
+    paint(THREE, obelisk(THREE, { rTop: 0.001, rBottom: 0.2, y0: 0.87, y1: 0.98, part: PART_CROWN }), GILT),
     // A small bronze ball finial, so the point is not the only note at the top.
-    tag(new THREE.SphereGeometry(0.015, 6, 4).translate(0, 0.985, 0), PART_CROWN, 0.97, 1.0),
+    paint(THREE, tag(new THREE.SphereGeometry(0.015, 6, 4).translate(0, 0.985, 0), PART_CROWN, 0.97, 1.0), GILT),
     ...wreath,
   ]);
 }

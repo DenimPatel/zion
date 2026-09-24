@@ -13,6 +13,9 @@
  *                    that breaks the layering (analyzer/architecture.py).
  *   cochange-rings   a teal ring on the ground around every file that keeps
  *                    changing in the same commits (the co-change pairs).
+ *   impact-rings     the blast radius: a flood-map disc under every file that
+ *                    transitively imports the selection, deepest violet one
+ *                    hop away and paler for each further hop (to IMPACT_HOPS).
  *   district-links   for a district: arcs to the folders it imports and is
  *                    imported by, and teal arcs to the folders it changes with,
  *                    each as thick as the relationship is strong.
@@ -33,6 +36,37 @@ export const LINK_COLOURS = {
 
 const MAX_LINES = 80;
 const MAX_RINGS = 60;
+const MAX_FLOOD = 160;
+// Ground marks sit this far above the district plate (itself 3 cm above the
+// plinth). A few centimetres is lost to depth precision at a few hundred
+// metres with a 0.5 m near plane, and the mark z-fights into the pavement.
+const GROUND_LIFT = 0.3;
+// Flood colours by hop: 1 (imports it directly) is the deepest.
+export const IMPACT_COLOURS = [0x7b3fe4, 0x9a6cf0, 0xb89af5, 0xd6c6fa];
+export const IMPACT_HOPS = IMPACT_COLOURS.length;
+
+/**
+ * Every file that transitively imports `id`, with its hop count, nearest
+ * first. `importers` is edgeMaps(...).importers; the walk is breadth-first so
+ * each file keeps its shortest distance, and stops at `maxHops`.
+ */
+export function blastRadius(importers, id, maxHops = IMPACT_HOPS) {
+  const hops = new Map([[id, 0]]);
+  let frontier = [id];
+  for (let hop = 1; hop <= maxHops && frontier.length; hop++) {
+    const next = [];
+    for (const node of frontier) {
+      for (const from of importers.get(node) || []) {
+        if (hops.has(from)) continue;
+        hops.set(from, hop);
+        next.push(from);
+      }
+    }
+    frontier = next;
+  }
+  hops.delete(id);
+  return [...hops.entries()];
+}
 
 /** A tube along a shallow arc from `a` to `b`, apex proportional to the span. */
 function arc(THREE, a, b, radius, lift = 0.22) {
@@ -91,6 +125,10 @@ export class SelectionOverlay {
       transparent: opacity < 1,
       opacity,
       depthWrite: opacity >= 1,
+      // Win depth ties with whatever lies flat beneath it.
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -4,
     });
     const mesh = new THREE.Mesh(mergeParts(THREE, parts), material);
     mesh.name = name;
@@ -108,7 +146,7 @@ export class SelectionOverlay {
    * building, or of its district's centre when that building is not resident
    * (then `approximate: true`), or null when it is unknown.
    */
-  showBuilding(building, { outgoing = [], incoming = [], partners = [], positionOf }) {
+  showBuilding(building, { outgoing = [], incoming = [], partners = [], impact = [], positionOf }) {
     this.clear();
     const THREE = this.THREE;
     const from = positionOf(building.id);
@@ -140,11 +178,33 @@ export class SelectionOverlay {
       const outer = Math.max(at.width || 4, at.depth || 4) * 0.72 + 1.2;
       const geometry = new THREE.RingGeometry(outer - Math.max(0.35, outer * 0.12), outer, 32);
       geometry.rotateX(-Math.PI / 2);
-      geometry.translate(at.x, at.y + 0.08, at.z);
+      geometry.translate(at.x, at.y + GROUND_LIFT + 0.04, at.z);
       rings.push(tag(geometry, PART_FIXED, 0, 1));
     }
     this._mesh('cochange-rings', rings, LINK_COLOURS.cochange, 0.85);
-    this.summary = { kind: 'building', outgoing: outgoing.length, incoming: incoming.length, partners: partners.length, drawn };
+
+    // The flood map: a flat disc under each downstream file. Drawn below the
+    // co-change rings, which stay legible on top of it when a file is both.
+    const floods = IMPACT_COLOURS.map(() => []);
+    let flooded = 0;
+    for (const [id, hop] of impact) {
+      if (flooded >= MAX_FLOOD) break;
+      const at = positionOf(id);
+      if (!at || at.approximate || hop < 1) continue;
+      // Wider than the plot's half-diagonal, so the flood shows as a halo
+      // around the building rather than a disc hidden underneath it.
+      const radius = Math.hypot(at.width || 4, at.depth || 4) * 0.5 + 2.4;
+      const geometry = new THREE.CircleGeometry(radius, 28);
+      geometry.rotateX(-Math.PI / 2);
+      geometry.translate(at.x, at.y + GROUND_LIFT, at.z);
+      floods[Math.min(hop, IMPACT_HOPS) - 1].push(tag(geometry, PART_FIXED, 0, 1));
+      flooded++;
+    }
+    floods.forEach((parts, i) => this._mesh(`impact-rings-${i + 1}`, parts, IMPACT_COLOURS[i], 0.55 - i * 0.07));
+    this.summary = {
+      kind: 'building', outgoing: outgoing.length, incoming: incoming.length, partners: partners.length, drawn,
+      impact: impact.length, flooded,
+    };
   }
 
   /**

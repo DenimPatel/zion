@@ -10,7 +10,9 @@ Gate conditions (comma-separated):
 
 - ``<signal>``: any file carries it now -- ``cycles``, ``violations``,
   ``hotspots``, ``oversized``, ``orphans``, ``knowledge``, ``untested``,
-  ``drift``;
+  ``drift``, ``bugprone``, ``codes`` (a declared building code is broken),
+  ``zone-of-pain`` (a folder sits there), ``undeclared-dep`` (a third-party
+  package is imported but no manifest declares it);
 - ``<signal>-up``: the repository-wide total rose against the baseline;
 - ``new-<signal>``: at least one file gained it since the baseline
   (``new-hotspot``, ``new-cycle``, ``new-violation``, ``new-untested`` ...).
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import os
 
+from .health import _is_code
 from .history import totals
 
 TOTAL_KEYS = {
@@ -35,12 +38,18 @@ TOTAL_KEYS = {
     "knowledge": "knowledge",
     "untested": "untested",
     "drift": "drift",
+    "bugprone": "bugprone",
+    "codes": "codes",
+    "debt": "debt",
+    "zone-of-pain": "zonePain",
+    "undeclared-dep": "undeclared",
+    "undeclared": "undeclared",
 }
 SIGNAL_ALIASES = {
     "hotspot": "hotspot", "hotspots": "hotspot", "cycle": "cycle", "cycles": "cycle",
     "violation": "violation", "violations": "violation", "oversized": "oversized",
     "orphan": "orphan", "orphans": "orphan", "knowledge": "knowledge", "untested": "untested",
-    "drift": "drift",
+    "drift": "drift", "bugprone": "bugprone", "code": "codes", "codes": "codes",
 }
 LIST_LIMIT = 15
 
@@ -77,6 +86,9 @@ def build_report(analysis, layout, delta: dict | None = None) -> dict:
             "instability": deps.instability if deps else None,
             "violations": deps.violations if deps else 0,
             "busFactor": district.bus_factor,
+            "abstractness": deps.abstractness if deps else None,
+            "distance": deps.distance if deps else None,
+            "zone": deps.zone if deps else "",
             "hotspots": district.hotspots,
             "tested": f"{sum(1 for f in code if f.is_tested)}/{len(code)}" if code else "",
             "experts": [a for a, _ in sorted(scores.items(), key=lambda kv: -kv[1])[:3]] if flags.authorship else [],
@@ -126,6 +138,31 @@ def build_report(analysis, layout, delta: dict | None = None) -> dict:
         "coupling": [
             {"a": a, "b": b, "pairs": n, "commits": c} for a, b, n, c in (arch.coupling if arch is not None else [])
         ],
+        "impact": [
+            {"path": f.rel, "files": f.impact, "folders": f.impact_folders}
+            for f in top(lambda f: f.impact > 0 and not f.is_test, lambda f: (-f.impact, f.rel))
+        ] if flags.imports else [],
+        "bugprone": [
+            {"path": f.rel, "fixes": f.fix_commits, "commits": f.commits, "reverts": f.revert_commits}
+            for f in top(lambda f: f.is_bugprone, lambda f: (-f.fix_commits, -f.fix_ratio, f.rel))
+        ],
+        "debt": [
+            {"path": f.rel, "markers": f.debt_markers}
+            for f in top(lambda f: f.debt_markers > 0 and _is_code(f), lambda f: (-f.debt_markers, f.rel))
+        ],
+        "codes": [
+            {"path": f.rel, "broken": list(f.code_violations)}
+            for f in top(lambda f: bool(f.code_violations), lambda f: (-len(f.code_violations), f.rel))
+        ],
+        "zones": [
+            {"folder": key, "zone": d.zone, "abstractness": d.abstractness, "instability": d.instability,
+             "distance": d.distance}
+            for key, d in sorted(
+                ((k, d) for k, d in (arch.districts.items() if arch is not None else []) if d.zone),
+                key=lambda kv: (-kv[1].distance, kv[0]),
+            )
+        ],
+        "externals": dict(analysis.externals) if flags.externals else None,
         "districtTable": sorted(districts, key=lambda d: (-(d["ca"] + d["ce"]), d["folder"])),
         "delta": None,
     }
@@ -194,7 +231,9 @@ def render_markdown(report: dict) -> str:
     for key, label in (
         ("hotspots", "Hotspots"), ("oversized", "Oversized files"), ("cycles", "Import cycles"),
         ("violations", "Layering violations"), ("untested", "Untested risky files"), ("knowledge", "Knowledge risks"),
-        ("orphans", "Possible dead code"), ("drift", "CODEOWNERS drift"), ("files", "Files"), ("loc", "Logical lines"),
+        ("orphans", "Possible dead code"), ("drift", "CODEOWNERS drift"), ("bugprone", "Bug-prone files"),
+        ("debt", "Debt markers"), ("codes", "Building-code breaches"), ("zonePain", "Folders in the zone of pain"),
+        ("undeclared", "Undeclared packages"), ("files", "Files"), ("loc", "Logical lines"),
     ):
         row = f"| {label} | {t.get(key, 0):,} |"
         if report["delta"]:
@@ -248,17 +287,52 @@ def render_markdown(report: dict) -> str:
         section("CODEOWNERS drift", report["drift"],
                 lambda d: f"`{d['path']}` — declared {', '.join(d['declared'])}, written by {d['actual']}")
     section("Possible dead code", report["orphans"], lambda p: f"`{p}`")
+    section("Blast radius (files that transitively import it)", report["impact"],
+            lambda i: f"`{i['path']}` — {i['files']:,} file(s) in {i['folders']} folder(s)",
+            "No imports resolved." if not flags.get("imports") else "None found.")
+    section("Bug-prone files (commits that fix them)", report["bugprone"],
+            lambda b: f"`{b['path']}` — {b['fixes']} of {b['commits']} commits are fixes"
+            + (f", {b['reverts']} revert(s)" if b["reverts"] else ""),
+            "No commit subject names a fix." if not flags.get("defects") else "None found.")
+    section("Debt markers (TODO / FIXME / HACK / XXX)", report["debt"],
+            lambda d: f"`{d['path']}` — {d['markers']}")
+    if report["codes"] or flags.get("codes"):
+        section("Building-code breaches (.zion/rules.json)", report["codes"],
+                lambda c: f"`{c['path']}` — " + "; ".join(c["broken"]))
+    section("Main sequence: folders far from A + I = 1", report["zones"],
+            lambda z: f"`{z['folder']}` — zone of {z['zone']} (A {z['abstractness']:.2f}, I {z['instability']:.2f}, "
+            f"D {z['distance']:.2f})")
+    ext = report["externals"]
+    if ext:
+        add("## External dependencies")
+        add("")
+        add(f"{ext['total']} third-party package(s); manifests: "
+            + (", ".join(f"`{m}`" for m in ext["manifests"]) or "none found") + ".")
+        add("")
+        add("| Package | Ecosystem | Files | Folders | Declared |")
+        add("|---|---|---|---|---|")
+        for p in ext["packages"][:LIST_LIMIT]:
+            declared = "yes" if p["declared"] else ("**no**" if ext["manifests"] else "—")
+            add(f"| `{p['name']}` | {p['ecosystem']} | {p['files']} | {p['folders']} | {declared} |")
+        add("")
+        if ext["undeclared"]:
+            add("- **Imported, not declared:** " + ", ".join(f"`{n}`" for n in ext["undeclared"]))
+        if ext["unused"]:
+            add("- **Declared, never imported:** " + ", ".join(f"`{n}`" for n in ext["unused"]))
+        add("")
     section("Folders that change together", report["coupling"],
             lambda c: f"`{c['a']}` ↔ `{c['b']}` — {c['pairs']} file pairs, {c['commits']} shared commits",
             "Disabled: too little history." if not flags.get("coupling") else "None found.")
 
     add("## Folders")
     add("")
-    add("| Folder | Files | Lines | Ca | Ce | Instability | Violations | Bus factor | Tested | Ask |")
-    add("|---|---|---|---|---|---|---|---|---|---|")
+    add("| Folder | Files | Lines | Ca | Ce | Instability | Abstractness | Distance | Violations | Bus factor | Tested | Ask |")
+    add("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for d in report["districtTable"]:
         inst = "—" if d["instability"] is None else f"{d['instability']:.2f}"
-        add(f"| `{d['folder']}` | {d['files']} | {d['loc']:,} | {d['ca']} | {d['ce']} | {inst} | {d['violations']} | "
+        abst = "—" if d["abstractness"] is None else f"{d['abstractness']:.2f}"
+        dist = "—" if d["distance"] is None else f"{d['distance']:.2f}" + (f" ({d['zone']})" if d["zone"] else "")
+        add(f"| `{d['folder']}` | {d['files']} | {d['loc']:,} | {d['ca']} | {d['ce']} | {inst} | {abst} | {dist} | {d['violations']} | "
             f"{d['busFactor']} | {d['tested'] or '—'} | {', '.join(d['experts']) or '—'} |")
     add("")
     if report["notes"]:

@@ -48,7 +48,45 @@ import {
   gable,
   mergeParts,
   obelisk,
+  paintByPart,
 } from '../primitives.js';
+
+/**
+ * Material palettes, by part: [BODY, SETBACK, CROWN, PODIUM, FIXED]. Each is a
+ * multiplier over the instance colour (archetype + author tint), so the wall
+ * keeps the colour the legend describes and the rest reads as built from other
+ * materials: a sandstone podium, a darker setback band, a metal or tiled crown,
+ * pale stone trim. Only the detailed tier carries them, and only under the
+ * archetype lens -- any data lens paints each building one flat colour.
+ */
+const TOWER_PALETTE = [
+  [1.0, 1.0, 1.0],
+  [0.84, 0.87, 0.93],
+  [0.58, 0.62, 0.7],
+  [1.24, 1.08, 0.86],
+  [1.22, 1.2, 1.12],
+];
+const SLAB_PALETTE = [
+  [1.0, 1.0, 1.0],
+  [0.88, 0.88, 0.9],
+  [0.86, 0.58, 0.48],
+  [1.2, 1.06, 0.88],
+  [1.18, 1.15, 1.06],
+];
+const WAREHOUSE_PALETTE = [
+  [1.0, 1.0, 1.0],
+  [0.82, 0.82, 0.84],
+  [1.02, 0.56, 0.44],
+  [0.92, 0.92, 0.95],
+  [1.14, 1.08, 0.96],
+];
+const RUIN_PALETTE = [
+  [1.0, 1.0, 1.0],
+  [0.86, 0.8, 0.74],
+  [0.74, 0.7, 0.66],
+  [0.9, 0.86, 0.8],
+  [0.8, 0.76, 0.7],
+];
 
 /**
  * An office tower: an engaged colonnade under a canopy, a chamfered shaft with
@@ -149,7 +187,7 @@ export function towerGeometry(THREE) {
     }
   }
 
-  return mergeParts(THREE, parts);
+  return paintByPart(THREE, mergeParts(THREE, parts), TOWER_PALETTE);
 }
 
 /**
@@ -211,7 +249,7 @@ export function slabGeometry(THREE) {
     );
   }
 
-  return mergeParts(THREE, parts);
+  return paintByPart(THREE, mergeParts(THREE, parts), SLAB_PALETTE);
 }
 
 /**
@@ -305,7 +343,7 @@ export function warehouseGeometry(THREE) {
     );
   }
 
-  return mergeParts(THREE, parts);
+  return paintByPart(THREE, mergeParts(THREE, parts), WAREHOUSE_PALETTE);
 }
 
 /**
@@ -385,5 +423,5 @@ export function ruinGeometry(THREE) {
       .translate(0.15, 0.05, -0.24),
   ];
 
-  return mergeParts(THREE, parts);
+  return paintByPart(THREE, mergeParts(THREE, parts), RUIN_PALETTE);
 }

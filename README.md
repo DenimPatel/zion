@@ -68,6 +68,12 @@ Everything in the city is one of these, and nothing is decoration.
 | the selected building's co-change partners | teal rings on the ground |
 | the selected folder's imports and co-change with other folders | arcs between districts, as thick as the relationship |
 | first commit dates | the History slider rebuilds the city as it stood on any day |
+| **blast radius**: every file that transitively imports the selected one | a flood map on the ground: deepest violet one hop away, paler per hop |
+| **bug-prone**: commits whose subject says they fix it (fix, bug, hotfix, regression), top 5% | smoke rising off the roof |
+| **debt markers**: TODO / FIXME / HACK / XXX in comments | potholes ringed in hazard yellow behind the plot |
+| **building codes**: a limit declared under `codes` in `.zion/rules.json` is broken | an orange code notice at the back corner |
+| folder abstractness vs instability (Martin's main sequence) | *zone of pain* / *zone of uselessness* in the folder inspector, an A/I plot in the Health tab |
+| third-party packages imported, against `requirements*.txt`, `pyproject.toml`, `package.json` | the harbour: listed per file, per folder and in City Hall, with undeclared and unused packages |
 
 The architect's signals (the last rows) are computed in `analyzer/health.py`,
 `analyzer/architecture.py`, `analyzer/testmap.py`, `analyzer/owners.py` and
@@ -201,14 +207,83 @@ camera, filter, lens, selection and History date — so a finding can be pasted
 into a pull request or a design doc. Notes on buildings are kept in the browser,
 pinned on the map, listed in the Health tab and exported or imported as JSON.
 
+### Impact, defects, conformance and trade
+
+The third layer answers what a change will *break*, where defects actually
+cluster, whether each part's abstraction fits its role, what the repository
+leans on from outside, and which way it is heading over many builds.
+
+**Blast radius.** Every file carries its *impact*: how many files import it,
+directly or through others (tests left out), and from how many folders. Select
+a building and they are drawn as a flood map on the ground, deepest violet one
+hop away and paler for each further hop. The *impact* lens paints every file at
+once, so foundations light up; `impact>20` finds them. The count is exact: one
+pass over the import graph's strongly connected components with bitsets, fast
+on a 50,000-file repository.
+
+**Bug-prone files.** Churn says a file changes; the *fire record* says it keeps
+breaking. A commit whose subject names a repair (fix, bug, hotfix, regression)
+counts against every file it touched, reverts are counted apart, and the top
+5% by fix commits (at least two, and a quarter of the file's commits) have
+smoke rising off the roof. `is:bugprone`, `fixes>3` and the *fix commits* lens
+find them.
+
+**Debt the authors wrote down.** TODO, FIXME, HACK and XXX in *comments* (never
+in strings; Python via `tokenize`, brace languages via the comment stripper)
+are potholes behind the plot; `is:debt`, `debt>5`.
+
+**The main sequence.** Each folder's abstractness A (the share of its classes
+that are ABCs, Protocols, `abstractmethod` holders, interfaces or traits) is
+set against its instability I. Near A + I = 1 is healthy. A folder far below it
+is in the *zone of pain* -- concrete code everything leans on, a listed
+building nobody may renovate -- and one far above it in the *zone of
+uselessness* -- abstractions nothing uses, an empty show home. The Health tab
+plots every folder; `zone:pain` finds their files.
+
+**Building codes.** The rules file can also declare budgets:
+
+```json
+{
+  "codes": [
+    {"max_loc": 800, "max_fanout": 20, "max_cx": 25},
+    {"paths": "legacy/**", "max_loc": 2000}
+  ]
+}
+```
+
+Limits are `max_loc`, `max_fanout`, `max_fanin`, `max_cx` (decision points in
+one definition), `max_floors` and `max_debt`; a later entry that matches a file
+overrides an earlier one, limit by limit. Tests and vendored code are exempt. A
+file over a limit gets an orange notice and says which limit in its inspector;
+`is:codes`. A rules file with only `codes` leaves the layering on the majority
+rule.
+
+**The harbour.** Imports that leave the repository are trade. Python imports
+outside the standard library and the repository's own packages, and bare
+JavaScript/TypeScript specifiers (not Node built-ins), are reduced to package
+names and checked against `requirements*.txt`, `pyproject.toml` and
+`package.json`: *imported but not declared* works only on the author's machine;
+*declared but never imported* is dead weight or a tool (test runners, linters
+and bundlers are never called unused). Each file and folder lists what it leans
+on; City Hall and the Health tab list the whole harbour.
+
+**The census.** Every build appends its totals (counts only, no path, so it is
+the same encrypted) to `census.json`, one entry per commit, the last thirty
+kept. The Health tab draws each signal as a sparkline across them: the
+direction of the repository, not just its last step.
+
 **The report and the gate.** `zion.py report` prints the same findings as
 Markdown (or JSON): totals against the baseline, hotspots, oversized files,
 cycles, layering violations, untested risk, knowledge risk, branch-heavy code,
 CODEOWNERS drift, possible dead code, folders that change together and a per-folder
 table of Ca, Ce, instability, bus factor, test links and who to ask.
 `--fail-on` makes it a CI gate: `cycles` (any now), `violations-up` (the total
-rose against the baseline), `new-hotspot` (a file became one). A condition that
-needs a baseline and has none is reported as not evaluated, never as passed.
+rose against the baseline), `new-hotspot` (a file became one). The third layer
+adds `bugprone`, `codes`, `zone-of-pain`, `undeclared-dep`, `debt-up`,
+`codes-up`, `new-bugprone` and `new-codes`. A condition that needs a baseline
+and has none is reported as not evaluated, never as passed. The report also
+carries the blast-radius, bug-prone, debt, building-code, main-sequence and
+external-dependency sections, and A and D columns in the folder table.
 
 ### Why height is never bytes on disk
 
@@ -256,6 +331,12 @@ so:
 | CODEOWNERS drift | a `CODEOWNERS` file with rules | no notices |
 | changed since baseline | a previous build in the output directory, or `--compare REV` | no stakes; the Health card is absent |
 | History slider | ≥ 2 distinct birth days among tracked files | the slider is hidden |
+| blast radius | at least one import resolved | no flood map, no impact lens counts |
+| bug-prone smoke | enough churn history and ≥ 1 commit subject naming a fix | no smoke, with the reason stated |
+| debt potholes | ≥ 1 marker in a code comment | no potholes |
+| building codes | a `codes` entry in the rules file and ≥ 1 file over a limit | no notices; says none are declared, or all are met |
+| main sequence | a folder with both classes and imports in or out | no plot; zones need 2+ classes and 3+ coupled files |
+| harbour | ≥ 1 third-party import | nothing listed; undeclared/unused need a manifest of that ecosystem |
 
 **The bulk-commit rule.** `interactive-courses` has exactly one commit, touching
 357 of 357 files. Naive co-change coupling on that commit is a *complete graph*:
@@ -330,6 +411,17 @@ offset out of the building's own source blob, so what you read is exactly what
 produced the height. A notebook's interior shows cell source, not the `.ipynb`
 wrapper.
 
+**Materials by default, one colour per reading.** Under the default *archetype*
+colour lens every building near the camera is drawn in its own materials: a
+park is lawn, paving, water, hedges, trees and a red-roofed bandstand; a
+monument is granite steps, a marble shaft, bronze and a gilded point; towers,
+slabs, warehouses and silos keep their archetype and author colour on the walls
+over a stone podium, a darker setback band, a metal or tiled crown and pale
+trim. Switch the lens to anything else -- owner, health, heat -- and the
+materials are switched off: each building is one flat colour, so the data
+reads without them. Distant buildings are plain boxes in the archetype colour
+either way.
+
 **Day/night** is the metaphor made visible. At noon the city is lit plainly so the
 data reads as geometry. At dusk the only windows glowing are the documented
 buildings, so *lit = documented* is legible in one glance. There is a slider for
@@ -343,12 +435,14 @@ district spread of the match are reported live. `district:analyzer`,
 `importedby:zion.py` (files it imports), `cx>=15`, `fanin>10`, `fanout>5` and
 `delta>50` reach the structure; `is:violation`, `is:untested`, `is:untestedrisk`,
 `is:braced`, `is:drift`, `is:unowned`, `is:added` and `is:grown` the new signals;
+`impact>20`, `fixes>3`, `debt>5`, `is:bugprone`, `is:debt`, `is:codes` and
+`zone:pain` / `zone:useless` the third layer;
 `OR` joins alternatives (`is:hotspot is:untested OR is:cycle`). The chips underneath fill it
 for you from the repo's own top languages, archetypes and special files
 (READMEs, `CLAUDE.md`, license, `Dockerfile`, CI configs). A colour-by dropdown
 next to it re-tints the whole city by archetype, health, language, author, era,
-heat, centrality, instability, test links, branchiest function, change since the
-baseline, or one author's territory; the key under it counts the buildings on
+heat, centrality, instability, test links, branchiest function, blast radius,
+fix commits, change since the baseline, or one author's territory; the key under it counts the buildings on
 screen in each band.
 
 **New buildings wear scaffolding.** A file born in the newest slice of the

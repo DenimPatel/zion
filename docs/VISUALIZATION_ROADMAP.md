@@ -1,5 +1,102 @@
 # Visualization roadmap: reading more of a repo from the skyline alone
 
+## Third layer: impact, conformance, trade and trend (tracks F–K)
+
+Tracks S and A–E taught the city what is wrong with a *file* and with the *parts*. The questions an architect
+still could not answer from the skyline were about **consequence** and **direction**: what a change here will
+break, where defects actually cluster (not just where churn is), whether each folder's level of abstraction
+fits how much depends on it, what the repository leans on from outside, which budgets the team has declared,
+and which way every signal has moved across many builds rather than one.
+
+The same rule holds: "X looks like Y because Z", Z a number from one analyzer pass, gated on its own
+degeneration flag (`RepoFlags.defects`, `debt`, `externals`, `codes`; impact rides on `imports`), with a
+`LEGEND_SPEC` row and a `LEGEND_KEYS` row.
+
+### Shipped in this layer
+
+| Item | City form | Where |
+|---|---|---|
+| F1 blast radius: exact transitive importers per file (tests left out) and their folders; SCC condensation + int bitsets, 0.1 s on a 10k-file chain | a flood map on the ground around every downstream file for the selection, deepest violet one hop away; *impact* lens; `impact>N`; Health list; report section | `health.py::_finalize_impact`, `selection.js::blastRadius` |
+| F2 fire record: fix / revert commits per file from the commit subject; bug-prone = top 5% by fix commits, ≥ 2 and ≥ 25% of its commits | smoke rising off the roof; *fix commits* lens; `is:bugprone`, `fixes>N`; Health list; district fire record; `--fail-on bugprone,new-bugprone` | `gitmeta.py`, `health.py::_finalize_defects`, `parts/structure.js::smokePlumeGeometry` |
+| F3 written-down debt: TODO / FIXME / HACK / XXX inside comments only (Python `tokenize`, brace stripper) | potholes ringed in hazard yellow behind the plot; `is:debt`, `debt>N`; Health list; `--fail-on debt-up` | `parse/*`, `parts/structure.js::potholeGeometry` |
+| G1 main sequence: abstractness per folder (ABC / Protocol / abstractmethod exact; interface / trait / abstract class heuristic), D = \|A + I − 1\|, zone of pain / uselessness | folder inspector line; A/I scatter in the Health tab; A and D columns in City Hall and the report; `zone:pain`; `--fail-on zone-of-pain` | `architecture.py::_main_sequence`, `main.js::mainSequencePlot` |
+| G2 building codes: `codes` in `.zion/rules.json` (`max_loc`, `max_fanout`, `max_fanin`, `max_cx`, `max_floors`, `max_debt`, per-glob overrides); a codes-only rules file keeps the majority layering rule | an orange code notice at the back plot corner; `is:codes`; the inspector names the limit; `--fail-on codes,codes-up,new-codes` | `architecture.py::_apply_codes` |
+| H1 the harbour: third-party packages (Python outside stdlib and the repo's own names; bare JS/TS specifiers) against `requirements*.txt` / `pyproject.toml` / `package.json`; undeclared and unused (tools never called unused) | "Leans on" in the file and folder inspectors; harbour card in the Health tab and City Hall; `--fail-on undeclared-dep` | `analyzer/deps.py` |
+| I1 census: totals of the last 30 builds into the output directory (counts only, one per commit) | sparklines per signal in the Health tab | `history.py::census` |
+| R ground overlays lifted clear of the district plate with polygon offset — the co-change rings had been z-fighting into the pavement at range | co-change rings and flood discs visible from the air | `selection.js::GROUND_LIFT` |
+
+Verification: `tests/test_third_layer.py` (13 tests) pins each signal on a hand-built history -- parser counts,
+transitive impact without tests, fix/revert counting and the bug-prone cut, both main-sequence zones, per-path
+codes, codes-only rules keeping the majority rule, packages / undeclared / unused, no package name in any
+encrypted artefact, census rotation, and that `facets.js` and `LEGEND_KEYS` mirror the emitter. The headless
+self-test adds `impact-rings`, `impact-switch`, `third-lenses-recolour`, `query-third-layer`, `query-zone` and
+`health-third-cards`, and `new-props-drawn` now checks only buildings on the detailed tier (where props are drawn).
+
+### Suggested next, by theme
+
+Each follows the same pattern -- one pass, one flag, one legend row, one prop or lens -- and names the city
+analogy that would carry it. Rough order of value per effort within each theme.
+
+**F. Change impact and risk**
+
+- F4 *Prefab clones.* Normalised 6-line window hashing (stdlib, bounded memory) finds duplicated blocks. Selecting a
+  building marks its twins with a matching roof beacon -- selection only, never every pair. Analogy: identical
+  prefab units; a fix to one must be repeated on every twin.
+- F5 *Which floor is on fire.* `git log -L` per definition for the floors of the top hotspots only (one git call per
+  function, so it must stay bounded to ~50): tint the hot floor band in the interior and name it in the report.
+- F6 *Change-set blast radius.* `--compare REV` already knows what changed; union the impact of every changed file
+  to show "this pull request reaches N files in M folders" and flood the whole set. Analogy: the flood of a
+  release, not of one file. A natural `--fail-on impact-up`.
+- F7 *Temporal coupling strength* (support and confidence of co-change pairs, not just counts), so the rings grade
+  "always changes with" apart from "sometimes".
+
+**G. Architecture conformance**
+
+- G3 *Front doors.* Public surface from `__init__.py` / `__all__` / `index.ts` re-exports. An import that reaches past
+  a folder's front door into its internals is trespass: drawn as a utility line entering through the back alley.
+- G4 *Zoning by role.* Let `rules.json` tag folders `domain` / `adapter` / `ui` / `infra` and colour the district
+  ground by zone (residential, industrial, commercial, utilities), so a domain file importing a web framework
+  reads as a factory in a residential street.
+- G5 *Stable dependencies principle.* An import from a stable folder (low I) into an unstable one is a foundation
+  resting on scaffolding; flag those edges like layering violations.
+- G6 *Package cohesion* (LCOM-style: how many of a folder's files are connected by imports among themselves). A
+  district of strangers is a candidate to split, a pair of districts that only talk to each other one to merge.
+
+**H. External trade and infrastructure**
+
+- H2 *The waterfront.* A strip on the city frame with one crate stack per package, height = importing files, and
+  a crane on stacks imported but undeclared. The data exists (`manifest.externals`); only geometry is missing.
+- H3 *More manifests*: `go.mod`, `Cargo.toml`, `pom.xml`, `Gemfile`, once the brace parser collects those
+  languages' imports (unused cannot be judged for an ecosystem whose imports are not read).
+- H4 *Civic infrastructure.* Dockerfiles, CI workflows, IaC and build configs as utilities (power plant, water
+  tower); entry points (a `__main__` guard, a `main`, an HTTP route table) as stations where traffic enters.
+- H5 *Lockfile age.* Pinned versions far behind the latest are ageing bridges (needs network, so opt-in only).
+
+**I. Trends and history**
+
+- I2 *Census in City Hall and the report* (the series exists; only the Health tab draws it), and a `--fail-on`
+  that looks at the slope over N builds, not one step.
+- I3 *Ghost footprints* for files removed since the baseline, drawn where their folder still stands.
+- I4 *Before/after split view* for `--compare REV`: two cities side by side, or a swipe.
+- I5 *Growth rings*: logical lines over time per file from the History data, so a building that doubled in a
+  quarter is told apart from one that was always big.
+
+**J. Rendering depth and navigation**
+
+- J1 *Symbol search* (`Ctrl+K`) over file *and* floor names, flying to the floor inside the building.
+- J2 *2D minimap* of the treemap with the active lens as a choropleth, click to fly.
+- J3 *Per-floor facade bands* from a per-building data texture (the vertex-attribute budget in G7 below rules out
+  another attribute), so complexity or churn per floor reads on the outside.
+- J4 *Colour-blind-safe lens palettes* and a PNG snapshot stamped with its view link.
+- J5 *Newcomer's tour*: entry points → downtown → foundations (lowest instability) → hotspots, captioned from the
+  README of each district.
+
+**K. People and organisation**
+
+- K1 *Conway check*: author clusters against folder boundaries; co-change arcs that cross team territories.
+- K2 *Review latency and PR size* from an optional hosted-git export: which neighbourhoods wait longest.
+- K3 *Coverage import* (`coverage.xml`, `lcov.info`) replacing heuristic test links: lit floors become covered floors.
+
 ## Next layer: architect insights (tracks A–E)
 
 The first roadmap (S1–S19 below) taught the city to answer questions about *files*: new or old, hot or
@@ -51,8 +148,9 @@ hash; a note pins a building; every new prop cluster is drawn where it should be
 
 ### Suggestions not yet built
 
-Worth doing next, in rough order of value per effort. Each would follow the same pattern: one analyzer pass,
-one flag, one legend row, one prop or lens.
+Superseded by the third layer above: items 1 (abstractness), 2 (external dependencies, as data -- the waterfront
+geometry is H2) and 3 (debt markers) shipped there, and the rest are folded into its backlog (4 → K3, 5 → F5,
+6 → G3, 7 → K2, 8 → I3). Kept as written:
 
 1. **Abstractness and the main sequence.** Martin's other axis: the share of a folder's definitions that are
    abstract (ABCs, Protocols, interfaces, `abstract` classes). With instability already computed, distance

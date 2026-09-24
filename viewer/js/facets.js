@@ -35,11 +35,15 @@ const FLAG_BITS = {
   shrunk: 1 << 20,
   braced: 1 << 21,
   unowned: 1 << 22,
+  bugprone: 1 << 23,
+  debt: 1 << 24,
+  codes: 1 << 25,
+  codeviolation: 1 << 25,
 };
 
 // Numeric comparisons: `loc>500`, `cx>=15`, `fanin>10`. The key is the query
 // word, the value the index.json column it reads.
-const NUMERIC = { loc: 'loc', age: 'age', heat: 'heat', cx: 'cx', complexity: 'cx', fanin: 'fanin', fanout: 'fanout', delta: 'delta' };
+const NUMERIC = { loc: 'loc', age: 'age', heat: 'heat', cx: 'cx', complexity: 'cx', fanin: 'fanin', fanout: 'fanout', delta: 'delta', impact: 'impact', fixes: 'fixes', debt: 'debt' };
 
 /** Column-index lookup built once from the manifest's declared column order. */
 export function columnIndex(indexColumns) {
@@ -134,6 +138,10 @@ function compileTerm(term, context) {
         const name = context.resolveDistrict(row[idx]).toLowerCase();
         return name === prefix || name.startsWith(`${prefix}/`);
       };
+    } else if (key === 'zone') {
+      // `zone:pain` / `zone:useless` -- files in a folder that far off the main sequence.
+      const idx = context.col.district;
+      predicate = (row) => idx !== undefined && !!context.districtZone && context.districtZone(row[idx]) === value;
     } else if (key === 'imports' || key === 'importedby') {
       // `imports:analyzer/health.py` -- files that import a path (prefix);
       // `importedby:zion.py` -- files that path imports. Needs imports.json.

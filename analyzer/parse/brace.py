@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from . import Floor, ParseResult, _shorten
+from . import DEBT_MARKER, Floor, ParseResult, _shorten
 
 STRING_QUOTES = {'"', "'", "`"}
 
@@ -54,8 +54,9 @@ _CONTROL = {
 }
 
 
-def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
-    """Return (masked lines, depth at start of each line, pure-comment lines).
+def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int], int]:
+    """Return (masked lines, depth at start of each line, pure-comment lines,
+    debt markers written inside comments).
 
     Strings and comments are replaced by spaces while newlines are preserved, so
     offsets stay aligned with the original source and regex matching cannot see
@@ -65,6 +66,7 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
     out: list[str] = []
     depth_at_line: list[int] = []
     comment_only: set[int] = set()
+    debt = 0
 
     depth = 0
     line = 1
@@ -93,17 +95,15 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
             i += 1
             continue
 
-        if ch == "/" and nxt == "/":
+        if (ch == "/" and nxt == "/") or (hash_comments and ch == "#"):
+            start = i
             while i < n and source[i] != "\n":
                 i += 1
-            line_has_comment = True
-            continue
-        if hash_comments and ch == "#":
-            while i < n and source[i] != "\n":
-                i += 1
+            debt += len(DEBT_MARKER.findall(source, start, i))
             line_has_comment = True
             continue
         if ch == "/" and nxt == "*":
+            start = i
             i += 2
             line_has_comment = True
             while i < n and not (source[i] == "*" and i + 1 < n and source[i + 1] == "/"):
@@ -111,6 +111,7 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
                     newline()
                 i += 1
             i += 2
+            debt += len(DEBT_MARKER.findall(source, start, min(i, n)))
             continue
         if ch in STRING_QUOTES:
             quote = ch
@@ -142,7 +143,7 @@ def _strip(source: str, language: str) -> tuple[list[str], list[int], set[int]]:
         out.append(ch)
         i += 1
 
-    return "".join(out).splitlines(), depth_at_line, comment_only
+    return "".join(out).splitlines(), depth_at_line, comment_only, debt
 
 
 # Relative import/require specifiers only: `import x from 'react'` cannot
@@ -160,6 +161,40 @@ def _relative_imports(source: str) -> list[str]:
     for match in _RE_RELATIVE_IMPORT.finditer(source):
         imports.append(match.group(1) or match.group(2))
     return imports
+
+
+# The other half: bare specifiers (`'react'`, `'@scope/pkg/sub'`, `'node:fs'`)
+# are packages from outside the repository -- its external trade. Reduced to
+# the package name (`@scope/pkg`, `lodash`), which is what a manifest declares.
+_RE_BARE_IMPORT = re.compile(
+    r"""(?:^|[\s;])(?:import|export)\s[^'"]*?from\s+['"]([^'"./][^'"]*)['"]"""
+    r"""|(?:^|[\s;])import\s+['"]([^'"./][^'"]*)['"]"""
+    r"""|\brequire\(\s*['"]([^'"./][^'"]*)['"]\s*\)"""
+    r"""|\bimport\(\s*['"]([^'"./][^'"]*)['"]\s*\)""",
+    re.MULTILINE,
+)
+
+
+def package_name(spec: str) -> str:
+    """`@scope/pkg/deep` -> `@scope/pkg`; `lodash/fp` -> `lodash`; `node:fs` -> `node:fs`."""
+    parts = spec.split("/")
+    if spec.startswith("@") and len(parts) >= 2:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+def _bare_packages(source: str) -> list[str]:
+    found = []
+    for match in _RE_BARE_IMPORT.finditer(source):
+        spec = next(g for g in match.groups() if g)
+        name = package_name(spec.strip())
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+# A class-kind floor whose declaration names an interface-like form.
+_RE_ABSTRACT_DECL = re.compile(r"\b(?:interface|trait|protocol)\s|\babstract\s+(?:\w+\s+)*class\s")
 
 
 # Keyword-count complexity heuristic, applied to a floor's own masked line
@@ -180,7 +215,7 @@ def _complexity_of_lines(masked_lines: list[str], start: int, end: int) -> int:
 
 
 def parse_brace(source: str, language: str) -> ParseResult:
-    masked_lines, depth_at_line, comment_only = _strip(source, language)
+    masked_lines, depth_at_line, comment_only, debt = _strip(source, language)
 
     lines = source.splitlines()
     blank = sum(1 for line in lines if not line.strip())
@@ -254,6 +289,11 @@ def parse_brace(source: str, language: str) -> ParseResult:
             floor.is_entrypoint = floor.name in ("main", "run")
             floors.append(floor)
 
+    classes = [f for f in floors if f.kind == "class"]
+    abstract = sum(
+        1 for f in classes if 0 < f.line <= len(masked_lines) and _RE_ABSTRACT_DECL.search(masked_lines[f.line - 1])
+    )
+    is_js = language in ("javascript", "typescript")
     return ParseResult(
         language=language,
         logical_loc=logical,
@@ -261,5 +301,9 @@ def parse_brace(source: str, language: str) -> ParseResult:
         comment_lines=comment_lines,
         doc_lines=comment_lines,
         confidence="medium",
-        imports=_relative_imports(source) if language in ("javascript", "typescript") else [],
+        imports=_relative_imports(source) if is_js else [],
+        packages=_bare_packages(source) if is_js else [],
+        debt_markers=debt,
+        class_count=len(classes),
+        abstract_count=abstract,
     )

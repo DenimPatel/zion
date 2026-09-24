@@ -24,12 +24,28 @@ Signals, each relative to the repository itself:
 - **Cross-folder co-change**: co-change pairs whose ends live in different
   folders, summed per folder pair. Hidden coupling, at the scale of parts.
 
+- **Abstractness and the main sequence**: the share of a folder's classes that
+  are abstract (ABCs, Protocols, interfaces, traits). With instability it
+  places the folder against Martin's main sequence ``A + I = 1``; the distance
+  ``D = |A + I - 1|`` is small for a healthy folder. Far off it, a concrete
+  folder everything leans on is in the *zone of pain* (hard to change, and
+  every change ripples), an abstract folder nothing uses in the *zone of
+  uselessness*.
+- **Building codes**: declared limits per file (size, fan-out, fan-in, the
+  branchiest function, floors, debt markers), read from the same rules file.
+  They need no import data and are checked whether or not imports resolved.
+
 The rules file format::
 
     {
       "layers": ["web", "app", ["domain", "model"], "infra"],
-      "forbid": [["domain", "web"], {"from": "lib/**", "to": "app/**"}]
+      "forbid": [["domain", "web"], {"from": "lib/**", "to": "app/**"}],
+      "codes": {"max_loc": 800, "max_fanout": 20}
     }
+
+``codes`` is either one object (the whole repository) or a list of them, each
+with an optional ``paths`` (a pattern or list of patterns); a later entry that
+matches a file overrides an earlier one, limit by limit.
 
 ``layers`` is ordered top to bottom: a file may import its own layer or any
 layer below it, never one above. Each entry is a path prefix, a glob, or a list
@@ -49,6 +65,20 @@ from .health import is_vendored
 RULES_FILES = (".zion/rules.json", "zion.rules.json")
 # The co-change between folders that is worth naming: the strongest few pairs.
 MAX_DISTRICT_COUPLING = 12
+# Main sequence: how far off A + I = 1 a folder must sit to be in a zone, and
+# how much there must be to judge -- two classes and three coupled files.
+ZONE_DISTANCE = 0.5
+ZONE_MIN_CLASSES = 2
+ZONE_MIN_COUPLING = 3
+# Building codes: limit name -> (what it measures, how the report words it).
+CODE_LIMITS = {
+    "max_loc": (lambda f: f.logical_loc, "logical lines"),
+    "max_fanout": (lambda f: len(f.imports_resolved), "files imported"),
+    "max_fanin": (lambda f: f.import_in_degree, "importers"),
+    "max_cx": (lambda f: f.brace_complexity or f.max_complexity, "decision points in one definition"),
+    "max_floors": (lambda f: len(f.floors), "floors"),
+    "max_debt": (lambda f: f.debt_markers, "debt markers"),
+}
 
 
 @dataclass
@@ -59,6 +89,11 @@ class DistrictDeps:
     edges_in: int = 0
     edges_out: int = 0
     violations: int = 0  # violating edges that start here
+    classes: int = 0
+    abstract: int = 0
+    abstractness: float | None = None  # abstract / classes; None with no classes
+    distance: float | None = None  # |A + I - 1|, when both are known
+    zone: str = ""  # "" | "pain" | "useless"
 
 
 @dataclass
@@ -71,6 +106,8 @@ class Architecture:
     violations: list[tuple[str, str, str]] = field(default_factory=list)
     # (district a, district b, co-changed file pairs, commits between them)
     coupling: list[tuple[str, str, int, int]] = field(default_factory=list)
+    codes_declared: bool = False
+    code_violations: int = 0
 
 
 def _matches(rel: str, pattern: str) -> bool:
@@ -136,6 +173,79 @@ class _RuleSet:
         return ""
 
 
+def _code_entries(data: dict | None) -> list[tuple[list[str], dict[str, float]]]:
+    """(patterns, limits) per `codes` entry; no patterns means every file."""
+    if not data:
+        return []
+    raw = data.get("codes")
+    entries = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        limits = {
+            key: float(value)
+            for key, value in entry.items()
+            if key in CODE_LIMITS and isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+        }
+        if limits:
+            out.append((_patterns(entry.get("paths")), limits))
+    return out
+
+
+def _apply_codes(analysis, arch: Architecture, rules_data: dict | None) -> None:
+    """Mark every file that breaks a declared building code."""
+    entries = _code_entries(rules_data)
+    arch.codes_declared = bool(entries)
+    count = 0
+    for record in analysis.files:
+        record.code_violations = []
+        if not entries or record.is_binary or record.rows is not None or record.is_doc or record.is_ruin:
+            continue
+        if not _eligible(record):
+            continue
+        limits: dict[str, float] = {}
+        for patterns, entry_limits in entries:
+            if not patterns or any(_matches(record.rel, p) for p in patterns):
+                limits.update(entry_limits)
+        for key, limit in sorted(limits.items()):
+            measure, words = CODE_LIMITS[key]
+            value = measure(record)
+            if value > limit:
+                record.code_violations.append(f"{key}: {value:g} {words} > {limit:g}")
+        count += bool(record.code_violations)
+    arch.code_violations = count
+    analysis.flags.codes = count > 0
+    # The layout can run this twice; a note is stated once.
+    note = (
+        "No building codes declared in .zion/rules.json - code notices disabled."
+        if not entries
+        else "" if count else "Every file meets the declared building codes."
+    )
+    if note and note not in analysis.flags.notes:
+        analysis.flags.notes.append(note)
+
+
+def _main_sequence(files, arch: Architecture) -> None:
+    """Abstractness per folder and its distance from A + I = 1."""
+    for record in files:
+        if not _eligible(record) or not record.class_count:
+            continue
+        deps = arch.districts.get(record.district)
+        if deps is not None:
+            deps.classes += record.class_count
+            deps.abstract += min(record.abstract_count, record.class_count)
+    for deps in arch.districts.values():
+        if deps.classes:
+            deps.abstractness = round(deps.abstract / deps.classes, 4)
+        if deps.abstractness is None or deps.instability is None:
+            continue
+        deps.distance = round(abs(deps.abstractness + deps.instability - 1.0), 4)
+        if deps.distance < ZONE_DISTANCE or deps.classes < ZONE_MIN_CLASSES or deps.ca + deps.ce < ZONE_MIN_COUPLING:
+            continue
+        deps.zone = "pain" if deps.abstractness + deps.instability < 1.0 else "useless"
+
+
 def _eligible(record) -> bool:
     """Files whose imports say something about the design: no tests, no vendored code."""
     return not record.is_test and not is_vendored(record.rel)
@@ -152,6 +262,10 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
         out = len(record.imports_resolved)
         total = out + record.import_in_degree
         record.file_instability = round(out / total, 4) if total else -1.0
+
+    rules_data, rules_path, error = load_rules(root or analysis.root)
+    arch.rules_error = error
+    _apply_codes(analysis, arch, rules_data)
 
     if not analysis.flags.imports:
         analysis.architecture = arch
@@ -186,11 +300,12 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
     for (d_src, d_dst), count in arch.matrix.items():
         arch.districts[d_src].edges_out += count
         arch.districts[d_dst].edges_in += count
+    _main_sequence(files, arch)
 
     # -- violations -----------------------------------------------------------
-    rules_data, rules_path, error = load_rules(root or analysis.root)
-    arch.rules_error = error
-    if rules_data is not None:
+    # A rules file that only declares building codes says nothing about the
+    # layering, so the majority rule still applies.
+    if rules_data is not None and (rules_data.get("layers") or rules_data.get("forbid")):
         arch.rules = rules_path
         ruleset = _RuleSet(rules_data)
         for src, dst in edges:

@@ -943,3 +943,23 @@ body.history-active #history-out { color: #ff7a4a; }
 .hall-matrix td { width: 22px; height: 18px; text-align: center; border: 1px solid rgba(148, 163, 184, 0.1); }
 .hall-matrix td.self { background: rgba(148, 163, 184, 0.08); }
 .hall-matrix td.violating { outline: 2px solid #e0245e; outline-offset: -2px; }
+
+/* Third layer: the main-sequence plot, census sparklines, the harbour table. */
+.main-sequence { display: block; width: 100%; max-width: 220px; margin: 4px auto 6px; }
+.main-sequence .ms-frame { fill: rgba(148, 163, 184, 0.05); stroke: var(--edge); }
+.main-sequence .ms-pain { fill: rgba(224, 36, 94, 0.18); }
+.main-sequence .ms-useless { fill: rgba(154, 163, 173, 0.16); }
+.main-sequence .ms-ideal { stroke: #3ddc84; stroke-dasharray: 3 2; stroke-width: 1; }
+.main-sequence .ms-axis { fill: var(--ink-dim); font: 8px var(--sans); }
+.main-sequence .ms-dot { fill: #c77dff; fill-opacity: 0.75; stroke: var(--panel-solid); stroke-width: 0.6; }
+.main-sequence .ms-dot.ms-pain { fill: #e0245e; }
+.main-sequence .ms-dot.ms-useless { fill: #9aa3ad; }
+.main-sequence .ms-dot.ms-here { stroke: var(--accent); stroke-width: 1.6; }
+.sparkline { width: 90px; height: 18px; vertical-align: middle; }
+.sparkline polyline { fill: none; stroke: var(--ink-dim); stroke-width: 1.2; }
+.sparkline circle { fill: var(--accent); }
+.census-table tr.worse .sparkline polyline { stroke: #ff6b4a; }
+.census-table tr.better .sparkline polyline { stroke: #3ddc84; }
+.harbour-table tr.worse td:first-child { color: #ff6b4a; }
+.hall-table td.zone-pain { color: #ff6b4a; }
+.hall-table td.zone-useless { color: #9aa3ad; font-style: italic; }

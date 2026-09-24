@@ -337,6 +337,18 @@ class FileMetrics:
     delta: str = ""  # "" | "added" | "grown" | "shrunk"
     loc_delta: int = 0
     became: list[str] = field(default_factory=list)  # signals gained since the baseline
+    # Third layer: impact, defects, debt, abstractness, external trade, codes.
+    impact: int = 0  # files that transitively import this one (analyzer/health.py)
+    impact_folders: int = 0  # distinct folders among them
+    fix_commits: int = 0  # commits touching it whose subject names a repair
+    revert_commits: int = 0
+    fix_ratio: float = 0.0  # fix_commits / commits
+    is_bugprone: bool = False  # top slice by fix commits, with a real share of them
+    debt_markers: int = 0  # debt markers written in comments (see parse.DEBT_MARKER)
+    class_count: int = 0
+    abstract_count: int = 0
+    packages: list[str] = field(default_factory=list)  # third-party packages it imports (analyzer/deps.py)
+    code_violations: list[str] = field(default_factory=list)  # building codes broken, e.g. "max_loc 800"
 
     @property
     def weight(self) -> float:
@@ -368,6 +380,11 @@ class RepoFlags:
     tests: bool = False
     complexity: bool = False
     delta: bool = False
+    # Third layer (health.py, architecture.py, deps.py).
+    defects: bool = False
+    debt: bool = False
+    externals: bool = False
+    codes: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -386,6 +403,10 @@ class RepoFlags:
             "tests": self.tests,
             "complexity": self.complexity,
             "delta": self.delta,
+            "defects": self.defects,
+            "debt": self.debt,
+            "externals": self.externals,
+            "codes": self.codes,
             "notes": list(self.notes),
         }
 
@@ -405,6 +426,8 @@ class RepoAnalysis:
     architecture: object = None  # architecture.Architecture, once a layout exists
     codeowners_path: str = ""
     delta: dict | None = None  # history.apply_delta's result, when a baseline exists
+    externals: dict = field(default_factory=dict)  # deps.finalize_deps: packages, undeclared, unused
+    census: list = field(default_factory=list)  # history.census: totals of earlier builds, oldest first
 
     @property
     def total_logical_loc(self) -> int:
@@ -521,6 +544,10 @@ def analyze(
         )
 
         record.raw_imports = result.imports
+        record.packages = list(result.packages)  # brace languages; deps.py adds Python's
+        record.debt_markers = result.debt_markers
+        record.class_count = result.class_count
+        record.abstract_count = result.abstract_count
 
         file_git = git.files.get(entry.rel)
         if file_git is not None:
@@ -536,6 +563,8 @@ def analyze(
             record.first_ts = file_git.first_ts
             record.activity = list(file_git.activity)
             record.recent_churn = file_git.recent_churn
+            record.fix_commits = file_git.fix_commits
+            record.revert_commits = file_git.revert_commits
             record.author_buckets = {a: set(b) for a, b in file_git.author_buckets.items()}
         else:
             record.confidence["authorship"] = "unknown"
@@ -557,6 +586,7 @@ def analyze(
         # once RepoFlags.authorship already says ownership means something.
         for record in analysis.files:
             record.sole_tenant = record.ownership_share >= SOLE_TENANT_SHARE and record.commits >= SOLE_TENANT_MIN_COMMITS
+    from .deps import finalize_deps
     from .health import finalize_health
     from .owners import finalize_owners
     from .testmap import finalize_tests
@@ -564,6 +594,7 @@ def analyze(
     finalize_health(analysis, git)
     finalize_owners(analysis, git)
     finalize_tests(analysis)
+    finalize_deps(analysis)
     return analysis
 
 

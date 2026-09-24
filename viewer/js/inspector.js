@@ -181,6 +181,9 @@ function signsFor(b, flags) {
   if (flags.tests && b.untestedRisk) signs.push(['Traffic cones', 'risky and no test is linked to it', 'hot']);
   if (flags.complexity && b.braced) signs.push(['Cross-bracing', `one function has ${b.braceComplexity} decision points`, 'heavy']);
   if (flags.codeowners && b.ownerDrift) signs.push(['Owner notice', 'CODEOWNERS names people who do not write it', 'flag']);
+  if (flags.defects && b.bugprone) signs.push(['Smoke', `bug-prone: ${b.fixCommits} of its ${b.commits} commits say they fix it`, 'hot']);
+  if (flags.debt && b.debt) signs.push(['Potholes', `${plural(b.debt, 'debt marker')} (TODO / FIXME / HACK / XXX) in its comments`, 'heavy']);
+  if (flags.codes && b.codeViolations && b.codeViolations.length) signs.push(['Code notice', `breaks ${plural(b.codeViolations.length, 'declared building code')}`, 'risk']);
   if (flags.delta && b.delta) signs.push(['Survey stake', `${b.delta} since the baseline${b.locDelta ? ` (${b.locDelta > 0 ? '+' : ''}${b.locDelta} lines)` : ''}`, 'new']);
   return signs;
 }
@@ -472,6 +475,13 @@ export class Inspector {
               : 'balanced between depending and being depended on'
         ));
       }
+      if (b.impact) {
+        items.push(fact(
+          'Blast radius',
+          `${plural(b.impact, 'file')} in ${plural(b.impactFolders || 1, 'folder')}`,
+          'everything that imports it, directly or through others (tests left out). Select to see the flood map: deepest violet one hop away'
+        ));
+      }
       if (flags.layering && b.violations && edges) {
         const bad = out.filter((to) => edges.violating.has(`${b.id}>${to}`));
         const item = fact('Layering', `${plural(b.violations, 'import')} against the grain`, 'red lines: imports that break the layering rule');
@@ -496,6 +506,27 @@ export class Inspector {
       const links = tested ? fileLinks(b.testedBy, this.pathForId, 5) : null;
       if (links) item.append(links);
       items.push(item);
+    }
+    if (b.classes) {
+      items.push(fact(
+        'Classes',
+        `${b.classes} · ${b.abstractClasses || 0} abstract`,
+        'abstract = an ABC, Protocol, interface or trait; the folder’s share places it on the main sequence'
+      ));
+    }
+    if (b.packages && b.packages.length) {
+      items.push(fact(
+        'Leans on',
+        b.packages.map((p) => this.source.s(p) || '(locked)').join(', '),
+        'third-party packages it imports: its trade with the outside world'
+      ));
+    }
+    if (b.codeViolations && b.codeViolations.length) {
+      items.push(fact(
+        'Building codes',
+        plural(b.codeViolations.length, 'breach', 'breaches'),
+        b.codeViolations.map((v) => this.source.s(v)).join('; ')
+      ));
     }
     if (b.braceComplexity) {
       items.push(fact('Most branches', `${b.braceComplexity} decision points`, b.braced ? 'in one function: braced, 15 or more' : 'in its busiest function'));
@@ -606,6 +637,26 @@ export class Inspector {
     }
     if (flags.delta && b.became && b.became.length) {
       note('mid', 'New since the baseline.', `It became ${b.became.join(', ')} since ${this._baselineLabel(this.source.manifest.delta || {})}.`);
+    }
+    if (flags.defects && b.bugprone) {
+      note('high', 'Bug-prone.',
+        `${b.fixCommits} of its ${b.commits} commits say they fix something` +
+        (b.revertCommits ? `, and ${plural(b.revertCommits, 'commit')} reverted a change to it` : '') +
+        '. It keeps breaking, not just changing: look for a missing invariant or an interface that is easy to misuse, and pin it with a test.');
+    }
+    if (b.impact >= 10 && ((b.instability !== undefined && b.instability >= 0 && b.instability > 0.5) || b.isHotspot)) {
+      note('high', 'Wide blast radius on moving ground.',
+        `A change here reaches ${plural(b.impact, 'file')} in ${plural(b.impactFolders || 1, 'folder')}, yet it ` +
+        (b.isHotspot ? 'is a hotspot' : 'depends on more than depends on it') +
+        '. Stabilise its interface, or split the part everyone imports from the part that keeps changing.');
+    } else if (b.impact >= 25) {
+      note('mid', 'Foundation.', `${plural(b.impact, 'file')} depend on it, directly or not. Change its interface rarely and behind tests.`);
+    }
+    if (flags.debt && b.debt >= 5) {
+      note('low', 'Written-down debt.', `${plural(b.debt, 'TODO / FIXME / HACK marker')} in its comments. The authors already listed what is wrong; a clean-up pass is cheap to scope.`);
+    }
+    if (b.codeViolations && b.codeViolations.length) {
+      note('mid', 'Breaks a building code.', `${b.codeViolations.map((v) => this.source.s(v)).join('; ')}. The limits are declared in .zion/rules.json.`);
     }
     if (flags.centrality && b.downtown && (b.loc || 0) > 300) {
       note('low', 'Central and large.', 'Many files depend on or change with this one. Keep its interface small and stable.');
@@ -785,6 +836,12 @@ export class Inspector {
       health.push(fact('Tested', `${district.testedFiles} of ${district.sourceFiles}`, `source files with a linked test${district.untestedRisk ? ` · ${district.untestedRisk} risky ones without` : ''}`));
     }
     if (flags.complexity) health.push(fact('Braced', String(district.braced || 0), 'files with a function of 15+ decision points'));
+    if (flags.defects && (district.fixCommits || district.bugprone)) {
+      health.push(fact('Fire record', `${plural(district.fixCommits || 0, 'fix')} · ${district.bugprone || 0} bug-prone`,
+        'commits to its files whose subject names a repair; bug-prone files have smoke rising off the roof'));
+    }
+    if (flags.debt && district.debt) health.push(fact('Potholes', plural(district.debt, 'debt marker'), 'TODO / FIXME / HACK / XXX in its code comments'));
+    if (flags.codes && district.codeViolations) health.push(fact('Code breaches', plural(district.codeViolations, 'file'), 'files over a limit in .zion/rules.json'));
     this.metrics.append(section('Health', health));
     const structure = this._districtStructure(district, flags);
     if (structure.length) this.metrics.append(section('Structure', structure));
@@ -802,8 +859,29 @@ export class Inspector {
     const manifest = this.source.manifest;
     const deps = manifest.dependencies;
     const items = [];
+    if (district.packages && district.packages.length) {
+      items.push(fact(
+        'Leans on',
+        district.packages.map(([name, n]) => `${this.source.s(name) || '(locked)'} ×${n}`).join(', '),
+        'third-party packages, by how many of its files import them'
+      ));
+    }
     if (!flags.imports || !deps) return items;
     const inst = district.instability;
+    if (district.distance !== undefined && district.distance >= 0) {
+      const zone = district.zone === 'pain'
+        ? 'zone of pain: concrete code the rest depends on -- a listed building, hard to renovate. Extract interfaces or move volatile parts out'
+        : district.zone === 'useless'
+          ? 'zone of uselessness: abstractions nothing depends on -- an empty show home. Inline them or put them to use'
+          : district.distance < 0.25
+            ? 'close to the main sequence: its abstraction matches how much depends on it'
+            : 'drifting from the main sequence';
+      items.push(fact(
+        'Main sequence',
+        `A ${district.abstractness.toFixed(2)} · I ${inst.toFixed(2)} · D ${district.distance.toFixed(2)}`,
+        `${district.abstractClasses} of ${plural(district.classes, 'class', 'classes')} abstract. ${zone}`
+      ));
+    }
     items.push(fact(
       'Coupling',
       `Ca ${district.ca} · Ce ${district.ce}`,

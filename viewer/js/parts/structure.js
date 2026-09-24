@@ -23,6 +23,19 @@
  * beside a kiosk and a tower, and a stretched disc stops reading as a sign.
  *   notePinGeometry        a map pin: the viewer's own note on a building.
  *                          Uniform scale, y 0..1.
+ *
+ * The third layer (impact, defects, debt, codes):
+ *
+ *   smokePlumeGeometry     smoke rising from an ember on the roof: commits
+ *                          keep saying they fix this file (analyzer/health.py,
+ *                          bug-prone). Uniform scale, y 0..1, on the roof.
+ *   potholeGeometry        broken asphalt with a hazard-yellow rim, in the
+ *                          road at the plot corner: TODO / FIXME / HACK / XXX
+ *                          in the file's comments. Metres, at the origin;
+ *                          the caller scales it with the marker count.
+ *   codeNoticeGeometry     an orange notice on one post: a limit declared
+ *                          under "codes" in .zion/rules.json is broken
+ *                          (analyzer/architecture.py). Metres, at the origin.
  */
 
 import {
@@ -147,5 +160,65 @@ export function notePinGeometry(THREE) {
   return mergeParts(THREE, [
     cylinder(THREE, { rTop: 0.03, rBottom: 0.005, y0: 0, y1: 0.7, segments: 6, part: PART_FIXED }),
     tag(new THREE.SphereGeometry(0.18, 12, 8).translate(0, 0.82, 0), PART_FIXED, 0.64, 1.0),
+  ]);
+}
+
+const EMBER = [1.0, 0.42, 0.08];
+
+/**
+ * A smoke plume: low-poly puffs rising and drifting from an ember glow, dark
+ * at the source and paler as the smoke thins. Unit scale, y 0..1, seated on
+ * the roof by the caller -- it reads from any distance, where soot on a wall
+ * would sit inside one form's setback and float off another's.
+ */
+export function smokePlumeGeometry(THREE) {
+  const puffs = [
+    // [x, y, z, radius, grey]
+    [0, 0.12, 0, 0.14, 0.06],
+    [0.05, 0.3, 0.02, 0.17, 0.1],
+    [0.13, 0.5, -0.02, 0.2, 0.16],
+    [0.24, 0.7, 0.03, 0.22, 0.24],
+    [0.37, 0.88, 0, 0.2, 0.33],
+  ];
+  const parts = [paint(THREE, tag(new THREE.OctahedronGeometry(0.11, 0).translate(0, 0.06, 0), PART_FIXED, 0, 0.17), EMBER)];
+  for (const [x, y, z, r, g] of puffs) {
+    const puff = new THREE.IcosahedronGeometry(r, 1);
+    puff.translate(x, y, z);
+    parts.push(paint(THREE, tag(puff, PART_FIXED, y - r, y + r), [g, g * 0.96, g * 0.92]));
+  }
+  return mergeColouredParts(THREE, parts);
+}
+
+/** A flat disc standing `y0..y1` above the road. */
+function patch(THREE, { radius, y0 = 0, y1, x, z, segments = 16 }) {
+  return cylinder(THREE, { rTop: radius, rBottom: radius, y0, y1, x, z, segments, part: PART_FIXED });
+}
+
+/**
+ * Two potholes and a crack, ringed in hazard yellow so they read from the air.
+ * Raised a hand's width off the road: the district plate lies 3 cm above the
+ * plinth, and anything flush with it disappears into it at range.
+ */
+export function potholeGeometry(THREE) {
+  const RIM = [0.95, 0.8, 0.2];
+  const HOLE = [0.03, 0.03, 0.035];
+  return mergeColouredParts(THREE, [
+    paint(THREE, patch(THREE, { radius: 0.7, y1: 0.12, x: 0, z: 0 }), RIM),
+    paint(THREE, patch(THREE, { radius: 0.52, y1: 0.14, x: 0, z: 0 }), HOLE),
+    paint(THREE, patch(THREE, { radius: 0.44, y1: 0.12, x: 1.05, z: 0.4, segments: 12 }), RIM),
+    paint(THREE, patch(THREE, { radius: 0.3, y1: 0.14, x: 1.05, z: 0.4, segments: 12 }), HOLE),
+    paint(THREE, box(THREE, { w: 1.0, d: 0.1, y0: 0, y1: 0.13, x: 0.5, z: -0.45, part: PART_FIXED }), HOLE),
+  ]);
+}
+
+/** An orange code-violation notice on a single post, a white rule across it. */
+export function codeNoticeGeometry(THREE) {
+  const NOTICE = [1.0, 0.56, 0.1];
+  return mergeColouredParts(THREE, [
+    paint(THREE, cylinder(THREE, { rTop: 0.04, rBottom: 0.05, y0: 0, y1: 2.2, segments: 5, part: PART_FIXED }), POST),
+    paint(THREE, box(THREE, { w: 0.9, d: 0.05, y0: 1.45, y1: 2.35, part: PART_FIXED }), NOTICE),
+    paint(THREE, box(THREE, { w: 0.62, d: 0.06, y0: 1.95, y1: 2.05, part: PART_FIXED }), WHITE),
+    paint(THREE, box(THREE, { w: 0.62, d: 0.06, y0: 1.7, y1: 1.78, part: PART_FIXED }), WHITE),
+    paint(THREE, box(THREE, { w: 0.14, d: 0.06, y0: 1.53, y1: 1.63, part: PART_FIXED }), [0.1, 0.1, 0.1]),
   ]);
 }

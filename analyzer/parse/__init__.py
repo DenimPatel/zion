@@ -16,6 +16,7 @@ because a city with a missing building is worse than a city with a plain one.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------
@@ -57,9 +58,25 @@ class ParseResult:
     # specifiers only ("./foo", "../bar/baz") -- a bare package name like
     # 'react' cannot resolve to a repo file and is not worth carrying.
     imports: list[str] = field(default_factory=list)
+    # Bare package specifiers a brace-language file imports ('react',
+    # '@scope/pkg/sub'): third-party trade, never resolved to a repo file.
+    # Python needs no separate list -- its unresolved `imports` are the same.
+    packages: list[str] = field(default_factory=list)
+    # Debt markers (see DEBT_MARKER) found inside comments: debt the author
+    # wrote down. Counted only where comments are known exactly (Python via
+    # tokenize, brace languages via the string/comment stripper).
+    debt_markers: int = 0
+    # Martin's abstractness: classes, and how many of them are abstract (an
+    # ABC, a Protocol, an abstractmethod holder; `interface`, `trait`,
+    # `abstract class` in brace languages).
+    class_count: int = 0
+    abstract_count: int = 0
 
 
 DOC_TRUNCATE = 160
+
+# A marker must be its own word and upper case: "todo list" in prose is not debt.
+DEBT_MARKER = re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b")
 
 
 def _shorten(text: str, limit: int = DOC_TRUNCATE) -> str:
