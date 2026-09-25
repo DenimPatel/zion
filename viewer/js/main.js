@@ -1012,8 +1012,9 @@ function renderLensKey() {
   const lens = document.getElementById('lens-select');
   if (!key || !lens) return;
   key.innerHTML = '';
-  const authorSelect = document.getElementById('lens-author');
-  if (authorSelect) authorSelect.hidden = lens.value !== 'territory';
+  // The territory pickers belong to both lens controls; show and align them here,
+  // where the lens is read, so the City Guide and the Filter tab never disagree.
+  syncAuthorSelects();
   const item = (colour, label, count) => {
     const span = document.createElement('span');
     const chip = document.createElement('span');
@@ -1534,31 +1535,59 @@ function setupFilterAndLens() {
   }
   // The territory lens paints one author; the list is the manifest's own
   // author table, so a locked city offers no names until it is unlocked.
-  const authorSelect = document.getElementById('lens-author');
-  if (authorSelect) {
-    fillAuthorSelect();
-    authorSelect.addEventListener('change', (event) => {
+  for (const select of authorSelects()) {
+    select.addEventListener('change', (event) => {
       state.territoryAuthor = event.target.value;
+      syncAuthorSelects();
       applyLens('territory');
     });
+  }
+  fillAuthorSelect();
+}
+
+/** The two territory pickers: the Filter tab's, and the City Guide's copy. */
+function authorSelects() {
+  return ['lens-author', 'guide-lens-author']
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+}
+
+/**
+ * Both pickers are one control: same options, same value, shown only while the
+ * territory lens is the one in force. Without this the City Guide could pick
+ * "one author's territory" and had no way to say *whose*, so it always painted
+ * whoever happened to be first in the table.
+ */
+function syncAuthorSelects() {
+  const lens = document.getElementById('lens-select');
+  const on = Boolean(lens) && lens.value === 'territory';
+  for (const select of authorSelects()) {
+    select.hidden = !on;
+    if (select.value !== state.territoryAuthor) select.value = state.territoryAuthor;
   }
 }
 
 function fillAuthorSelect() {
-  const select = document.getElementById('lens-author');
-  if (!select) return;
+  const selects = authorSelects();
+  if (!selects.length) return;
   const authors = (state.source.manifest.stats && state.source.manifest.stats.authors) || [];
-  select.innerHTML = '';
+  const options = [];
   for (const row of authors.slice(0, 60)) {
     const name = state.source.s(row.name);
     if (!name) continue;
-    const option = document.createElement('option');
-    option.value = name;
-    option.textContent = `${name} (${row.lines.toLocaleString()} lines)`;
-    select.append(option);
+    options.push({ value: name, label: `${name} (${row.lines.toLocaleString()} lines)` });
   }
-  if (!state.territoryAuthor && select.options.length) state.territoryAuthor = select.options[0].value;
-  select.value = state.territoryAuthor;
+  for (const select of selects) {
+    select.innerHTML = '';
+    for (const option of options) {
+      const el = document.createElement('option');
+      el.value = option.value;
+      el.textContent = option.label;
+      select.append(el);
+    }
+  }
+  if (!state.territoryAuthor && options.length) state.territoryAuthor = options[0].value;
+  syncAuthorSelects();
 }
 
 /** The City Guide's copy of the lens key, so the colours explain themselves where they are chosen. */
@@ -1604,6 +1633,9 @@ function setupGuideColour() {
     rememberLens(event.target.value);
   });
   guide.addEventListener('keydown', (event) => event.stopPropagation());
+  // Arrow keys on the author picker must not reach the global handler either.
+  const author = document.getElementById('guide-lens-author');
+  if (author) author.addEventListener('keydown', (event) => event.stopPropagation());
 }
 
 /** Switch the colour lens, keeping the select, the key and the city in step. */
@@ -2679,6 +2711,23 @@ function teleportTo(target) {
   );
 }
 
+/**
+ * A flight moves the camera directly and then stops, but it never touches the
+ * controller the next frame falls back to. In fly mode that controller still
+ * holds the pose the flight started from, so its very next `apply()` yanks the
+ * view home the moment the flight lands. Hand the arrived pose back to it.
+ */
+function adoptFlightArrival() {
+  if (state.mode !== 'fly') return;
+  const fly = context.fly;
+  fly.position.copy(camera.position);
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  fly.yaw = Math.atan2(-forward.x, -forward.z);
+  fly.pitch = Math.asin(Math.max(-1, Math.min(1, forward.y)));
+  fly.velocity.set(0, 0, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Time of day
 // ---------------------------------------------------------------------------
@@ -3018,7 +3067,7 @@ function frame(now) {
       if (context.city) context.city.clearDistrictHighlight();
     }
     if (context.flight.active) {
-      context.flight.update(dt);
+      if (context.flight.update(dt)) adoptFlightArrival();
     } else if (state.mode === 'orbit') {
       context.orbit.update(dt);
     } else if (state.mode === 'top') {

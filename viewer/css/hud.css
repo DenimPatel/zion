@@ -1122,5 +1122,16 @@ body.panels-hidden #minimap:not(.collapsed) { opacity: 0.85; }
   border-radius: 6px;
   padding: 5px 6px;
 }
+#guide-lens-author {
+  width: 100%;
+  margin-top: 6px;
+  font: 12.5px var(--sans);
+  color: var(--ink);
+  background: var(--panel-solid);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  padding: 5px 6px;
+}
+#guide-lens-author[hidden] { display: none; }
 #guide-lens-key { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 7px; }
 #guide-lens-key span { display: inline-flex; align-items: center; gap: 4px; }
