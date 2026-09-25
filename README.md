@@ -1,5 +1,7 @@
 # Zion
 
+![Zion flythrough](<sample-zion.gif>)
+
 ![Zion-city-shot](<sample-zion.png>)
 **Turn any repository into an explorable 3D city.**
 
