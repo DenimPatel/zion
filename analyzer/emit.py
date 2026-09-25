@@ -164,7 +164,45 @@ LEGEND_SPEC = [
     ("codes", "Breaks a declared building code -> a code-violation notice", "rules", "Health",
      "An orange notice is posted on a building that breaks a limit declared under \"codes\" in .zion/rules.json: "
      "logical lines, files imported, importers, decision points in one definition, floors or debt markers. The "
-     "budgets are yours; the city enforces them."),
+      "budgets are yours; the city enforces them."),
+    ("defects", "High share of fix commits -> red warning lamp", "ratio", "Health",
+     "A red warning lamp on the roof: an unusually large share of this file's commits read as fixes (\"fix\", "
+     "\"bug\", \"hotfix\", \"revert\", \"closes #12\"). Top decile of the repository, at least five commits and two "
+     "fixes. Bugs cluster; this is where the next one is most likely."),
+    ("hubs", "Top 10% of both importers and imports -> steel collar", "edges", "Structure",
+     "A steel collar rings a hub: a file in the top tenth of the repository both for how many files import it and "
+     "for how many it imports. A change there ripples up and down the import graph at once. Split it along its "
+     "callers."),
+    ("trend", "Last quarter's commits vs the quarter before -> trend lens", "commits", "Construction & time",
+     "Rising, steady or cooling: the commits in the last three months against the three before. A hotspot that "
+     "is rising is the refactor that gets more expensive every week. Filter tab: colour by trend, or is:rising."),
+    ("hidden_coupling", "Changed together, no import -> dashed arcs from the selected building", "pairs",
+     "Structure",
+     "Two files in different folders that change in the same commits at least half the time although neither "
+     "imports the other. The dependency is real -- a format, a protocol, a copy -- but the code does not say "
+     "so. Select a building to see its partners as dashed violet arcs."),
+    ("clones", "Copied code -> twin links from the selected building", "pairs", "Structure",
+     "Two files that share a long run of near-identical code, found by fingerprinting the normalised source "
+     "(renamed variables and reformatting still match). A fix made in one is easily missed in the other. "
+     "Select a building to see its twins linked in cyan."),
+    ("abstractness", "Abstract share vs instability -> the main sequence", "ratio", "Structure",
+     "For each folder, A is the share of its type definitions that are abstract (interfaces, ABCs, protocols) and "
+     "D = |A + I - 1| its distance from the main sequence. Stable and concrete is the zone of pain: everything "
+     "leans on it and nothing in it bends. City Hall plots every folder; the Filter tab colours by it."),
+    ("teams", "Recent authors per folder -> coordination cost", "authors", "People",
+     "How many people worked in a folder in the last three months, how much of its work also had to touch "
+     "another folder in the same commit, and whether anyone leads it. Many recent authors and nobody above 40% "
+     "is \"many cooks\". Shown in the folder's inspector."),
+    ("grades", "Weighted share of flagged code -> folder grade A-F", "grade", "Health",
+     "Every folder, region and the city itself gets a letter: 100 minus the share of its code that carries a "
+     "health signal, weighted by how serious the signal is (a hotspot or defect-prone file counts fully, hidden "
+     "coupling a fifth) and by the square root of each file's lines. A >= 90, B >= 80, C >= 70, D >= 60, F below. "
+     "It is recomputed at the baseline the same way, so an arrow says which way a folder is going. The badge "
+     "sits on the folder's name; the inspector says which signals cost the points."),
+    ("plan_flows", "Heaviest folder imports -> arrows in the plan view", "edges", "Structure",
+     "In the plan view (P) the fifteen heaviest folder-to-folder imports are drawn as arrows on the map, thicker "
+     "for more imports, with every import that breaks the layering in red. Folder level and capped, so it reads "
+     "as the shape of the architecture, not as a tangle of files."),
     ("timeline", "First commit dates -> the History slider", "days", "Construction & time",
      "Drag the History slider, or press play, and the city is rebuilt as it stood on that day: files appear on the "
      "day of their first commit and burn with that month's commits."),
@@ -269,11 +307,39 @@ def _building_order(analysis: RepoAnalysis, layout: CityLayout) -> dict[str, int
     return order
 
 
-def _regions(layout: CityLayout, strings: StringTable) -> list[dict]:
+def _grade_fields(members: list[FileMetrics], analysis: RepoAnalysis) -> dict:
+    """A folder's health grade now and at the baseline (analyzer/grades.py)."""
+    from . import grades
+
+    now = grades.current(members)
+    then = grades.at_baseline(members, getattr(analysis, "baseline_summary", None), getattr(analysis, "baseline_key", None))
+    return {
+        "grade": now["grade"] if now else "",
+        "score": now["score"] if now else -1,
+        "gradeWhy": now["why"] if now else [],
+        "baselineGrade": then["grade"] if then else "",
+        "baselineScore": then["score"] if then else -1,
+    }
+
+
+def _regions(layout: CityLayout, strings: StringTable, analysis: RepoAnalysis | None = None) -> list[dict]:
     """Every intermediate folder plinth, parents before children."""
     index = {r.key: i for i, r in enumerate(layout.regions)}
+    members: dict[str, list[FileMetrics]] = {}
+    if analysis is not None:
+        # By district, not by file: a region holds whole districts, and
+        # scanning every file for every region is quadratic at scale.
+        by_district: dict[str, list[FileMetrics]] = {}
+        for record in analysis.files:
+            by_district.setdefault(record.district, []).append(record)
+        for r in layout.regions:
+            prefix = r.key.rstrip("/") + "/"
+            members[r.key] = [
+                f for key, files in by_district.items() if key == r.key or key.startswith(prefix) for f in files
+            ]
     return [
         {
+            **(_grade_fields(members.get(r.key, []), analysis) if analysis is not None else {}),
             "id": i,
             "key": strings.add(r.key),
             "name": strings.add(r.name),
@@ -307,9 +373,19 @@ def _review(analysis: RepoAnalysis, order: dict[str, int]) -> dict:
         "complexity": ids(lists["complexity"]),
         "impact": ids(lists["impact"]),
         "bugprone": ids(lists["bugprone"]),
-        "debt": ids(lists["debt"]),
         "codes": ids(lists["codes"]),
+        "defects": ids(lists["defects"]),
+        "rising": ids(lists["rising"]),
+        "hubs": ids(lists["hubs"]),
+        "debt": ids(lists["debt"]),
+        "clones": [ids(pair) for pair in lists["clones"]],
+        "hiddenCoupling": [ids(pair) for pair in lists["hiddenCoupling"]],
         "totals": {
+            "defects": sum(1 for f in analysis.files if f.is_defect),
+            "rising": sum(1 for f in analysis.files if f.is_rising_hotspot),
+            "hubs": sum(1 for f in analysis.files if f.is_hub),
+            "clones": len(analysis.clones),
+            "hiddenCoupling": len(analysis.hidden_couplings),
             "violations": sum(1 for f in analysis.files if f.is_violation),
             "untested": sum(1 for f in analysis.files if f.untested_risk),
             "drift": sum(1 for f in analysis.files if f.owner_drift),
@@ -416,6 +492,15 @@ def _district_extras(key: str, members: list[FileMetrics], arch, strings: String
         "debt": sum(f.debt_markers for f in members if is_code_file(f)),
         "codeViolations": sum(1 for f in members if f.code_violations),
         "packages": [[strings.add(name), n] for name, n in _district_packages(members)],
+        # The deeper signals, per folder.
+        "recentAuthors": deps.recent_authors if deps else 0,
+        "crossShare": deps.cross_share if deps else 0.0,
+        "topShare": deps.top_share if deps else 0.0,
+        "manyCooks": bool(deps and deps.many_cooks),
+        "defects": sum(1 for f in members if f.is_defect),
+        "rising": sum(1 for f in members if f.is_rising_hotspot),
+        "hubs": sum(1 for f in members if f.is_hub),
+        "clones": sum(1 for f in members if f.is_clone),
     }
 
 
@@ -566,6 +651,15 @@ def build_manifest(
         "bugprone": flags.defects and any(f.is_bugprone for f in analysis.files),
         "debt": flags.debt,
         "codes": flags.codes,
+        "defects": flags.defects,
+        "hubs": flags.hubs,
+        "trend": flags.trend,
+        "hidden_coupling": flags.hidden_coupling,
+        "clones": flags.clones,
+        "abstractness": flags.abstractness,
+        "teams": flags.teams,
+        "grades": True,
+        "plan_flows": flags.imports and bool(arch is not None and arch.matrix),
     }
     for entry_id, label, unit, group, description in LEGEND_SPEC:
         enabled = enable_map.get(entry_id, True)
@@ -650,6 +744,7 @@ def build_manifest(
                 # relative to the district's own population.
                 "heat": round(sum(f.heat for f in members) / len(members), 4) if members and flags.churn else 0.0,
                 **_district_extras(district.key, members, arch, strings, flags),
+                **_grade_fields(members, analysis),
                 "newFiles": sum(1 for f in members if f.is_new) if flags.age else 0,
                 "isCbd": (
                     flags.centrality
@@ -774,7 +869,7 @@ def build_manifest(
             [round(s.x, 2), round(s.y, 2), round(s.w, 2), round(s.h, 2), s.cls] for s in layout.streets
         ],
         "roads": {"names": list(ROAD_NAMES), "widths": [round(w, 2) for w in layout.road_widths]},
-        "regions": _regions(layout, strings),
+        "regions": _regions(layout, strings, analysis),
         "review": _review(analysis, order),
         "dependencies": _dependencies(analysis, layout, strings),
         "mainSequence": _main_sequence(analysis, layout),
@@ -790,6 +885,8 @@ def build_manifest(
         "camera": _camera(layout.bounds.w, layout.bounds.h, max_height),
         "districts": districts,
         "stats": stats,
+        # The whole city's grade, the same rule as every folder's.
+        "grade": _grade_fields(analysis.files, analysis),
         # Only a pointer: the file itself is empty/absent whenever coupling is
         # disabled, so the viewer's "should I fetch this" check is one flag read.
         "bridges": "bridges.json" if flags.coupling else None,
@@ -893,6 +990,11 @@ FLAG_UNOWNED = 1 << 22
 FLAG_BUGPRONE = 1 << 23
 FLAG_DEBT = 1 << 24
 FLAG_CODES = 1 << 25
+FLAG_DEFECT = 1 << 26
+FLAG_RISING = 1 << 27
+FLAG_HUB = 1 << 28
+FLAG_CLONE = 1 << 29
+FLAG_HIDDEN_COUPLING = 1 << 30
 
 # index.json's row shape, in column order. Kept as a manifest field so the
 # viewer never hardcodes positions -- a later phase appends a column here and
@@ -901,8 +1003,9 @@ INDEX_COLUMNS = [
     "id", "district", "archetype", "language", "ext", "name", "flags", "loc", "age", "heat", "path",
     # Appended for the richer query tokens (owner:, cx>, fanin>, fanout>, delta>).
     "owner", "cx", "fanin", "fanout", "delta",
-    # Appended for the third layer (impact>, fixes>, debt>).
-    "impact", "fixes", "debt",
+    # Appended for the third layer and the deeper signals
+    # (impact>, fixes>, trend, todo>/debt>, depth>).
+    "impact", "fixes", "trend", "debt", "depth",
 ]
 
 
@@ -1029,6 +1132,10 @@ def _building_record(
         # Change since the baseline (history.py).
         "delta": record.delta,
         "locDelta": record.loc_delta,
+        # How tall it stood at the baseline, by the same height rule, for the
+        # ghost outline around a building that grew or shrank. A function of
+        # line counts only, so identical in a plain and an encrypted build.
+        "baselineHeight": _baseline_height(record),
         "became": list(record.became),
         # Third layer: blast radius, repairs, debt, abstractness, trade, codes.
         "impact": record.impact,
@@ -1042,6 +1149,18 @@ def _building_record(
         "abstractClasses": record.abstract_count,
         "packages": [strings.add(p) for p in record.packages],
         "codeViolations": [strings.add(v) for v in record.code_violations],
+        # The deeper signals (health.py, architecture.py, clones.py).
+        "isDefect": record.is_defect,
+        "trend": record.trend,
+        "risingHotspot": record.is_rising_hotspot,
+        "isHub": record.is_hub,
+        "importDepth": record.import_depth,
+        # Comment text goes through the string table: a locked city shows the
+        # count and the line, never what the comment said.
+        "debtMarkers": [[line, marker, strings.add(text) if text else -1] for line, marker, text in record.debt],
+        # Partners are building ids, so an encrypted city leaks no path.
+        "cloneOf": [[order[o], ratio] for o, ratio in record.clone_of if o in order],
+        "hiddenCoupling": [[order[o], count] for o, count in record.hidden_coupling if o in order],
         "height": round(record.height, 2),
         "footprint": round(record.footprint, 2),
         "plate": round(record.logical_loc / len(record.floors), 1) if record.floors else None,
@@ -1126,6 +1245,16 @@ def _build_index(
             flags |= FLAG_DEBT
         if record.code_violations:
             flags |= FLAG_CODES
+        if record.is_defect:
+            flags |= FLAG_DEFECT
+        if record.is_rising_hotspot:
+            flags |= FLAG_RISING
+        if record.is_hub:
+            flags |= FLAG_HUB
+        if record.is_clone:
+            flags |= FLAG_CLONE
+        if record.is_hidden_coupling:
+            flags |= FLAG_HIDDEN_COUPLING
         rows.append(
             [
                 index,
@@ -1146,11 +1275,28 @@ def _build_index(
                 record.loc_delta,
                 record.impact,
                 record.fix_commits,
+                record.trend,
                 record.debt_markers if is_code_file(record) else 0,
+                record.import_depth,
             ]
         )
     rows.sort(key=lambda row: row[0])
     return rows
+
+
+def _baseline_height(record: FileMetrics) -> float | None:
+    if record.delta not in ("grown", "shrunk") or record.is_binary:
+        return None
+    from .metrics import ARCH_MONUMENT, ARCH_PARK, height_for
+
+    if record.archetype == ARCH_MONUMENT:
+        return None
+    old = max(0, record.logical_loc - record.loc_delta)
+    rows = old if record.rows is not None else None
+    height = height_for(record.language, old, rows, False)
+    if record.archetype == ARCH_PARK:
+        height = max(2.0, height * 0.25)
+    return round(height, 2)
 
 
 def _includes_source(record: FileMetrics) -> bool:
@@ -1350,6 +1496,9 @@ def emit_city(
     # Totals across builds (counts only, never a path): City Hall's census.
     census = history.census(out_dir, current_summary) if options.track_history else []
     analysis.census = census
+    # Kept for the per-folder grades, which are recomputed at the baseline.
+    analysis.baseline_summary = baseline
+    analysis.baseline_key = summary_key
 
     manifest = build_manifest(analysis, layout, strings, options, crypto_meta)
 

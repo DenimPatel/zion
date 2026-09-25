@@ -53,6 +53,12 @@ SIGNALS = (
     ("drift", lambda f: f.owner_drift),
     ("bugprone", lambda f: f.is_bugprone),
     ("codes", lambda f: bool(f.code_violations)),
+    # Appended: a summary names its signals, so older summaries still read.
+    ("defect", lambda f: f.is_defect),
+    ("rising", lambda f: f.is_rising_hotspot),
+    ("hub", lambda f: f.is_hub),
+    ("clone", lambda f: f.is_clone),
+    ("hiddencoupling", lambda f: f.is_hidden_coupling),
 )
 GROWTH_MIN_LINES = 10
 GROWTH_MIN_FRACTION = 0.1
@@ -93,7 +99,12 @@ def totals(analysis) -> dict:
         "bugprone": sum(1 for f in files if f.is_bugprone),
         "debt": sum(f.debt_markers for f in files if _is_code(f)),
         "codes": sum(1 for f in files if f.code_violations),
-        "zonePain": sum(1 for d in arch.districts.values() if d.zone == "pain") if arch is not None else 0,
+        "defects": sum(1 for f in files if f.is_defect),
+        "rising": sum(1 for f in files if f.is_rising_hotspot),
+        "hubs": sum(1 for f in files if f.is_hub),
+        "clones": len(getattr(analysis, "clones", []) or []),
+        "hiddenCoupling": len(getattr(analysis, "hidden_couplings", []) or []),
+        "zonePain": sum(1 for d in (arch.districts.values() if arch is not None else []) if d.zone == "pain"),
         "undeclared": len((getattr(analysis, "externals", None) or {}).get("undeclared", [])),
     }
 
@@ -230,7 +241,12 @@ def apply_delta(analysis, baseline: dict | None, key=None) -> dict | None:
             record.delta = "grown" if change > 0 else "shrunk"
             (grown if change > 0 else shrunk).append((record.rel, change))
         for position, (name, _test) in enumerate(SIGNALS):
-            was = bool(old_bits & (1 << names.index(name))) if name in names else False
+            # A signal the baseline never recorded cannot have been "gained":
+            # comparing against an older summary must not call every file
+            # that carries it new.
+            if name not in names:
+                continue
+            was = bool(old_bits & (1 << names.index(name)))
             now = bool(bits_now & (1 << position))
             if now and not was:
                 became[name].append(record.rel)

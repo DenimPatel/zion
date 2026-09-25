@@ -22,11 +22,15 @@ import {
   DELTA_COLOURS,
   LENS_BANDS,
   lensBand,
+  lensColour,
+  categoryColour,
+  MAIN_SEQUENCE_BANDS,
+  mainSequenceBand,
   healthSignal,
   plinthTop,
 } from './city.js';
 import { SkyRig } from './sky.js';
-import { FlyCamera, OrbitCamera, CameraFlight } from './cameras.js';
+import { FlyCamera, OrbitCamera, TopCamera, CameraFlight } from './cameras.js';
 import { CollisionGrid, WalkCamera } from './collision.js';
 import { Interior } from './interior.js';
 import { CityHall, Tour } from './tour.js';
@@ -34,10 +38,12 @@ import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
 import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
-import { SelectionOverlay, LINK_COLOURS, IMPACT_COLOURS, blastRadius } from './selection.js';
+import { SelectionOverlay, PlanFlows, LINK_COLOURS, IMPACT_COLOURS, blastRadius } from './selection.js';
 import { Notes } from './notes.js';
 import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
 import { MapLabels } from './labels.js';
+import { MiniMap } from './minimap.js';
+import { GoToPalette } from './palette.js';
 import { renderBuilding, renderDistrict, resetDetailPanel } from './detail.js';
 
 const canvas = document.getElementById('scene');
@@ -49,7 +55,7 @@ const params = new URLSearchParams(location.search);
 
 const state = {
   source: new CitySource('.'),
-  mode: 'fly', // fly | walk | orbit | interior
+  mode: 'fly', // fly | walk | orbit | top | interior
   night: 0,
   litScale: 1,
   time: 12,
@@ -100,6 +106,7 @@ const context = {
   sky: null,
   fly: null,
   orbit: null,
+  top: null,
   flight: null,
   walk: null,
   grid: null,
@@ -200,6 +207,15 @@ const LEGEND_KEYS = {
   bugprone: { kind: 'mesh', target: 'smoke-plumes', short: 'Smoke — bug-prone', colour: HEALTH_COLOURS.bugprone, query: 'is:bugprone' },
   debt: { kind: 'mesh', target: 'potholes', short: 'Potholes — debt markers', colour: HEALTH_COLOURS.debt, query: 'is:debt' },
   codes: { kind: 'mesh', target: 'code-notices', short: 'Code notices — building codes', colour: HEALTH_COLOURS.codes, query: 'is:codes' },
+  defects: { kind: 'mesh', target: 'defect-lamps', short: 'Warning lamps — defect-prone', colour: HEALTH_COLOURS.defect, query: 'is:defect' },
+  hubs: { kind: 'mesh', target: 'hub-collars', short: 'Steel collars — hubs', colour: HEALTH_COLOURS.hub, query: 'is:hub' },
+  trend: { kind: null, short: 'Trend', colour: 0xff8a3d, reason: 'a colour lens: Filter tab → trend', query: 'is:warming' },
+  hidden_coupling: { kind: 'overlay', target: 'hidden-arcs', short: 'Dashed arcs — hidden coupling', colour: LINK_COLOURS.hidden, query: 'is:hiddencoupling' },
+  clones: { kind: 'overlay', target: 'clone-links', short: 'Twin links — copied code', colour: LINK_COLOURS.clone, query: 'is:clone' },
+  abstractness: { kind: null, short: 'Main sequence', colour: 0x2f9e6e, reason: 'City Hall charts it; Filter tab → main sequence' },
+  teams: { kind: null, short: 'Coordination cost', colour: 0xb28ad6, reason: 'listed in the folder inspector, not drawn' },
+  grades: { kind: 'overlay', target: 'grade-badges', short: 'Grade badges — folder health', colour: 0x3ddc84 },
+  plan_flows: { kind: 'overlay', target: 'plan-flows', short: 'Folder arrows — plan view', colour: LINK_COLOURS.out },
 };
 
 // Forms the legend does not name, so every archetype still has a switch. The
@@ -328,7 +344,7 @@ function disabledReason(id) {
     weathering: /weather|commit dates/i, new_construction: /birth/i, skybridges: /coupling/i,
     downtown: /downtown/i, knowledge: /owner/i, orphans: /import/i, cycles: /import/i,
     untested: /test/i, imports: /import/i, instability: /import/i, district_coupling: /coupling/i,
-    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i,
+    codeowners: /CODEOWNERS/, experts: /author/i, timeline: /birth/i, defects: /fix/i,
     impact: /import/i, bugprone: /fix|repairs/i, debt: /debt|TODO/i, codes: /building codes/i, externals: /harbour|package/i,
   }[id];
   const note = words ? notes.find((n) => words.test(n)) : null;
@@ -341,6 +357,13 @@ function disabledReason(id) {
   if (id === 'main_sequence') return 'No folder has both classes and imports in or out, so none can be placed on the main sequence.';
   if (id === 'bugprone') return 'No file has enough commits that say they fix it.';
   if (id === 'delta') return 'No baseline yet: build again after the repository changes, or build with --compare REV.';
+  if (id === 'hubs') return 'No file is both widely imported and a heavy importer.';
+  if (id === 'debt') return 'No TODO, FIXME, HACK or XXX comments in this repository\'s own code.';
+  if (id === 'clones') return 'No two files share a long copied block.';
+  if (id === 'hiddenCoupling' || id === 'hidden_coupling') return 'Every pair that changes together across folders also imports one way or the other.';
+  if (id === 'trend' || id === 'rising') return 'Needs 10+ commits over at least five months to tell rising from cooling.';
+  if (id === 'abstractness') return 'No folder has enough type definitions and resolved imports to place on the main sequence.';
+  if (id === 'teams') return 'Needs more than one author.';
   return 'Not drawn: the repository history is too thin for this signal to mean anything.';
 }
 
@@ -500,6 +523,10 @@ function applyHiddenLayers() {
       context.overlay.setLayerVisible(spec.target, !state.hiddenLayers.has(id));
     }
   }
+  // Grades and the plan's folder arrows live outside the city mesh.
+  if (context.labels) context.labels.setGradesShown(!state.hiddenLayers.has('grades'));
+  if (context.planFlows) context.planFlows.setLayerVisible('plan-flows', !state.hiddenLayers.has('plan_flows'));
+  if (context.minimap) context.minimap.invalidate();
   // The History slider hides every prop while it replays the past; a switch
   // flipped meanwhile must not bring them back early.
   if (state.timeline !== null) context.city.hideProps();
@@ -572,6 +599,26 @@ const HEALTH_SECTIONS = [
     text: 'Commits keep saying they fix these files. Churn says a file changes; this says it keeps breaking.',
   },
   {
+    id: 'defects', title: 'Defect-prone files', colour: HEALTH_COLOURS.defect, flag: 'defects',
+    text: 'An unusually large share of their commits are fixes. Bugs cluster: the next one is likely here.',
+  },
+  {
+    id: 'rising', title: 'Rising hotspots', colour: 0xff2d55, flag: 'trend',
+    text: 'Hotspots that got busier this quarter than the one before: the refactor that gets dearer every week.',
+  },
+  {
+    id: 'hubs', title: 'Hubs', colour: HEALTH_COLOURS.hub, flag: 'hubs',
+    text: 'Imported by many and importing many: a change ripples both ways. Split along the callers.',
+  },
+  {
+    id: 'clones', title: 'Copied code', colour: LINK_COLOURS.clone, flag: 'clones', pairs: true,
+    text: 'Pairs of files sharing a long near-identical block. Fix one, and the other keeps the bug.',
+  },
+  {
+    id: 'hiddenCoupling', title: 'Hidden coupling', colour: LINK_COLOURS.hidden, flag: 'hiddenCoupling', pairs: true,
+    text: 'Pairs in different folders that change together with no import between them. Name the contract.',
+  },
+  {
     id: 'debt', title: 'Written-down debt', colour: HEALTH_COLOURS.debt, flag: 'debt', column: 'debt', unit: 'markers',
     text: 'TODO, FIXME, HACK and XXX in comments: the authors already said what is wrong.',
   },
@@ -626,6 +673,17 @@ function renderHealth() {
   intro.className = 'hint guide-intro';
   intro.textContent =
     'What an architect would look at first. Click a file to fly to it. Switch the colour lens to "health" to see all of these at once.';
+  const csv = document.createElement('button');
+  csv.type = 'button';
+  csv.id = 'health-csv';
+  csv.className = 'chip-btn';
+  csv.textContent = 'Download every file as CSV';
+  csv.title = state.source.locked
+    ? 'Unlock the city first: a locked city has no paths to export'
+    : 'Every file with its metrics and signals, for a spreadsheet or a ticket';
+  csv.disabled = state.source.locked;
+  csv.addEventListener('click', () => downloadCsv());
+  intro.append(document.createElement('br'), csv);
   panel.append(intro);
 
   for (const section of HEALTH_SECTIONS) {
@@ -656,6 +714,15 @@ function renderHealth() {
           for (const id of members) li.append(healthItem(id));
           list.append(li);
         });
+      } else if (section.pairs) {
+        for (const pair of review[section.id] || []) {
+          if (pair.length < 2) continue;
+          const li = document.createElement('li');
+          li.className = 'health-pair';
+          li.style.borderColor = hexColour(section.colour);
+          li.append(healthItem(pair[0]), document.createTextNode(' ↔ '), healthItem(pair[1]));
+          list.append(li);
+        }
       } else {
         for (const id of review[section.id] || []) {
           const li = document.createElement('li');
@@ -682,6 +749,65 @@ function renderHealth() {
     if (extra) panel.append(extra);
   }
   panel.append(renderNotesCard());
+}
+
+/**
+ * Every file in the repository as CSV, from index.json: the whole city, not
+ * only what is resident. Flag bits are spelled out as signal names.
+ */
+function csvText() {
+  const manifest = state.source.manifest;
+  const col = columnIndex(manifest.indexColumns);
+  const names = [
+    ['hotspot', 9], ['oversized', 10], ['orphan', 11], ['cycle', 12], ['knowledge', 13], ['violation', 14],
+    ['untested', 15], ['untested-risk', 16], ['drift', 17], ['braced', 21], ['unowned', 22], ['defect', 23],
+    ['rising', 24], ['hub', 25], ['clone', 26], ['hidden-coupling', 27], ['test', 0], ['doc', 1], ['new', 6],
+    ['downtown', 7],
+  ];
+  const quote = (value) => {
+    const text = String(value === undefined || value === null ? '' : value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const header = ['path', 'folder', 'language', 'archetype', 'loc', 'age_days', 'heat', 'owner', 'max_complexity',
+    'fan_in', 'fan_out', 'fix_commits', 'trend', 'debt_markers', 'import_depth', 'loc_since_baseline', 'grade_of_folder', 'signals'];
+  const lines = [header.join(',')];
+  const get = (row, name) => (col[name] === undefined ? '' : row[col[name]]);
+  for (const row of context.facetIndex || []) {
+    const district = manifest.districts[row[col.district]];
+    const flags = row[col.flags] || 0;
+    const owner = get(row, 'owner');
+    lines.push([
+      state.source.s(row[col.path]),
+      district ? state.source.s(district.key) : '',
+      state.source.s(row[col.language]),
+      row[col.archetype],
+      get(row, 'loc'), get(row, 'age'), get(row, 'heat'),
+      owner !== '' && owner >= 0 ? state.source.s(owner) : '',
+      get(row, 'cx'), get(row, 'fanin'), get(row, 'fanout'), get(row, 'fixes'), get(row, 'trend'), get(row, 'debt'),
+      get(row, 'depth'), get(row, 'delta'),
+      district ? district.grade || '' : '',
+      names.filter(([, bit]) => flags & (1 << bit)).map(([name]) => name).join(' '),
+    ].map(quote).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function downloadCsv() {
+  if (state.source.locked) return;
+  const blob = new Blob([csvText()], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  const name = manifestName() || 'repository';
+  link.download = `${name.replace(/[^\w.-]+/g, '-')}-zion-files.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function manifestName() {
+  const meta = state.source.manifest.meta || {};
+  return meta.name >= 0 ? state.source.s(meta.name) : '';
 }
 
 function card(title, colour, count) {
@@ -719,12 +845,16 @@ function renderDeltaCard(manifest) {
   const rows = [
     ['hotspots', 'Hotspots'], ['cycles', 'Import cycles'], ['violations', 'Layering violations'],
     ['untested', 'Untested risk'], ['oversized', 'Oversized'], ['knowledge', 'Knowledge risk'],
-    ['orphans', 'Possible dead code'], ['bugprone', 'Bug-prone'], ['codes', 'Code breaches'], ['debt', 'Debt markers'],
-    ['files', 'Files'], ['loc', 'Logical lines'],
+    ['orphans', 'Possible dead code'], ['bugprone', 'Bug-prone'], ['defects', 'Defect-prone'], ['rising', 'Rising hotspots'],
+    ['hubs', 'Hubs'], ['clones', 'Clone pairs'], ['hiddenCoupling', 'Hidden coupling'], ['codes', 'Code breaches'],
+    ['debt', 'Debt markers'], ['zonePain', 'Folders in the zone of pain'], ['files', 'Files'], ['loc', 'Logical lines'],
   ];
   const table = document.createElement('table');
   table.className = 'delta-table';
   for (const [key, name] of rows) {
+    // A baseline from before a signal existed has no number for it: leave the
+    // row out rather than report the whole count as new.
+    if (!(key in (delta.before || {}))) continue;
     const before = (delta.before || {})[key] || 0;
     const after = (delta.after || {})[key] || 0;
     const change = after - before;
@@ -1094,8 +1224,9 @@ function renderLensKey() {
   const lens = document.getElementById('lens-select');
   if (!key || !lens) return;
   key.innerHTML = '';
-  const authorSelect = document.getElementById('lens-author');
-  if (authorSelect) authorSelect.hidden = lens.value !== 'territory';
+  // The territory pickers belong to both lens controls; show and align them here,
+  // where the lens is read, so the City Guide and the Filter tab never disagree.
+  syncAuthorSelects();
   const item = (colour, label, count) => {
     const span = document.createElement('span');
     const chip = document.createElement('span');
@@ -1108,7 +1239,7 @@ function renderLensKey() {
   // you are looking at falls in each band, not a legend in the abstract.
   const resident = context.resident || [];
   if (lens.value === 'health') {
-    const names = { hotspot: 'hotspot', cycle: 'import cycle', violation: 'layering violation', bugprone: 'bug-prone', oversized: 'oversized', codes: 'breaks a building code', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
+    const names = { hotspot: 'hotspot', defect: 'defect-prone', bugprone: 'bug-prone', cycle: 'import cycle', violation: 'layering violation', hub: 'hub', oversized: 'oversized', codes: 'breaks a building code', knowledge: 'owner gone', orphan: 'orphan', healthy: 'nothing flagged' };
     const flags = state.source.manifest.flags || {};
     const counts = {};
     for (const b of resident) {
@@ -1125,6 +1256,35 @@ function renderLensKey() {
       counts.set(band, (counts.get(band) || 0) + 1);
     }
     for (const band of LENS_BANDS[lens.value]) item(band.colour, band.label, counts.get(band) || 0);
+  } else if (lens.value === 'language' || lens.value === 'author') {
+    // Categories: the most common ones on screen, then everything else.
+    const counts = new Map();
+    const authorTint = Boolean(state.source.manifest.flags && state.source.manifest.flags.authorship);
+    for (const b of resident) {
+      const name = lens.value === 'language'
+        ? state.source.s(b.language) || 'unknown'
+        : (authorTint ? state.source.s(b.author) : '') || 'unknown';
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [name, count] of ranked.slice(0, 10)) {
+      item(name === 'unknown' ? 0x777777 : categoryColour(name, lens.value === 'language' ? undefined : null), name, count);
+    }
+    const rest = ranked.slice(10).reduce((sum, [, count]) => sum + count, 0);
+    if (rest) item(0x555a63, `${ranked.length - 10} more`, rest);
+  } else if (lens.value === 'archetype') {
+    const counts = new Map();
+    for (const b of resident) counts.set(b.archetype, (counts.get(b.archetype) || 0) + 1);
+    for (const [name, count] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+      item(ARCHETYPE_COLORS[name] || 0x777777, archetypeLabel(name), count);
+    }
+  } else if (lens.value === 'mainsequence') {
+    const counts = new Map();
+    for (const b of resident) {
+      const band = mainSequenceBand(state.source.manifest.districts[b.district]);
+      counts.set(band, (counts.get(band) || 0) + 1);
+    }
+    for (const band of MAIN_SEQUENCE_BANDS) item(band.colour, band.label, counts.get(band) || 0);
   } else if (lens.value === 'heat') {
     item('linear-gradient(90deg,#4b5563,#ff4d2e)', 'stable → hottest, by recent decay-weighted churn');
   } else if (lens.value === 'downtown') {
@@ -1155,6 +1315,7 @@ function setupMapLabels() {
       level: region.level,
       kind: 'region',
       weight: region.logicalLoc || region.buildings || 0,
+      grade: region.grade || '',
     });
   }
   for (const district of manifest.districts || []) {
@@ -1167,11 +1328,132 @@ function setupMapLabels() {
       level: district.level || 0,
       kind: 'district',
       weight: district.logicalLoc || 0,
+      grade: district.grade || '',
     });
   }
   if (!context.labels) context.labels = new MapLabels(container, camera);
   const bounds = manifest.bounds;
   context.labels.setItems(items, Math.max(bounds[2], bounds[3]));
+}
+
+/** The go-to palette (palette.js): every file and folder, repository-wide. */
+function setupPalette() {
+  const root = document.getElementById('palette');
+  if (!root) return;
+  context.palette = new GoToPalette(root, {
+    locked: () => state.source.locked,
+    candidates: () => {
+      const manifest = state.source.manifest;
+      const items = [];
+      for (const district of manifest.districts) {
+        const label = state.source.locked
+          ? state.source.districtLabel(district)
+          : state.source.s(district.key) || state.source.districtLabel(district);
+        items.push({
+          kind: 'district', id: district.id, text: `${label}/`,
+          hint: `${district.buildings} files${district.grade ? ` · grade ${district.grade}` : ''}`,
+        });
+      }
+      if (!state.source.locked && context.facetIndex) {
+        const col = columnIndex(manifest.indexColumns);
+        for (const row of context.facetIndex) {
+          const path = state.source.s(row[col.path]);
+          if (path) items.push({ kind: 'building', id: row[col.id], text: path, hint: `${(row[col.loc] || 0).toLocaleString()} lines` });
+        }
+      }
+      return items;
+    },
+    pick: (item) => {
+      if (item.kind === 'district') {
+        const district = state.source.manifest.districts[item.id];
+        if (!district) return;
+        teleportTo({ kind: 'district', district });
+        context.inspector.showDistrict(district);
+      } else {
+        flyToBuilding(item.id);
+      }
+    },
+  });
+}
+
+/** The plan view's folder arrows (selection.js::PlanFlows). */
+function setupPlanFlows() {
+  if (!context.planFlows) context.planFlows = new PlanFlows(THREE, scene);
+  context.planFlows.build(state.source.manifest, districtCentre);
+  context.planFlows.setLayerVisible('plan-flows', !state.hiddenLayers.has('plan_flows'));
+}
+
+/** The minimap (minimap.js): the viewer's side of its contract. */
+function setupMiniMap() {
+  const root = document.getElementById('minimap');
+  if (!root) return;
+  const colour = new THREE.Color();
+  const lensSelect = document.getElementById('lens-select');
+  const planButton = document.getElementById('plan-toggle');
+  if (planButton) planButton.addEventListener('click', togglePlan);
+  context.minimap = new MiniMap(root, {
+    THREE,
+    camera,
+    manifest: state.source.manifest,
+    buildings: () => context.resident,
+    colourOf: (building) => {
+      const lens = lensSelect ? lensSelect.value : 'archetype';
+      return lensColour(THREE, state.source, lens, building, building.archetype || 'warehouse', state.territoryAuthor, colour).clone();
+    },
+    matches: () => state.filterMatches || null,
+    positionOf,
+    selection: () => (context.inspector && context.inspector.selected) || null,
+    notedIds: () => pinnedIds(),
+    districtLabel: (district) => state.source.districtLabel(district),
+    mode: () => state.mode,
+    visibleRect: () => context.top.visibleRect(),
+    gradesShown: () => !state.hiddenLayers.has('grades'),
+    flows: () => (state.mode === 'top' && context.planFlows && context.planFlows.layerOn ? context.planFlows.flows : []),
+    navigate: miniMapNavigate,
+  });
+}
+
+/**
+ * Where a minimap gesture takes the camera. A click flies there; a drag scrubs,
+ * moving the view immediately so the city slides under the cursor; a
+ * Shift-click on a folder frames that folder.
+ */
+function miniMapNavigate(x, z, how) {
+  if (state.mode === 'interior') return;
+  if (how && how.district) {
+    teleportTo({ kind: 'district', district: how.district });
+    return;
+  }
+  const district = context.minimap && context.minimap.districtAt({ x, z });
+  const h = district ? district.skyline.maxHeight : 12;
+  if (how !== 'scrub') {
+    teleportTo({ kind: 'point', x, z, h });
+    return;
+  }
+  context.flight.active = false;
+  if (state.mode === 'top') {
+    context.top.centreOn(x, z);
+  } else if (state.mode === 'orbit') {
+    context.orbit.spinning = false;
+    context.orbit.target.set(x, 0, z);
+    context.orbit._clampTarget();
+    context.orbit.apply();
+  } else {
+    if (state.mode !== 'fly') setMode('fly');
+    // Keep altitude and heading; slide so the point on the ground the camera
+    // looks at is the one under the cursor.
+    const fly = context.fly;
+    const cosPitch = Math.cos(fly.pitch);
+    const dir = { x: -Math.sin(fly.yaw) * cosPitch, y: Math.sin(fly.pitch), z: -Math.cos(fly.yaw) * cosPitch };
+    const bounds = state.source.manifest.bounds;
+    const span = Math.max(bounds[2], bounds[3]);
+    const reach = dir.y < -0.05 ? Math.min(span * 0.6, fly.position.y / -dir.y) : 0;
+    fly.position.x = x - dir.x * reach;
+    fly.position.z = z - dir.z * reach;
+    fly.velocity.set(0, 0, 0);
+    fly.clamp();
+    fly.apply();
+  }
 }
 
 function selectGuideTab(name) {
@@ -1336,6 +1618,7 @@ function rebuildCity(buildings) {
   hover.target = null;
   if (context.hoverOutline) context.hoverOutline.visible = false;
 
+  if (context.minimap) context.minimap.invalidate();
   context.grid = new CollisionGrid(shown);
   if (context.hall) context.grid.addBox(context.hall.userData.box);
   if (context.walk) context.walk.grid = context.grid;
@@ -1377,7 +1660,9 @@ function applyActiveFilter() {
   const predicate = compileQuery(text);
   const summary = document.getElementById('filter-summary');
   const focus = state.focus;
+  if (context.minimap) context.minimap.invalidate();
   if (!predicate && !focus) {
+    state.filterMatches = null;
     context.city.clearFilter();
     if (summary) summary.textContent = 'every building shown';
     return;
@@ -1387,6 +1672,7 @@ function applyActiveFilter() {
     ? (row) => focus.has(row[districtCol]) && (!predicate || predicate(row))
     : predicate;
   const result = runQuery(context.facetIndex, scoped, state.source.manifest.indexColumns);
+  state.filterMatches = result.ids;
   context.city.applyFilter(result.ids);
   if (summary) {
     summary.textContent =
@@ -1465,46 +1751,129 @@ function setupFilterAndLens() {
   }
   const lens = document.getElementById('lens-select');
   if (lens) {
-    lens.addEventListener('change', (event) => applyLens(event.target.value));
+    lens.addEventListener('change', (event) => {
+      applyLens(event.target.value);
+      rememberLens(event.target.value);
+    });
   }
   // The territory lens paints one author; the list is the manifest's own
   // author table, so a locked city offers no names until it is unlocked.
-  const authorSelect = document.getElementById('lens-author');
-  if (authorSelect) {
-    fillAuthorSelect();
-    authorSelect.addEventListener('change', (event) => {
+  for (const select of authorSelects()) {
+    select.addEventListener('change', (event) => {
       state.territoryAuthor = event.target.value;
+      syncAuthorSelects();
       applyLens('territory');
     });
+  }
+  fillAuthorSelect();
+}
+
+/** The two territory pickers: the Filter tab's, and the City Guide's copy. */
+function authorSelects() {
+  return ['lens-author', 'guide-lens-author']
+    .map((id) => document.getElementById(id))
+    .filter(Boolean);
+}
+
+/**
+ * Both pickers are one control: same options, same value, shown only while the
+ * territory lens is the one in force. Without this the City Guide could pick
+ * "one author's territory" and had no way to say *whose*, so it always painted
+ * whoever happened to be first in the table.
+ */
+function syncAuthorSelects() {
+  const lens = document.getElementById('lens-select');
+  const on = Boolean(lens) && lens.value === 'territory';
+  for (const select of authorSelects()) {
+    select.hidden = !on;
+    if (select.value !== state.territoryAuthor) select.value = state.territoryAuthor;
   }
 }
 
 function fillAuthorSelect() {
-  const select = document.getElementById('lens-author');
-  if (!select) return;
+  const selects = authorSelects();
+  if (!selects.length) return;
   const authors = (state.source.manifest.stats && state.source.manifest.stats.authors) || [];
-  select.innerHTML = '';
+  const options = [];
   for (const row of authors.slice(0, 60)) {
     const name = state.source.s(row.name);
     if (!name) continue;
-    const option = document.createElement('option');
-    option.value = name;
-    option.textContent = `${name} (${row.lines.toLocaleString()} lines)`;
-    select.append(option);
+    options.push({ value: name, label: `${name} (${row.lines.toLocaleString()} lines)` });
   }
-  if (!state.territoryAuthor && select.options.length) state.territoryAuthor = select.options[0].value;
-  select.value = state.territoryAuthor;
+  for (const select of selects) {
+    select.innerHTML = '';
+    for (const option of options) {
+      const el = document.createElement('option');
+      el.value = option.value;
+      el.textContent = option.label;
+      select.append(el);
+    }
+  }
+  if (!state.territoryAuthor && options.length) state.territoryAuthor = options[0].value;
+  syncAuthorSelects();
+}
+
+/** The City Guide's copy of the lens key, so the colours explain themselves where they are chosen. */
+function mirrorLensKey() {
+  const key = document.getElementById('lens-key');
+  const guideKey = document.getElementById('guide-lens-key');
+  if (!key || !guideKey) return;
+  guideKey.replaceChildren(...[...key.childNodes].map((node) => node.cloneNode(true)));
+}
+
+const LENS_STORAGE = 'zion.lens';
+
+/** The lens a fresh page opens with: the reader's last choice, else language. */
+function initialLens() {
+  if (state.selftest) return 'archetype';
+  try {
+    const saved = localStorage.getItem(LENS_STORAGE);
+    if (saved && document.querySelector(`#lens-select option[value="${saved}"]`)) return saved;
+  } catch {
+    // Storage can be blocked; the default still applies.
+  }
+  return 'language';
+}
+
+function rememberLens(value) {
+  if (state.selftest) return;
+  try {
+    localStorage.setItem(LENS_STORAGE, value);
+  } catch {
+    /* not remembered, which is fine */
+  }
+}
+
+/** The City Guide's "Colour buildings by": the same options as the Filter tab's lens. */
+function setupGuideColour() {
+  const lens = document.getElementById('lens-select');
+  const guide = document.getElementById('guide-lens');
+  if (!lens || !guide) return;
+  guide.innerHTML = lens.innerHTML.replace(/>colour: /g, '>');
+  guide.value = lens.value;
+  guide.addEventListener('change', (event) => {
+    applyLens(event.target.value);
+    rememberLens(event.target.value);
+  });
+  guide.addEventListener('keydown', (event) => event.stopPropagation());
+  // Arrow keys on the author picker must not reach the global handler either.
+  const author = document.getElementById('guide-lens-author');
+  if (author) author.addEventListener('keydown', (event) => event.stopPropagation());
 }
 
 /** Switch the colour lens, keeping the select, the key and the city in step. */
 function applyLens(value) {
   const lens = document.getElementById('lens-select');
   if (lens && lens.value !== value) lens.value = value;
+  const guide = document.getElementById('guide-lens');
+  if (guide && guide.value !== value) guide.value = value;
   if (context.city) {
     context.city.territoryAuthor = state.territoryAuthor;
     context.city.recolour(value);
   }
+  if (context.minimap) context.minimap.invalidate();
   renderLensKey();
+  mirrorLensKey();
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,7 +1950,13 @@ async function updateSelection(selection) {
           return !row || !(row[flagsCol] & testBit);
         })
       : [];
-    if (overlay) overlay.showBuilding(b, { outgoing, incoming, partners, impact, positionOf });
+    if (overlay) {
+      overlay.showBuilding(b, {
+        outgoing, incoming, partners, impact, positionOf,
+        hidden: b.hiddenCoupling || [],
+        clones: b.cloneOf || [],
+      });
+    }
   } else if (selection.kind === 'district') {
     const d = selection.district;
     const deps = manifest.dependencies;
@@ -1730,6 +2105,7 @@ function currentView() {
     author: lens && lens.value === 'territory' ? state.territoryAuthor : '',
     selection,
     timeline: state.timeline,
+    mode: state.mode,
   });
 }
 
@@ -1740,6 +2116,15 @@ async function applyView(view) {
   context.fly.yaw = view.yaw;
   context.fly.pitch = view.pitch;
   context.fly.apply();
+  if (view.mode === 'top') {
+    setMode('top');
+    // A plan link reopens on exactly the ground it showed, with no glide.
+    context.flight.active = false;
+    context.top.target.set(view.position.x, 0, view.position.z);
+    context.top.height = view.position.y;
+    context.top._clamp();
+    context.top.apply();
+  }
   state.filterText = view.filter || '';
   const input = document.getElementById('filter-input');
   if (input) input.value = state.filterText;
@@ -2169,6 +2554,9 @@ function lookDelta(dx, dy) {
     if (pointerState.button === 2) context.orbit.panDelta(dx, dy);
     else context.orbit.orbitDelta(dx, dy);
     setOrbitPrompt();
+  } else if (state.mode === 'top') {
+    // A plan is a map: dragging slides the paper, it never tilts the view.
+    context.top.panDelta(dx, dy, window.innerHeight);
   } else if (state.mode === 'fly') {
     context.fly.lookDelta(dx, dy);
   }
@@ -2367,6 +2755,9 @@ canvas.addEventListener('wheel', (event) => {
   if (state.mode === 'orbit') {
     context.orbit.zoomBy(-notches);
     setOrbitPrompt();
+  } else if (state.mode === 'top') {
+    context.flight.active = false;
+    context.top.zoomBy(-notches);
   } else {
     context.fly.dolly(-notches);
   }
@@ -2404,10 +2795,27 @@ function setMode(mode) {
   applyHover(null, 0, 0);
   if (state.mode === 'interior' && mode !== 'interior') exitInterior();
   const previous = state.mode;
+  if (previous === 'top' && mode !== 'top') {
+    // Leave the plan from exactly where it is, looking down, so nothing jumps.
+    context.flight.active = false;
+    context.top.handOff(context.fly);
+  }
   state.mode = mode;
   context.fly.enabled = mode === 'fly';
   context.orbit.active = mode === 'orbit';
   context.walk.enabled = mode === 'walk';
+  context.top.active = mode === 'top';
+  syncPlanButton();
+  if (mode === 'top' && previous !== 'top') {
+    if (previous === 'orbit') context.orbit.handOff(context.fly);
+    document.exitPointerLock?.();
+    // Centre the plan on what the camera was looking at, then rise into it.
+    context.top.adopt(context.fly);
+    const pose = context.top.pose();
+    context.flight.startPose(camera.position.clone(), camera.quaternion.clone(), pose.position, pose.quaternion, 1.1);
+    setPlanPrompt();
+    return;
+  }
   if (mode === 'orbit') {
     // Pick up wherever the view already is, and start the lap: "show me the
     // city from all sides" is the whole reason to be here, so it should not
@@ -2427,6 +2835,43 @@ function setMode(mode) {
   if (mode !== 'fly') document.exitPointerLock?.();
   if (mode === 'orbit') setOrbitPrompt();
   else setPrompt('');
+}
+
+/**
+ * The plan view looks through a longer lens than flight does; ease between the
+ * two so entering or leaving the map is a zoom, not a cut.
+ */
+function easeFov(dt) {
+  // Fog is tuned for a camera among the buildings; from the plan's height it
+  // would wash the whole map out. Push it back by the altitude while the plan
+  // is up, and restore it exactly afterwards.
+  const fog = scene.fog;
+  if (fog) {
+    if (!fog.userData) fog.userData = {};
+    if (fog.userData.near === undefined) fog.userData = { near: fog.near, far: fog.far };
+    const lift = state.mode === 'top' ? camera.position.y : 0;
+    fog.near = fog.userData.near + lift;
+    fog.far = fog.userData.far + lift;
+  }
+  const manifestFov = state.source.manifest && state.source.manifest.camera ? state.source.manifest.camera.fov : 60;
+  const want = state.mode === 'top' ? context.top.fov : manifestFov;
+  if (Math.abs(camera.fov - want) < 0.01) return;
+  camera.fov = Math.abs(camera.fov - want) < 0.05 ? want : camera.fov + (want - camera.fov) * Math.min(1, dt * 5);
+  camera.updateProjectionMatrix();
+}
+
+function setPlanPrompt() {
+  if (state.mode !== 'top') return;
+  setPrompt('Plan view &nbsp;·&nbsp; drag or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to pan, wheel or <kbd>Q</kbd><kbd>E</kbd> to zoom &nbsp;·&nbsp; <kbd>R</kbd> whole city &nbsp;·&nbsp; <kbd>P</kbd> to fly from here');
+}
+
+function syncPlanButton() {
+  const button = document.getElementById('plan-toggle');
+  if (button) button.setAttribute('aria-pressed', String(state.mode === 'top'));
+}
+
+function togglePlan() {
+  setMode(state.mode === 'top' ? 'fly' : 'top');
 }
 
 async function enterInterior(building) {
@@ -2467,12 +2912,28 @@ function teleportTo(target) {
       h: building.height || 10,
     };
     context.inspector.showBuilding(building);
+  } else if (target.kind === 'point') {
+    point = { x: target.x, z: target.z, h: target.h || 12, size: target.size };
   } else {
     const [x, z, w, h] = target.district.rect;
-    point = { x: x + w / 2, z: z + h / 2, h: target.district.skyline.maxHeight };
+    point = { x: x + w / 2, z: z + h / 2, h: target.district.skyline.maxHeight, size: Math.max(w, h) };
   }
   context.cityHall.hide();
   document.body.classList.remove('hall-open');
+  if (state.mode === 'top') {
+    // Stay on the map: glide the plan over the place instead of dropping out
+    // of it. A district is framed whole; a file or a point keeps the zoom
+    // unless it is too far out to pick the building out.
+    const top = context.top;
+    top.target.x = point.x;
+    top.target.z = point.z;
+    if (point.size) top.height = point.size * 1.5;
+    else if (target.kind === 'building') top.height = Math.min(top.height, span * 0.3);
+    top._clamp();
+    const pose = top.pose();
+    context.flight.startPose(camera.position.clone(), camera.quaternion.clone(), pose.position, pose.quaternion, 0.9);
+    return;
+  }
   setMode('fly');
   context.flight.start(
     camera.position.clone(),
@@ -2481,6 +2942,23 @@ function teleportTo(target) {
     new THREE.Vector3(point.x, point.h * 0.4, point.z),
     1.3
   );
+}
+
+/**
+ * A flight moves the camera directly and then stops, but it never touches the
+ * controller the next frame falls back to. In fly mode that controller still
+ * holds the pose the flight started from, so its very next `apply()` yanks the
+ * view home the moment the flight lands. Hand the arrived pose back to it.
+ */
+function adoptFlightArrival() {
+  if (state.mode !== 'fly') return;
+  const fly = context.fly;
+  fly.position.copy(camera.position);
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  fly.yaw = Math.atan2(-forward.x, -forward.z);
+  fly.pitch = Math.asin(Math.max(-1, Math.min(1, forward.y)));
+  fly.velocity.set(0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2512,7 +2990,15 @@ document.getElementById('lit').addEventListener('input', (event) => {
 
 window.addEventListener('keydown', async (event) => {
   const target = event.target;
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+  // Go to anything: Ctrl/Cmd+K from anywhere, or / when not typing.
+  const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
+  if (context.palette && ((event.ctrlKey || event.metaKey) && event.code === 'KeyK' || (!typing && event.key === '/'))) {
+    event.preventDefault();
+    if (context.palette.isOpen) context.palette.close();
+    else context.palette.open();
+    return;
+  }
+  if (typing) return;
 
   // Any deliberate movement hands control back to the player.
   const MOVEMENT_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space']);
@@ -2533,17 +3019,28 @@ window.addEventListener('keydown', async (event) => {
     case 'KeyO':
       setMode(state.mode === 'orbit' ? 'fly' : 'orbit');
       break;
+    case 'KeyP':
+      togglePlan();
+      break;
+    case 'KeyM':
+      if (context.minimap) context.minimap.toggle();
+      break;
     case 'KeyR':
-      // Re-frame the whole plan without leaving the orbit.
+      // Re-frame the whole plan without leaving the orbit (or the map).
       if (state.mode === 'orbit') {
         context.orbit.frame(state.source.manifest.bounds);
         setOrbitPrompt();
+      } else if (state.mode === 'top') {
+        context.flight.active = false;
+        context.top.frame();
       }
       break;
     case 'KeyN':
       context.tour.skipToNext();
       break;
     case 'KeyT':
+      // The tour flies its own oblique route; it cannot run on a map.
+      if (state.mode === 'top') setMode('fly');
       context.tour.start();
       setPrompt(
         context.tour.running
@@ -2568,7 +3065,8 @@ window.addEventListener('keydown', async (event) => {
       }
       break;
     case 'KeyE':
-      await handleEnter();
+      // In the plan, E is zoom (TopCamera reads it), not "enter".
+      if (state.mode !== 'top') await handleEnter();
       break;
     case 'BracketLeft':
       if (state.mode === 'interior') context.interior.nextFloor(-1);
@@ -2653,6 +3151,7 @@ async function refreshLabelsAfterUnlock() {
   fillAuthorSelect();
   renderGuide();
   setupMapLabels();
+  if (context.minimap) context.minimap.invalidate();
   renderTitle();
   renderChips();
   applyActiveFilter();
@@ -2801,9 +3300,11 @@ function frame(now) {
       if (context.city) context.city.clearDistrictHighlight();
     }
     if (context.flight.active) {
-      context.flight.update(dt);
+      if (context.flight.update(dt)) adoptFlightArrival();
     } else if (state.mode === 'orbit') {
       context.orbit.update(dt);
+    } else if (state.mode === 'top') {
+      context.top.update(dt);
     } else if (state.mode === 'walk') {
       context.walk.update(dt);
       updateWalkPrompt();
@@ -2812,10 +3313,13 @@ function frame(now) {
     }
   }
 
+  easeFov(dt);
+  if (context.planFlows) context.planFlows.sync(state.mode === 'top');
   refreshResident();
   refreshHover();
   renderer.render(scene, camera);
   if (context.labels) context.labels.update(now, window.innerWidth, window.innerHeight);
+  if (context.minimap) context.minimap.update(now);
 }
 
 function driveInterior(dt) {
@@ -3310,6 +3814,10 @@ async function runSelfTest() {
   const rows = document.querySelectorAll('#cityhall-body tr.clickable').length;
   check('city-hall-open', context.cityHall.open);
   check('city-hall-rows', rows > 0, `${rows} clickable rows`);
+  const folderRows = [...document.querySelectorAll('#cityhall-body tr[data-folder-row]')];
+  const unresolved = folderRows.filter((tr) => tr.dataset.folderRow === '').length;
+  check('city-hall-folders-resolve', state.source.locked || (folderRows.length > 0 && unresolved === 0),
+    `${folderRows.length - unresolved} of ${folderRows.length} folder rows fly to their district`);
 
   // 4. Teleport works from a City Hall row.
   const firstDistrict = state.source.manifest.districts[0];
@@ -3754,16 +4262,21 @@ async function runSelfTest() {
       ['potholes', flags.debt, (x) => x.debt > 0],
       ['code-notices', flags.codes, (x) => x.codeViolations && x.codeViolations.length > 0],
       ['plinth-shadows', (manifest.regions || []).length > 0, () => true],
+      ['defect-lamps', flags.defects, (x) => x.isDefect],
+      ['hub-collars', flags.hubs, (x) => x.isHub && (x.height || 0) > 6],
+      ['debt-tags', flags.debt, (x) => x.debtMarkers && x.debtMarkers.length > 0],
+      ['survey-stakes-ghosts', flags.delta, (x) => Boolean(x.baselineHeight)],
     ];
-    // Props stand on the detailed tier only (a far-tier box has no kerb or
-    // facade to hold them), so only a building drawn in detail must carry one.
-    const detailed = [];
+    // Props stand only on the detailed (near) tier, so only a building drawn
+    // there can be expected to carry one -- whichever files happen to sit near
+    // the camera is a property of the repository, not of the viewer.
+    const nearTier = [];
     for (const [uuid, members] of context.city.records) {
-      const m = context.city.meshes.get(uuid);
-      if (m && m.name.startsWith('buildings-') && !m.name.endsWith('-far')) detailed.push(...members);
+      const mesh = context.city.meshes.get(uuid);
+      if (mesh && !mesh.name.endsWith('-far')) nearTier.push(...members);
     }
     const missing = expectations
-      .filter(([, on, test]) => on && detailed.some(test))
+      .filter(([, on, test]) => on && nearTier.some(test))
       .filter(([name]) => !context.city.group.getObjectByName(name))
       .map(([name]) => name);
     check('new-props-drawn', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : 'all present');
@@ -3912,6 +4425,233 @@ async function runSelfTest() {
     context.fly.apply();
   }
 
+  // 5a. The deeper signals: filter words agree with the analyzer's totals, and
+  //     a selected building draws its hidden-coupling and clone partners.
+  {
+    const manifest = state.source.manifest;
+    const review = manifest.review || {};
+    const totals = review.totals || {};
+    const counts = {
+      defect: countFor('is:defect'), rising: countFor('is:rising'), hub: countFor('is:hub'),
+      hiddencoupling: countFor('is:hiddencoupling'), clone: countFor('is:clone'), debt: countFor('is:debt'),
+    };
+    const debtFiles = (manifest.districts || []).reduce((sum, d) => sum + (d.debt ? 1 : 0), 0);
+    check('filter-deeper-words',
+      (counts.defect || 0) === (totals.defects || 0) && (counts.rising || 0) === (totals.rising || 0) &&
+        (counts.hub || 0) === (totals.hubs || 0) && (totals.debt ? (counts.debt || 0) > 0 && debtFiles > 0 : !counts.debt),
+      JSON.stringify(counts));
+
+    const overlay = context.overlay;
+    const withHidden = context.resident.find((b) => b.hiddenCoupling && b.hiddenCoupling.length);
+    if (overlay && withHidden) {
+      context.inspector.showBuilding(withHidden);
+      await updateSelection({ kind: 'building', building: withHidden });
+      const arcs = overlay.group.children.filter((c) => c.name === 'hidden-arcs');
+      check('overlay-hidden-coupling', arcs.length === 1, `${arcs.length} dashed arc meshes for ${withHidden.hiddenCoupling.length} partners`);
+      const text = context.inspector.metrics.textContent;
+      check('inspector-hidden-coupling', /Hidden coupling/.test(text), 'the Structure section names the partners');
+      context.inspector.hide();
+      await updateSelection(null);
+    } else {
+      check('overlay-hidden-coupling', true, 'no hidden coupling in this city');
+      check('inspector-hidden-coupling', true, 'no hidden coupling in this city');
+    }
+    const withClone = context.resident.find((b) => b.cloneOf && b.cloneOf.length);
+    if (overlay && withClone) {
+      await updateSelection({ kind: 'building', building: withClone });
+      const links = overlay.group.children.filter((c) => c.name === 'clone-links');
+      check('overlay-clones', links.length === 1, `${links.length} twin link meshes`);
+      await updateSelection(null);
+    } else {
+      check('overlay-clones', true, 'no clone twins in this city');
+    }
+
+    // The go-to palette finds a file by a fuzzy fragment and flies to it.
+    if (context.palette && !state.source.locked && context.facetIndex && context.facetIndex.length) {
+      const col = columnIndex(manifest.indexColumns);
+      const row = context.facetIndex.find((r) => (state.source.s(r[col.path]) || '').includes('/')) || context.facetIndex[0];
+      const path = state.source.s(row[col.path]);
+      const name = path.split('/').pop();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true }));
+      const opened = context.palette.isOpen;
+      const input = document.querySelector('#palette input');
+      input.value = name.slice(0, Math.max(3, name.length - 2));
+      input.dispatchEvent(new Event('input'));
+      const found = context.palette.results.some((item) => item.kind === 'building' && item.id === row[col.id]);
+      const pickIndex = context.palette.results.findIndex((item) => item.id === row[col.id] && item.kind === 'building');
+      context.palette.index = Math.max(0, pickIndex);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const flying = context.flight.active || !context.palette.isOpen;
+      check('palette-go-to', opened && found && flying && !context.palette.isOpen,
+        `"${input.value}" → ${found ? path : 'not found'}${flying ? ', flying' : ''}`);
+      context.flight.active = false;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      context.inspector.hide();
+    } else {
+      check('palette-go-to', true, 'locked or no index');
+    }
+
+    // The CSV export has a row per file and a signal column that agrees with the index.
+    if (!state.source.locked && context.facetIndex) {
+      const text = csvText();
+      const rows = text.trim().split('\n');
+      const hubs = rows.filter((line) => /(^|[ ,])hub( |$)/.test(line.split(',').pop())).length;
+      check('csv-export', rows.length === context.facetIndex.length + 1 && hubs === ((manifest.review || {}).totals || {}).hubs,
+        `${rows.length - 1} rows for ${context.facetIndex.length} files, ${hubs} hubs`);
+    } else {
+      check('csv-export', true, 'locked');
+    }
+
+    // Every new lens paints something, and its key counts every resident building.
+    const lensSelect = document.getElementById('lens-select');
+    const before = lensSelect.value;
+    const failed = [];
+    for (const lens of ['trend', 'defects', 'debt', 'depth', 'coupling', 'mainsequence', 'language', 'archetype', 'author']) {
+      applyLens(lens);
+      const keyTotal = [...document.querySelectorAll('#lens-key > span')]
+        .map((span) => Number((span.textContent.split('·').pop() || '').replace(/[^\d]/g, '')) || 0)
+        .reduce((a, v) => a + v, 0);
+      if (keyTotal !== context.resident.length) failed.push(`${lens}: key ${keyTotal} of ${context.resident.length}`);
+    }
+    applyLens(before);
+    check('deeper-lenses-keyed', failed.length === 0, failed.join('; ') || 'nine lenses, every building counted');
+
+    // The City Guide's "Colour buildings by" drives the same lens as the Filter tab.
+    const guideLens = document.getElementById('guide-lens');
+    const sample = [...context.city.meshes.values()].find((m) => m.userData.baseColors && m.count > 1);
+    if (guideLens && sample) {
+      const colourBefore = Array.from(sample.userData.baseColors);
+      guideLens.value = 'language';
+      guideLens.dispatchEvent(new Event('change'));
+      const colourAfter = Array.from(sample.userData.baseColors);
+      const synced = document.getElementById('lens-select').value === 'language';
+      const keyed = document.querySelectorAll('#guide-lens-key span.chip').length > 0;
+      const languages = new Set(context.resident.map((b) => b.language)).size;
+      const recoloured = languages < 2 || colourBefore.some((v, i) => Math.abs(v - colourAfter[i]) > 1e-3);
+      check('guide-colour-by', synced && keyed && recoloured,
+        `filter select ${synced ? 'in step' : 'out of step'}, key ${keyed ? 'shown' : 'missing'}, ${recoloured ? 'recoloured' : 'unchanged'}`);
+      applyLens(before);
+    } else {
+      check('guide-colour-by', Boolean(guideLens), 'no mesh to sample');
+    }
+  }
+
+  // 5b. Plan view and minimap.
+  {
+    const startPosition = context.fly.position.clone();
+    const startYaw = context.fly.yaw;
+    const startPitch = context.fly.pitch;
+    setMode('top');
+    context.flight.update(10);
+    context.top.update(0);
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    check('plan-view-overhead', state.mode === 'top' && forward.y < -0.99,
+      `mode ${state.mode}, forward.y ${forward.y.toFixed(4)}`);
+    // Out, then back in: whichever end of the range the plan opened at, one of
+    // the two moves is free, and both must be answered.
+    const heightBefore = context.top.height;
+    canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, clientX: 400, clientY: 300, bubbles: true, cancelable: true }));
+    const heightOut = context.top.height;
+    canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 400, clientY: 300, bubbles: true, cancelable: true }));
+    const heightIn = context.top.height;
+    check('plan-view-zoom', heightOut > heightBefore - 1e-6 && heightIn < heightOut && (heightOut > heightBefore || heightIn < heightBefore),
+      `${heightBefore.toFixed(0)}m -> out ${heightOut.toFixed(0)}m -> in ${heightIn.toFixed(0)}m`);
+    const planView = viewFromHash(viewToHash(currentView()));
+    check('plan-view-link', Boolean(planView) && planView.mode === 'top', planView ? planView.mode : 'unreadable');
+    const planPosition = camera.position.clone();
+    setMode('fly');
+    check('plan-view-handoff',
+      state.mode === 'fly' && context.fly.position.distanceTo(planPosition) < 1e-3 && context.fly.pitch < -1.5,
+      `moved ${context.fly.position.distanceTo(planPosition).toFixed(4)}m, pitch ${context.fly.pitch.toFixed(3)}`);
+
+    const minimap = context.minimap;
+    if (minimap) {
+      const wasCollapsed = minimap.collapsed;
+      minimap.toggle(false);
+      const draw = () => {
+        minimap.lastDraw = -Infinity;
+        minimap.update(performance.now());
+        const { width, height } = minimap.canvas;
+        const data = minimap.ctx.getImageData(0, 0, width, height).data;
+        let lit = 0;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const v = data[i] + data[i + 1] + data[i + 2];
+          sum += v * ((i >> 2) % 97 + 1);
+          if (v > 60) lit++;
+        }
+        return { lit, sum, total: width * height };
+      };
+      const archetypeDraw = draw();
+      check('minimap-drawn', archetypeDraw.lit > archetypeDraw.total * 0.05,
+        `${archetypeDraw.lit} of ${archetypeDraw.total} pixels lit`);
+
+      const lensBefore = document.getElementById('lens-select').value;
+      applyLens('heat');
+      const heatDraw = draw();
+      applyLens(lensBefore);
+      check('minimap-lens-follows', heatDraw.sum !== archetypeDraw.sum || context.resident.length === 0,
+        'district tint follows the colour lens');
+
+      // Click the centre of the largest district: the camera must fly there.
+      const district = [...state.source.manifest.districts].sort((a, b) => b.rect[2] * b.rect[3] - a.rect[2] * a.rect[3])[0];
+      const click = (world) => {
+        const t = minimap._transform();
+        const rect = minimap.canvas.getBoundingClientRect();
+        const ratio = t.width / Math.max(1, rect.width);
+        const clientX = rect.left + (world.x * t.scale + t.ox) / ratio;
+        const clientY = rect.top + (world.z * t.scale + t.oz) / ratio;
+        const init = { clientX, clientY, button: 0, pointerId: 7, bubbles: true };
+        minimap.canvas.dispatchEvent(new PointerEvent('pointerdown', init));
+        minimap.canvas.dispatchEvent(new PointerEvent('pointerup', init));
+      };
+      if (district) {
+        const centre = districtCentre(district);
+        click(centre);
+        context.flight.update(10);
+        // Where does the view ray meet the ground the flight aimed at?
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const aimY = district.skyline.maxHeight * 0.4;
+        const t = (aimY - camera.position.y) / (fwd.y || -1e-6);
+        const hitX = camera.position.x + fwd.x * t;
+        const hitZ = camera.position.z + fwd.z * t;
+        const miss = Math.hypot(hitX - centre.x, hitZ - centre.z);
+        const tolerance = Math.max(3, minimap._window()[2] / 150);
+        check('minimap-click-flies', state.mode === 'fly' && miss < tolerance,
+          `aimed ${miss.toFixed(1)}m from the clicked point (tolerance ${tolerance.toFixed(1)}m)`);
+
+        setMode('top');
+        context.flight.update(10);
+        click(centre);
+        context.flight.update(10);
+        context.top.update(0);
+        const planMiss = Math.hypot(context.top.target.x - centre.x, context.top.target.z - centre.z);
+        check('minimap-click-plan', state.mode === 'top' && planMiss < tolerance,
+          `plan centred ${planMiss.toFixed(1)}m from the clicked point`);
+        setMode('fly');
+      } else {
+        check('minimap-click-flies', true, 'no districts');
+        check('minimap-click-plan', true, 'no districts');
+      }
+
+      minimap.toggle(true);
+      const hidden = getComputedStyle(minimap.canvas).display === 'none';
+      const pillShown = getComputedStyle(minimap.root.querySelector('.minimap-pill')).display !== 'none';
+      minimap.toggle(false);
+      const back = getComputedStyle(minimap.canvas).display !== 'none';
+      check('minimap-collapse', hidden && pillShown && back, `collapsed ${hidden}, pill ${pillShown}, restored ${back}`);
+      minimap.toggle(wasCollapsed);
+    } else {
+      check('minimap-drawn', false, 'no minimap');
+    }
+
+    context.flight.active = false;
+    context.fly.position.copy(startPosition);
+    context.fly.yaw = startYaw;
+    context.fly.pitch = startPitch;
+    context.fly.apply();
+  }
+
   // 6. Renderer still healthy after all of that.
   const payload = runBench(12);
   check('draw-calls', payload.drawCalls <= 60, `${payload.drawCalls} draw calls`);
@@ -4029,6 +4769,7 @@ function setupNotes() {
   context.notes.onChange(() => {
     renderHealth();
     scheduleRebuild();
+    if (context.minimap) context.minimap.invalidate();
   });
 }
 
@@ -4036,6 +4777,11 @@ async function boot() {
   const progress = (text) => {
     loadingText.textContent = text;
   };
+  // Before the first rebuild, which reads the lens off this select: a fresh
+  // page colours buildings by what they are made of, or by the reader's last
+  // choice; the self-test keeps the archetype colours its checks expect.
+  const lensSelect = document.getElementById('lens-select');
+  if (lensSelect) lensSelect.value = initialLens();
   try {
     progress('reading manifest');
     await state.source.load(progress);
@@ -4119,6 +4865,7 @@ async function boot() {
 
   context.fly = new FlyCamera(THREE, camera, bounds);
   context.orbit = new OrbitCamera(THREE, camera, bounds);
+  context.top = new TopCamera(THREE, camera, bounds, maxHeightOf(manifest));
   context.flight = new CameraFlight(camera);
   context.walk = new WalkCamera(THREE, camera, context.grid, bounds);
   context.interior = new Interior(THREE, state.source, renderer);
@@ -4146,6 +4893,7 @@ async function boot() {
   };
   context.inspector.onSelect = (selection) => {
     updateSelection(selection).catch(() => {});
+    if (context.minimap) context.minimap.invalidate();
   };
   setupDetailOverlay();
   context.cityHall = new CityHall(state.source, {
@@ -4179,6 +4927,11 @@ async function boot() {
 
   renderGuide();
   setupMapLabels();
+  setupMiniMap();
+  setupPlanFlows();
+  setupPalette();
+  setupGuideColour();
+  applyLens(document.getElementById('lens-select').value);
   renderTitle();
   applyTime();
   setupHistory();

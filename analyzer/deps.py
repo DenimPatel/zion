@@ -53,7 +53,24 @@ NODE_BUILTINS = {
     "string_decoder", "sys", "timers", "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi",
     "worker_threads", "zlib",
 }
-PY_STDLIB = set(getattr(sys, "stdlib_module_names", ())) | {"__future__"}
+# `sys.stdlib_module_names` is Python 3.10+; the fallback keeps a 3.9 build
+# from mistaking the standard library for third-party trade.
+_FALLBACK_STDLIB = {
+    "abc", "argparse", "array", "ast", "asyncio", "base64", "binascii", "bisect", "builtins", "bz2",
+    "calendar", "cmath", "codecs", "collections", "concurrent", "configparser", "contextlib", "copy", "csv",
+    "ctypes", "dataclasses", "datetime", "decimal", "difflib", "dis", "email", "enum", "errno", "fnmatch",
+    "fractions", "ftplib", "functools", "gc", "getpass", "gettext", "glob", "gzip", "hashlib", "heapq",
+    "hmac", "html", "http", "importlib", "inspect", "io", "ipaddress", "itertools", "json", "keyword",
+    "linecache", "locale", "logging", "lzma", "math", "mimetypes", "multiprocessing", "numbers", "operator",
+    "os", "pathlib", "pickle", "pkgutil", "platform", "plistlib", "pprint", "queue", "random", "re",
+    "readline", "secrets", "select", "selectors", "shelve", "shlex", "shutil", "signal", "site", "smtplib",
+    "socket", "socketserver", "sqlite3", "ssl", "stat", "statistics", "string", "struct", "subprocess", "sys",
+    "sysconfig", "tarfile", "tempfile", "textwrap", "threading", "time", "timeit", "token", "tokenize",
+    "traceback", "tracemalloc", "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "venv",
+    "warnings", "wave", "weakref", "webbrowser", "xml", "xmlrpc", "zipfile", "zipimport", "zlib", "zoneinfo",
+}
+_stdlib = getattr(sys, "stdlib_module_names", None)
+PY_STDLIB = (set(_stdlib) if _stdlib is not None else _FALLBACK_STDLIB) | {"__future__"}
 # Namespace packages whose distribution name is the first three segments.
 PY_NAMESPACES = {"google", "azure"}
 # Declared to be run, not imported: never "unused".

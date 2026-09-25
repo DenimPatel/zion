@@ -39,11 +39,28 @@ const FLAG_BITS = {
   debt: 1 << 24,
   codes: 1 << 25,
   codeviolation: 1 << 25,
+  defect: 1 << 26,
+  rising: 1 << 27, // a hotspot that is getting busier
+  hub: 1 << 28,
+  clone: 1 << 29,
+  hiddencoupling: 1 << 30,
+};
+
+// `is:` words that read a numeric column rather than a flag bit.
+const DERIVED = {
+  debt: { column: 'debt', test: (v) => v > 0 },
+  todo: { column: 'debt', test: (v) => v > 0 },
+  warming: { column: 'trend', test: (v) => v > 0 },
+  cooling: { column: 'trend', test: (v) => v < 0 },
+  deep: { column: 'depth', test: (v) => v >= 5 },
 };
 
 // Numeric comparisons: `loc>500`, `cx>=15`, `fanin>10`. The key is the query
 // word, the value the index.json column it reads.
-const NUMERIC = { loc: 'loc', age: 'age', heat: 'heat', cx: 'cx', complexity: 'cx', fanin: 'fanin', fanout: 'fanout', delta: 'delta', impact: 'impact', fixes: 'fixes', debt: 'debt' };
+const NUMERIC = {
+  loc: 'loc', age: 'age', heat: 'heat', cx: 'cx', complexity: 'cx', fanin: 'fanin', fanout: 'fanout', delta: 'delta',
+  impact: 'impact', fixes: 'fixes', trend: 'trend', debt: 'debt', todo: 'debt', depth: 'depth',
+};
 
 /** Column-index lookup built once from the manifest's declared column order. */
 export function columnIndex(indexColumns) {
@@ -102,7 +119,11 @@ function compileTerm(term, context) {
   } else if (colonAt > 0) {
     const key = body.slice(0, colonAt).toLowerCase();
     const value = body.slice(colonAt + 1).toLowerCase();
-    if (key === 'is') {
+    if (key === 'is' && DERIVED[value]) {
+      const { column, test } = DERIVED[value];
+      const idx = context.col[column];
+      predicate = (row) => idx !== undefined && test(Number(row[idx]) || 0);
+    } else if (key === 'is') {
       const bit = FLAG_BITS[value];
       const flagsIdx = context.col.flags;
       predicate = (row) => bit !== undefined && flagsIdx !== undefined && (row[flagsIdx] & bit) !== 0;

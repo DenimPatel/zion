@@ -22,6 +22,7 @@
       <h1 id="city-name">Zion</h1>
       <p id="city-subtitle">loading&hellip;</p>
     </div>
+    <button id="plan-toggle" type="button" aria-pressed="false" title="Plan view: the city from straight above, north up (P)">Plan view</button>
     <button id="view-link" type="button" title="Copy a link to exactly this view: camera, filter, lens, selection and date">Copy view link</button>
     <button id="panels-toggle" type="button" aria-pressed="false"
             aria-controls="guide" title="Toggle the city guide (L)">
@@ -44,6 +45,14 @@
     <div id="guide-read" role="tabpanel" aria-labelledby="guide-tab-read">
       <p class="hint guide-intro">Every shape, colour and prop is a measurement. Click a row to learn
         what it means; flip its switch to show or hide that layer.</p>
+      <!-- Colour the city by any attribute: the same lens as the Filter tab's,
+           kept in step with it, with its key counted on the buildings in view. -->
+      <div id="guide-colour">
+        <label for="guide-lens">Colour buildings by</label>
+        <select id="guide-lens" title="Colour every building by one of its attributes"></select>
+        <select id="guide-lens-author" title="whose territory" hidden></select>
+        <div id="guide-lens-key" class="hint"></div>
+      </div>
       <div id="guide-list"></div>
       <button id="guide-reset" type="button" hidden>Show every layer</button>
       <div id="guide-notes"></div>
@@ -62,25 +71,43 @@
           <p><code>is:hotspot</code> <code>is:cycle</code> <code>is:violation</code> <code>is:untested</code>
             <code>is:untestedrisk</code> <code>is:braced</code> <code>is:drift</code> <code>is:unowned</code>
             <code>is:added</code> <code>is:grown</code> <code>is:new</code> <code>is:orphan</code> <code>is:knowledge</code></p>
+          <p><code>is:defect</code> <code>is:rising</code> <code>is:warming</code> <code>is:cooling</code> <code>is:hub</code>
+            <code>is:clone</code> <code>is:hiddencoupling</code> <code>is:debt</code> <code>is:deep</code>
+            <code>fixes&gt;3</code> <code>todo&gt;2</code> <code>depth&gt;=5</code></p>
           <p>Words are ANDed; <code>-</code> negates; <code>OR</code> joins alternatives.</p>
         </details>
         <p id="filter-summary" class="hint">every building shown</p>
         <div id="filter-chips"></div>
         <select id="lens-select" title="colour by">
-          <option value="archetype">colour: archetype</option>
-          <option value="health">colour: health (architect)</option>
-          <option value="language">colour: language</option>
-          <option value="author">colour: author</option>
-          <option value="era">colour: age (era)</option>
-          <option value="heat">colour: recent activity (heat)</option>
-          <option value="downtown">colour: centrality (downtown)</option>
-          <option value="instability">colour: instability (imports out vs in)</option>
-          <option value="tests">colour: test coverage links</option>
-          <option value="complexity">colour: branchiest function</option>
-          <option value="impact">colour: blast radius (files a change reaches)</option>
-          <option value="defects">colour: fix commits (bug-prone)</option>
-          <option value="delta">colour: changed since baseline</option>
-          <option value="territory">colour: one author’s territory</option>
+          <optgroup label="What it is">
+            <option value="language">colour: language</option>
+            <option value="archetype">colour: kind of building (archetype)</option>
+          </optgroup>
+          <optgroup label="Health">
+            <option value="health">colour: health (architect)</option>
+            <option value="defects">colour: fix commits (defect-prone)</option>
+            <option value="complexity">colour: branchiest function</option>
+            <option value="debt">colour: TODO / FIXME debt</option>
+            <option value="impact">colour: blast radius (files a change reaches)</option>
+            <option value="tests">colour: test coverage links</option>
+          </optgroup>
+          <optgroup label="Change over time">
+            <option value="heat">colour: recent activity (heat)</option>
+            <option value="trend">colour: trend (rising vs cooling)</option>
+            <option value="era">colour: age (era)</option>
+            <option value="delta">colour: changed since baseline</option>
+          </optgroup>
+          <optgroup label="Structure">
+            <option value="instability">colour: instability (imports out vs in)</option>
+            <option value="depth">colour: import depth and hubs</option>
+            <option value="coupling">colour: copied code and hidden coupling</option>
+            <option value="downtown">colour: centrality (downtown)</option>
+            <option value="mainsequence">colour: folder on the main sequence</option>
+          </optgroup>
+          <optgroup label="People">
+            <option value="author">colour: main author</option>
+            <option value="territory">colour: one author’s territory</option>
+          </optgroup>
         </select>
         <select id="lens-author" title="whose territory" hidden></select>
         <div id="lens-key" class="hint"></div>
@@ -124,6 +151,33 @@
     <span id="tour-label"></span>
     <p id="tour-caption"></p>
     <div id="tour-progress"><div id="tour-progress-bar"></div></div>
+  </div>
+
+  <!-- The minimap: the whole plan in a corner. Click to fly, drag to scrub,
+       wheel to zoom the map; M or the button folds it to a pill. -->
+  <section id="minimap" aria-label="Minimap">
+    <div class="minimap-head">
+      <h2>Map</h2>
+      <span class="minimap-actions">
+        <button type="button" class="minimap-zoom-out" title="Zoom the map out">&minus;</button>
+        <button type="button" class="minimap-zoom-in" title="Zoom the map in">+</button>
+        <button type="button" class="minimap-toggle" aria-expanded="true" title="Minimize the map (M)">&#8600;</button>
+      </span>
+    </div>
+    <canvas id="minimap-canvas" width="208" height="208"
+            title="Click to fly there · drag to scrub · Shift-click to frame a folder"></canvas>
+    <div class="minimap-tip" hidden></div>
+    <button type="button" class="minimap-pill" title="Show the map (M)" aria-label="Show the map">&#9638; Map</button>
+  </section>
+
+  <!-- Go to anything (Ctrl+K or /): every file and folder, fuzzy-matched. -->
+  <div id="palette" hidden role="dialog" aria-label="Go to a file or folder">
+    <div class="palette-box">
+      <input type="text" placeholder="Go to a file or folder…" spellcheck="false" autocomplete="off"
+             aria-controls="palette-results">
+      <ol id="palette-results" role="listbox"></ol>
+      <p class="palette-note hint"></p>
+    </div>
   </div>
 
   <div id="map-labels" aria-hidden="true"></div>
@@ -175,6 +229,9 @@
       <span><kbd>N</kbd> next stop</span>
       <span><kbd>C</kbd> city hall</span>
       <span><kbd>O</kbd> orbit city</span>
+      <span><kbd>P</kbd> plan view</span>
+      <span><kbd>M</kbd> map</span>
+      <span><kbd>Ctrl</kbd><kbd>K</kbd> go to</span>
       <span><kbd>U</kbd> unlock</span>
       <span><kbd>Esc</kbd> release</span>
     </div>

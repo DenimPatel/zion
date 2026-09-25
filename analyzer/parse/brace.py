@@ -214,6 +214,25 @@ def _complexity_of_lines(masked_lines: list[str], start: int, end: int) -> int:
     )
 
 
+# Type declarations anywhere in the masked source, and the abstract ones among
+# them. Keyword counts on stripped code: medium confidence, like the rest here.
+_RE_TYPE_DECL = re.compile(r"\b(?:class|interface|trait|protocol|struct)\s+[A-Za-z_$][\w$]*")
+_RE_ABSTRACT_DECL = re.compile(
+    r"\b(?:interface|trait|protocol)\s+[A-Za-z_$][\w$]*|\babstract\s+(?:\w+\s+)*class\b"
+)
+# C++ pure virtual: `virtual void f() = 0;`
+_RE_PURE_VIRTUAL = re.compile(r"\bvirtual\b[^;{]*\)\s*(?:const\s*)?=\s*0\s*;")
+
+
+def _abstractness(masked_lines: list[str], language: str) -> tuple[int, int]:
+    text = "\n".join(masked_lines)
+    classes = len(_RE_TYPE_DECL.findall(text))
+    abstract = len(_RE_ABSTRACT_DECL.findall(text))
+    if language == "cpp" and _RE_PURE_VIRTUAL.search(text):
+        abstract += 1
+    return classes, min(abstract, classes)
+
+
 def parse_brace(source: str, language: str) -> ParseResult:
     masked_lines, depth_at_line, comment_only, debt = _strip(source, language)
 
@@ -289,10 +308,7 @@ def parse_brace(source: str, language: str) -> ParseResult:
             floor.is_entrypoint = floor.name in ("main", "run")
             floors.append(floor)
 
-    classes = [f for f in floors if f.kind == "class"]
-    abstract = sum(
-        1 for f in classes if 0 < f.line <= len(masked_lines) and _RE_ABSTRACT_DECL.search(masked_lines[f.line - 1])
-    )
+    class_count, abstract = _abstractness(masked_lines, language)
     is_js = language in ("javascript", "typescript")
     return ParseResult(
         language=language,
@@ -304,6 +320,6 @@ def parse_brace(source: str, language: str) -> ParseResult:
         imports=_relative_imports(source) if is_js else [],
         packages=_bare_packages(source) if is_js else [],
         debt_markers=debt,
-        class_count=len(classes),
+        class_count=class_count,
         abstract_count=abstract,
     )

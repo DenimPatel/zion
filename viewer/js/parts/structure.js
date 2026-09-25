@@ -36,6 +36,13 @@
  *   codeNoticeGeometry     an orange notice on one post: a limit declared
  *                          under "codes" in .zion/rules.json is broken
  *                          (analyzer/architecture.py). Metres, at the origin.
+ *   defectLampGeometry     a red warning lamp on a short mast: a defect-prone
+ *                          file (analyzer/health.py). Uniform scale, y 0..1.
+ *   hubCollarGeometry      a steel band around the shaft: a hub, imported by
+ *                          many and importing many. X/Z in [-0.5, 0.5] with a
+ *                          small overhang, Y in [0, 1]; scaled per building.
+ *   debtTagGeometry        one yellow tag hung on the facade: one TODO/FIXME
+ *                          marker. Metres, facing +Z, at the origin.
  */
 
 import {
@@ -220,5 +227,40 @@ export function codeNoticeGeometry(THREE) {
     paint(THREE, box(THREE, { w: 0.62, d: 0.06, y0: 1.95, y1: 2.05, part: PART_FIXED }), WHITE),
     paint(THREE, box(THREE, { w: 0.62, d: 0.06, y0: 1.7, y1: 1.78, part: PART_FIXED }), WHITE),
     paint(THREE, box(THREE, { w: 0.14, d: 0.06, y0: 1.53, y1: 1.63, part: PART_FIXED }), [0.1, 0.1, 0.1]),
+  ]);
+}
+
+/** A red warning lamp on a mast, ~1 unit tall: a defect-prone file. */
+export function defectLampGeometry(THREE) {
+  const LAMP = [1.0, 0.16, 0.2];
+  return mergeColouredParts(THREE, [
+    paint(THREE, cylinder(THREE, { rTop: 0.025, rBottom: 0.035, y0: 0, y1: 0.62, segments: 6, part: PART_FIXED }), POST),
+    paint(THREE, cylinder(THREE, { rTop: 0.12, rBottom: 0.12, y0: 0.6, y1: 0.66, segments: 10, part: PART_FIXED }), POST),
+    paint(THREE, tag(new THREE.SphereGeometry(0.15, 12, 8).translate(0, 0.8, 0), PART_FIXED, 0.65, 0.95), LAMP),
+    paint(THREE, cylinder(THREE, { rTop: 0.02, rBottom: 0.05, y0: 0.94, y1: 1.0, segments: 6, part: PART_FIXED }), POST),
+  ]);
+}
+
+/** A steel collar around the shaft, a hair proud of each face. */
+export function hubCollarGeometry(THREE) {
+  const o = 0.53; // overhang past the facade so the band is never z-fighting it
+  const t = 0.04;
+  return mergeParts(THREE, [
+    box(THREE, { w: o * 2, d: t, x: 0, z: o - t / 2, y0: 0, y1: 1, part: PART_FIXED }),
+    box(THREE, { w: o * 2, d: t, x: 0, z: -o + t / 2, y0: 0, y1: 1, part: PART_FIXED }),
+    box(THREE, { w: t, d: o * 2, x: o - t / 2, z: 0, y0: 0, y1: 1, part: PART_FIXED }),
+    box(THREE, { w: t, d: o * 2, x: -o + t / 2, z: 0, y0: 0, y1: 1, part: PART_FIXED }),
+  ]);
+}
+
+/** One yellow tag on a string, hung flat against a facade facing +Z. */
+export function debtTagGeometry(THREE) {
+  const YELLOW = [1.0, 0.83, 0.2];
+  const INK = [0.18, 0.16, 0.1];
+  return mergeColouredParts(THREE, [
+    paint(THREE, box(THREE, { w: 0.02, d: 0.02, y0: 0.62, y1: 0.9, part: PART_FIXED }), INK),
+    paint(THREE, box(THREE, { w: 0.62, d: 0.03, y0: 0, y1: 0.64, part: PART_FIXED }), YELLOW),
+    paint(THREE, box(THREE, { w: 0.42, d: 0.035, y0: 0.38, y1: 0.44, part: PART_FIXED }), INK),
+    paint(THREE, box(THREE, { w: 0.32, d: 0.035, y0: 0.22, y1: 0.27, part: PART_FIXED }), INK),
   ]);
 }

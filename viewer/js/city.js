@@ -41,6 +41,9 @@ import {
   ownerNoticeGeometry,
   surveyStakeGeometry,
   trafficConeGeometry,
+  defectLampGeometry,
+  hubCollarGeometry,
+  debtTagGeometry,
 } from './parts/structure.js';
 import {
   makeMassingDepthMaterial,
@@ -143,6 +146,8 @@ export const HEALTH_COLOURS = {
   violation: 0xe0245e,
   bugprone: 0xa0522d,
   codes: 0x2ec4b6,
+  defect: 0xff2d55,
+  hub: 0x3aa0ff,
   healthy: 0x56657a,
   // Not a health-lens band (every file with a TODO would drown the lens);
   // kept here so the pothole's colour has one home.
@@ -182,11 +187,35 @@ export const LENS_BANDS = {
     { label: '1–9 files', colour: 0xc4b5fd, test: (b) => (b.impact || 0) >= 1 },
     { label: 'nothing imports it', colour: 0x33363d, test: () => true },
   ],
+  trend: [
+    { label: 'rising hotspot', colour: 0xff2d55, test: (b) => b.risingHotspot },
+    { label: 'rising: busier this quarter', colour: 0xff8a3d, test: (b) => b.trend > 0 },
+    { label: 'cooling: quieter this quarter', colour: 0x4d8dff, test: (b) => b.trend < 0 },
+    { label: 'steady', colour: 0x4b5563, test: () => true },
+  ],
   defects: [
+    { label: 'defect-prone (top decile of fixes)', colour: 0xff2d55, test: (b) => b.isDefect },
     { label: 'bug-prone', colour: 0xa0522d, test: (b) => b.bugprone },
-    { label: 'half or more of its commits are fixes', colour: 0xd9822b, test: (b) => (b.fixCommits || 0) >= 1 && (b.fixRatio || 0) >= 0.5 },
-    { label: 'some fix commits', colour: 0xd9c9a3, test: (b) => (b.fixCommits || 0) >= 1 },
-    { label: 'never fixed', colour: 0x3a3e46, test: () => true },
+    { label: 'half or more of its commits are fixes', colour: 0xff8a3d, test: (b) => (b.fixCommits || 0) >= 2 && (b.fixRatio || 0) >= 0.5 },
+    { label: 'some fix commits', colour: 0xd9c24a, test: (b) => (b.fixCommits || 0) > 0 },
+    { label: 'no fix commits', colour: 0x3e4a44, test: () => true },
+  ],
+  debt: [
+    { label: '5+ TODO / FIXME markers', colour: 0xffb000, test: (b) => (b.debtMarkers || []).length >= 5 },
+    { label: '2–4', colour: 0xe0c050, test: (b) => (b.debtMarkers || []).length >= 2 },
+    { label: '1', colour: 0xa89a5a, test: (b) => (b.debtMarkers || []).length === 1 },
+    { label: 'none', colour: 0x3a3e46, test: () => true },
+  ],
+  depth: [
+    { label: 'hub: many in, many out', colour: HEALTH_COLOURS.hub, test: (b) => b.isHub },
+    { label: 'import chain 6+ deep', colour: 0xb36bff, test: (b) => (b.importDepth || 0) >= 6 },
+    { label: '3–5 deep', colour: 0x7b83d9, test: (b) => (b.importDepth || 0) >= 3 },
+    { label: '0–2 deep', colour: 0x3e4658, test: () => true },
+  ],
+  coupling: [
+    { label: 'copied code (clone twin)', colour: 0x2fd4e0, test: (b) => (b.cloneOf || []).length > 0 },
+    { label: 'hidden coupling (co-change, no import)', colour: 0xb07cff, test: (b) => (b.hiddenCoupling || []).length > 0 },
+    { label: 'neither', colour: 0x3a3e46, test: () => true },
   ],
   complexity: [
     { label: '30+ decision points in one function', colour: 0xe0245e, test: (b) => (b.braceComplexity || 0) >= 30 },
@@ -195,6 +224,22 @@ export const LENS_BANDS = {
     { label: 'under 8', colour: 0x4a6a5a, test: () => true },
   ],
 };
+
+/**
+ * The main-sequence lens is a property of the folder, not the file: every
+ * building takes its district's distance from the main sequence (Martin's D).
+ */
+export const MAIN_SEQUENCE_BANDS = [
+  { label: 'zone of pain: stable and concrete', colour: 0xe0245e, test: (d) => d && d.zone === 'pain' },
+  { label: 'zone of uselessness: abstract, unused', colour: 0xb36bff, test: (d) => d && d.zone === 'uselessness' },
+  { label: 'far from the main sequence (D > 0.5)', colour: 0xff9a2e, test: (d) => d && d.distance > 0.5 },
+  { label: 'near the main sequence', colour: 0x2f9e6e, test: (d) => d && d.distance >= 0 },
+  { label: 'too few types to say', colour: 0x3a3e46, test: () => true },
+];
+
+export function mainSequenceBand(district) {
+  return MAIN_SEQUENCE_BANDS.find((band) => band.test(district)) || MAIN_SEQUENCE_BANDS[MAIN_SEQUENCE_BANDS.length - 1];
+}
 
 /** The first band a building falls in, for a banded lens. */
 export function lensBand(lens, building) {
@@ -210,12 +255,15 @@ const PROP_PREFIXES = [
   'roof-props', 'cranes', 'heat-beacons', 'scaffolding', 'antennas', 'sole-tenant-markers', 'knowledge-flags',
   'hazard-barriers', 'raking-shores', 'vacant-boards', 'cycle-pennants', 'no-entry-signs', 'traffic-cones',
   'cross-bracing', 'survey-stakes', 'owner-notices', 'note-pins', 'smoke-plumes', 'potholes', 'code-notices',
+  'defect-lamps', 'hub-collars', 'debt-tags',
 ];
 export function healthSignal(building, flags = {}) {
   if (flags.hotspots && building.isHotspot) return 'hotspot';
+  if (flags.defects && building.isDefect) return 'defect';
   if (flags.imports && building.cycle) return 'cycle';
   if (flags.layering && building.violations) return 'violation';
   if (flags.defects && building.bugprone) return 'bugprone';
+  if (flags.hubs && building.isHub) return 'hub';
   if (building.oversized) return 'oversized';
   if (flags.codes && building.codeViolations && building.codeViolations.length) return 'codes';
   if (flags.knowledge && building.knowledgeRisk) return 'knowledge';
@@ -329,6 +377,33 @@ export function makeGroundTexture(THREE) {
   return texture;
 }
 
+/**
+ * Categorical colours for languages: the common ones get fixed, clearly
+ * different colours (close to what people already associate with them), and
+ * anything else draws from a spare palette by a stable hash -- far apart in
+ * hue, unlike a raw hash hue, where two languages often landed a shade apart.
+ */
+const LANGUAGE_COLOURS = {
+  python: 0x4b8bd6, javascript: 0xf0d54a, typescript: 0x3fa7e6, java: 0xe07b39, go: 0x3fc8c8, rust: 0xd4674a,
+  c: 0x8e9ab0, cpp: 0xd05a8a, csharp: 0x6fbf5c, kotlin: 0xa678e8, swift: 0xff8a4a, ruby: 0xd94545, php: 0x8f8fdc,
+  scala: 0xdc4f63, shell: 0x8ccf6a, html: 0xe8663d, css: 0x9b6fe0, markdown: 0xb8c4d6, json: 0xc9a64a,
+  yaml: 0xcf7fb0, notebook: 0xf29a45, sql: 0x5fb3a8, csv: 0xa89060, text: 0x9aa3ad, toml: 0xa0845c, xml: 0x7fa36a,
+  vue: 0x4fc08d, svelte: 0xff6a3d, dart: 0x40b4c4, lua: 0x5a6ee0, r: 0x5b8fd1, julia: 0x9a5fc4, binary: 0x5d6470,
+};
+const SPARE_COLOURS = [0x56b4e9, 0xe69f00, 0x009e73, 0xf0e442, 0xcc79a7, 0xd55e00, 0x0072b2, 0x9ad0ec, 0xc9a0dc, 0x8dd3c7, 0xfb8072, 0xbebada];
+
+/** A stable, well-separated colour for any category name (a language, an author). */
+export function categoryColour(text, table = LANGUAGE_COLOURS) {
+  if (!text) return 0x777777;
+  if (table && table[text] !== undefined) return table[text];
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return SPARE_COLOURS[(hash >>> 0) % SPARE_COLOURS.length];
+}
+
 function hueFor(text) {
   let hash = 2166136261;
   for (let i = 0; i < text.length; i++) {
@@ -349,6 +424,54 @@ function tintFor(THREE, baseHex, author, strength) {
   if (!author) return base;
   const authorColor = new THREE.Color().setHSL(hueFor(author), 0.42, 0.55);
   return base.clone().lerp(authorColor, strength);
+}
+
+/**
+ * One building's colour under a lens, written into `out` (a THREE.Color).
+ *
+ * The city and the minimap both paint with this, so a district on the map is
+ * the same colour as its buildings on screen.
+ */
+export function lensColour(THREE, source, lens, building, archetype, territoryAuthor, out) {
+  const manifest = source.manifest;
+  const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
+  if (lens === 'language') return out.set(categoryColour(source.s(building.language)));
+  if (lens === 'author') {
+    const author = authorTint ? source.s(building.author) : '';
+    return out.set(author ? categoryColour(author, null) : 0x777777);
+  }
+  if (lens === 'era') {
+    // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
+    // building's own age relative to the rest of the repo (S3).
+    const ERA_COLOURS = { old: 0x8a5a44, mid: 0x8f97a3, new: 0xbfe3ef };
+    return out.set(ERA_COLOURS[building.era] || ERA_COLOURS.mid);
+  }
+  if (lens === 'heat') {
+    // Cool grey (stable) through amber to red (hottest): recent,
+    // decay-weighted churn, not lifetime totals (S4).
+    const value = Math.max(0, Math.min(1, building.heat || 0));
+    return out.set(0x4b5563).lerp(new THREE.Color(0xff4d2e), value);
+  }
+  if (lens === 'health') return out.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
+  if (lens === 'mainsequence') return out.set(mainSequenceBand(manifest.districts && manifest.districts[building.district]).colour);
+  if (LENS_BANDS[lens]) return out.set(lensBand(lens, building).colour);
+  if (lens === 'territory') {
+    // One author's territory: brightness is their share of the file's
+    // lines, so where they wrote everything glows and where they wrote
+    // nothing is ghost grey.
+    const share = (building.authorShares || []).find(([name]) => source.s(name) === territoryAuthor);
+    const value = share ? share[1] : 0;
+    return out.set(0x26282d).lerp(new THREE.Color(0xffc24a), Math.sqrt(value));
+  }
+  if (lens === 'downtown') {
+    const centrality = Math.max(0, Math.min(1, building.centrality || 0));
+    return out.set(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality);
+  }
+  const author = authorTint ? source.s(building.author) : '';
+  out.copy(tintFor(THREE, ARCHETYPE_COLORS[archetype] || 0x777777, author, author ? 0.45 : 0));
+  const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
+  if (downtownEligible && building.downtown) out.lerp(new THREE.Color(0x8fd6ff), 0.4);
+  return out;
 }
 
 export class CityMesh {
@@ -444,10 +567,17 @@ export class CityMesh {
     const stakeCandidates = [];
     const noticeCandidates = [];
     const pinCandidates = [];
+    const ghostCandidates = [];
     const smokeCandidates = [];
     const potholeCandidates = [];
     const codeCandidates = [];
+    const lampCandidates = [];
+    const collarCandidates = [];
+    const tagCandidates = [];
     const notes = options.notes || null;
+    const defectEligible = option('defects', flag('defects'));
+    const hubEligible = option('hubs', flag('hubs'));
+    const debtEligible = option('debt', flag('debt'));
     const violationEligible = option('violations', flag('layering'));
     const untestedEligible = option('untested', flag('tests'));
     const complexityEligible = option('complexity', flag('complexity'));
@@ -462,7 +592,6 @@ export class CityMesh {
     const ageEligible = option('age', flag('age'));
     const downtownEligible = option('downtown', flag('downtown'));
     const bugproneEligible = option('bugprone', flag('defects'));
-    const debtEligible = option('debt', flag('debt'));
     const codesEligible = option('codes', flag('codes'));
     const glass = new THREE.Color(0x8fd6ff);
 
@@ -623,6 +752,11 @@ export class CityMesh {
         if (detailed && deltaEligible && building.delta) {
           stakeCandidates.push({ x, z, width, depth, base, delta: building.delta });
         }
+        // A ghost of the building as it stood at the baseline: any tier, so
+        // the change reads from the plan view too.
+        if (deltaEligible && building.baselineHeight) {
+          ghostCandidates.push({ x, z, width, depth, height: building.baselineHeight * landmark, delta: building.delta });
+        }
         if (detailed && codeownersEligible && building.ownerDrift) {
           noticeCandidates.push({ x, z, width, depth, base });
         }
@@ -634,6 +768,15 @@ export class CityMesh {
         }
         if (detailed && codesEligible && building.codeViolations && building.codeViolations.length) {
           codeCandidates.push({ x, z, width, depth, base });
+        }
+        if (detailed && defectEligible && building.isDefect) {
+          lampCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && hubEligible && building.isHub && height > 6) {
+          collarCandidates.push({ x, z, width, depth, height });
+        }
+        if (detailed && debtEligible && building.debtMarkers && building.debtMarkers.length) {
+          tagCandidates.push({ x, z, width, depth, height, base, count: Math.min(5, building.debtMarkers.length) });
         }
         // A note is the reader's own, so it is drawn at any tier: a pin you
         // placed should not vanish because you flew away from it.
@@ -686,6 +829,10 @@ export class CityMesh {
     this._addBracing(braceCandidates);
     this._addSurveyStakes(stakeCandidates);
     this._addNotePins(pinCandidates);
+    this._addBaselineGhosts(ghostCandidates);
+    this._addDefectLamps(lampCandidates);
+    this._addHubCollars(collarCandidates);
+    this._addDebtTags(tagCandidates);
     this._addGround(bx, bz, bw, bh, buildings);
     this._addRegions(manifest.regions || []);
     this._addPlinthShadows(manifest.regions || []);
@@ -919,8 +1066,6 @@ export class CityMesh {
    */
   recolour(lens) {
     const THREE = this.THREE;
-    const manifest = this.source.manifest;
-    const authorTint = Boolean(manifest.flags && manifest.flags.authorship);
     const colour = new THREE.Color();
     // Materials read only under the archetype lens: a data lens is a single
     // colour per building, so the paint is switched off rather than tinted.
@@ -939,42 +1084,7 @@ export class CityMesh {
       }
       const base = mesh.userData.baseColors;
       members.forEach((building, index) => {
-        if (lens === 'language') {
-          const lang = this.source.s(building.language);
-          colour.copy(lang ? new THREE.Color().setHSL(hueFor(lang), 0.5, 0.55) : new THREE.Color(0x777777));
-        } else if (lens === 'author') {
-          const author = authorTint ? this.source.s(building.author) : '';
-          colour.copy(author ? new THREE.Color().setHSL(hueFor(author), 0.45, 0.55) : new THREE.Color(0x777777));
-        } else if (lens === 'era') {
-          // Brick (old) -> concrete (mid) -> glass (new), a tertile of the
-          // building's own age relative to the rest of the repo (S3).
-          const ERA_COLOURS = { old: 0x8a5a44, mid: 0x8f97a3, new: 0xbfe3ef };
-          colour.copy(new THREE.Color(ERA_COLOURS[building.era] || ERA_COLOURS.mid));
-        } else if (lens === 'heat') {
-          // Cool grey (stable) through amber to red (hottest): recent,
-          // decay-weighted churn, not lifetime totals (S4).
-          const value = Math.max(0, Math.min(1, building.heat || 0));
-          colour.copy(new THREE.Color(0x4b5563).lerp(new THREE.Color(0xff4d2e), value));
-        } else if (lens === 'health') {
-          colour.set(HEALTH_COLOURS[healthSignal(building, manifest.flags || {})]);
-        } else if (LENS_BANDS[lens]) {
-          colour.set(lensBand(lens, building).colour);
-        } else if (lens === 'territory') {
-          // One author's territory: brightness is their share of the file's
-          // lines, so where they wrote everything glows and where they wrote
-          // nothing is ghost grey (`this.territoryAuthor` is set by main.js).
-          const share = (building.authorShares || []).find(([name]) => this.source.s(name) === this.territoryAuthor);
-          const value = share ? share[1] : 0;
-          colour.copy(new THREE.Color(0x26282d).lerp(new THREE.Color(0xffc24a), Math.sqrt(value)));
-        } else if (lens === 'downtown') {
-          const centrality = Math.max(0, Math.min(1, building.centrality || 0));
-          colour.copy(new THREE.Color(0x2a2c31).lerp(new THREE.Color(0x8fd6ff), centrality));
-        } else {
-          const author = authorTint ? this.source.s(building.author) : '';
-          colour.copy(baseColourFor(THREE, archetype, detailed, multicolour, author));
-          const downtownEligible = Boolean(manifest.flags && manifest.flags.downtown);
-          if (downtownEligible && building.downtown) colour.lerp(new THREE.Color(0x8fd6ff), 0.4);
-        }
+        lensColour(THREE, this.source, lens, building, archetype, this.territoryAuthor, colour);
         base[index * 3] = colour.r;
         base[index * 3 + 1] = colour.g;
         base[index * 3 + 2] = colour.b;
@@ -1276,6 +1386,118 @@ export class CityMesh {
       matrix.setPosition(x, plot.base || 0, z);
       mesh.setMatrixAt(index, matrix);
     });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /**
+   * The baseline's outline around a building that grew or shrank: a
+   * wireframe box at the height it stood then. Grown buildings rise out of
+   * their ghost; shrunk ones stand inside it. Named under `survey-stakes`, so
+   * the delta switch and the History slider take it with the stakes.
+   */
+  _addBaselineGhosts(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS * 2);
+    const geometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const mesh = new THREE.InstancedMesh(geometry, material, list.length);
+    mesh.name = 'survey-stakes-ghosts';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    const colour = new THREE.Color();
+    list.forEach((plot, index) => {
+      // A hair wider than the building, so the frame never z-fights a facade.
+      matrix.makeScale(plot.width * 1.04, Math.max(0.5, plot.height), plot.depth * 1.04);
+      matrix.setPosition(plot.x, 0, plot.z);
+      mesh.setMatrixAt(index, matrix);
+      mesh.setColorAt(index, colour.set(DELTA_COLOURS[plot.delta] || DELTA_COLOURS.grown));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A red warning lamp on the roof of a defect-prone file, lit so it reads at dusk. */
+  _addDefectLamps(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.4,
+      emissive: new THREE.Color(0x5a0a10),
+    });
+    const mesh = new THREE.InstancedMesh(defectLampGeometry(THREE), material, list.length);
+    mesh.name = 'defect-lamps';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((roof, index) => {
+      const size = Math.min(7, Math.max(2.4, Math.min(roof.width, roof.depth) * 0.4));
+      matrix.makeScale(size, size, size);
+      // The opposite corner from the cycle pennant, so a file with both shows both.
+      matrix.setPosition(roof.x + roof.width * 0.22, roof.height, roof.z + roof.depth * 0.22);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** A steel collar around a hub's shaft, at two-thirds of its drawn height. */
+  _addHubCollars(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const list = candidates.slice(0, MAX_HEALTH_PROPS);
+    const material = new THREE.MeshStandardMaterial({
+      color: HEALTH_COLOURS.hub,
+      roughness: 0.35,
+      metalness: 0.6,
+      emissive: new THREE.Color(0x0a2a55),
+    });
+    const mesh = new THREE.InstancedMesh(hubCollarGeometry(THREE), material, list.length);
+    mesh.name = 'hub-collars';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    list.forEach((plot, index) => {
+      const band = Math.min(3.2, Math.max(1.2, plot.height * 0.04));
+      matrix.makeScale(plot.width, band, plot.depth);
+      matrix.setPosition(plot.x, plot.height * 0.66, plot.z);
+      mesh.setMatrixAt(index, matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    this.group.add(mesh);
+  }
+
+  /** One yellow tag per debt marker (up to five), hung across the south facade. */
+  _addDebtTags(candidates) {
+    if (!candidates.length) return;
+    const THREE = this.THREE;
+    const total = candidates.reduce((sum, c) => sum + c.count, 0);
+    const count = Math.min(MAX_HEALTH_PROPS, total);
+    const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
+    const mesh = new THREE.InstancedMesh(debtTagGeometry(THREE), material, count);
+    mesh.name = 'debt-tags';
+    mesh.raycast = () => {};
+    const matrix = new THREE.Matrix4();
+    let index = 0;
+    for (const plot of candidates) {
+      const size = Math.min(2.4, Math.max(1.1, plot.width * 0.16));
+      const row = Math.min(plot.height * 0.5, 6 + size);
+      for (let i = 0; i < plot.count && index < count; i++) {
+        const along = plot.count === 1 ? 0 : (i / (plot.count - 1) - 0.5) * plot.width * 0.7;
+        matrix.makeScale(size, size, size);
+        matrix.setPosition(plot.x + along, Math.max(plot.base + 1.5, row - (i % 2) * size * 0.4), plot.z + plot.depth / 2 + 0.06);
+        mesh.setMatrixAt(index++, matrix);
+      }
+    }
+    mesh.count = index;
     mesh.instanceMatrix.needsUpdate = true;
     this.group.add(mesh);
   }

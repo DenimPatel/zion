@@ -285,6 +285,85 @@ and has none is reported as not evaluated, never as passed. The report also
 carries the blast-radius, bug-prone, debt, building-code, main-sequence and
 external-dependency sections, and A and D columns in the folder table.
 
+### The deeper layer: where the next bug, the next tangle and the next owner problem are
+
+**Defect-prone files.** Every commit subject is read once, in the same `git log`
+pass: `fix:`, "fix", "bug", "hotfix", "regression", "revert", "closes #12". A
+file whose share of fix commits is in the repository's top tenth, with at least
+five commits and two fixes, carries a **red warning lamp** on its roof. Bugs
+cluster; this is where the next one is most likely. The signal switches itself
+off when fewer than 5% of commits read as fixes, rather than guessing from a
+history that does not say.
+
+**Trend: rising or cooling.** The last quarter's commits against the quarter
+before. A hotspot that is *rising* is the refactor that gets dearer every week,
+and gets its own Health list, filter word (`is:rising`) and lens band.
+`is:warming` / `is:cooling` find the rest.
+
+**Hubs and import depth.** A file in the top tenth both for how many files
+import it and for how many it imports wears a **steel collar**: a change there
+ripples both ways. Every file also gets its **import depth** — the longest chain
+of imports below it, with cycles collapsed to one step — in its inspector, the
+`depth>` filter word and the depth lens.
+
+**Hidden coupling.** Two files in *different* folders that change in the same
+commits at least half the time although neither imports the other. The
+dependency is real — a wire format, a protocol, a copy — but the code does not
+say so. Select a building and its partners are joined by **dashed violet arcs**.
+
+**Copied code.** Every code file is fingerprinted once while it is parsed
+(`analyzer/clones.py`: normalised lines, so renamed variables and reformatting
+still match; winnowed k-grams; an inverted index to pair files). Two files sharing
+at least half of the smaller one's fingerprints are **clone twins**, linked by a
+high **cyan arc** when either is selected. Tests and vendored code are left out.
+
+**Written-down debt.** `TODO`, `FIXME`, `HACK` and `XXX` — only as the first word
+of a comment or followed by a colon, so a comment that merely mentions the word
+is not debt — hang as **yellow tags** on the facade, one per marker up to five.
+The inspector lists each with its line; under `--encrypt` the comment text goes
+through the string table like every other piece of repository text.
+
+**The main sequence.** Each folder's abstractness *A* (the share of its type
+definitions that are interfaces, ABCs, protocols or abstract classes — exact for
+Python, a keyword count elsewhere) against its instability *I*, and its distance
+*D = |A + I − 1|*. A stable, concrete folder is in the **zone of pain**: everything
+leans on it and nothing in it bends. City Hall plots every folder on the chart
+(click one to fly there); the "main sequence" lens colours every building by its
+folder's place on it.
+
+**Coordination cost.** Per folder: how many people worked in it over the last
+three months, how much of its work also had to touch another folder in the same
+commit, and whether anyone leads it. Many recent authors and nobody above 40% is
+**many cooks** — the folder has no owner in practice.
+
+**Grades.** Every folder, every region and the city itself get a letter (A ≥ 90 …
+F below 60): 100 minus the share of its code that carries a signal, each signal
+weighted by how serious it is and each file by the square root of its lines. It is
+recomputed from the baseline's `summary.json` the same way, so City Hall and the
+inspector show which way a folder is moving (▲ / ▼) and which signals cost the
+points. The badge sits on the folder's name on the map and the minimap.
+
+**In the plan view**, the fifteen heaviest folder-to-folder imports are drawn as
+arrows over the map (thicker for more imports, red for any against the layering),
+and on the minimap too. Buildings that grew or shrank since the baseline stand in
+a **wireframe ghost** of their old height.
+
+**Go to anything.** `Ctrl+K` (or `/`) opens a fuzzy finder over every file and
+folder in the repository — not just what is loaded — and Enter flies there.
+
+**Export.** The Health tab downloads every file as CSV: path, folder, language,
+size, age, heat, owner, complexity, fan-in/out, fix commits, trend, debt markers,
+import depth, change since the baseline, its folder's grade and its signals by
+name.
+
+**More gates.** `--fail-on` also takes `defects`, `rising-hotspots`, `hubs`,
+`clones`, `hidden-coupling`, `debt` and `zone-of-pain`, and `budgets`: a rules
+file may set numeric limits that no file may exceed —
+
+```json
+{"budgets": {"max_file_loc": 800, "max_function_cx": 20, "max_fanout": 15, "max_import_depth": 8}}
+```
+
 ### Why height is never bytes on disk
 
 Because bytes on disk lie about code, in both directions.
@@ -359,7 +438,10 @@ that one is the repository root in each case.
 | `Q` / `E` | fly down / up |
 | mouse | look (click once to capture the pointer; `Esc` releases) |
 | `V` | toggle fly ⇄ walk |
-| `O` | top-down overview |
+| `O` | orbit: circle the city (or whatever you clicked) |
+| `P` | plan view: straight down, north up, a long lens; drag or `W` `A` `S` `D` pans, wheel or `Q` `E` zooms, `R` frames the whole city |
+| `M` | fold / unfold the minimap |
+| `Ctrl` `K` or `/` | go to any file or folder by a fuzzy name |
 | `E` | enter the building you are facing, or City Hall when you are standing at it |
 | `U` | unlock an encrypted city |
 | `[` `]` | change floor while inside a building |
@@ -398,6 +480,40 @@ through. While it holds, the district being described is marked on the ground an
 numbers, and a progress bar shows how far along the circuit is. Press `N` to skip
 ahead. Cities with more than 32 districts are sampled evenly, and the label says
 so rather than silently dropping most of the map.
+
+**Colour buildings by any attribute.** The top of the City Guide has a *Colour
+buildings by* picker — the same lens as the Filter tab's, kept in step with it —
+grouped by question: what it is (language, kind of building), health (the
+architect's signals, fix commits, branchiest function, TODO debt, test links),
+change over time (heat, trend, age, change since the baseline), structure
+(instability, import depth and hubs, copied code and hidden coupling, centrality,
+the folder's place on the main sequence) and people (main author, one author's
+territory). Its key sits right under it and counts the buildings on screen in
+each colour. A fresh page colours by language, with fixed, clearly different
+colours for the common languages; whatever you pick is remembered in the
+browser.
+
+**The minimap is always there.** A small map in the bottom-right corner draws the
+whole plan -- region plinths, roads by class, district plates, City Hall -- from
+the manifest, so districts that have not streamed in are on it too. Plates and
+buildings are tinted by the **active colour lens** (the same function paints the
+city and the map), the **filter's matches** are bright dots, the **selection** is
+ringed, and files carrying one of **your notes** have a pink pin. The camera is a
+view cone, or in the plan view the rectangle of ground on screen; when it
+stands outside the city the marker is pinned to the map's edge. **Click to fly
+there**, drag to scrub the view across the city, Shift-click to frame a whole
+folder, and use the wheel or `+` / `−` to zoom the map, which then follows the
+camera. `M` or the corner button folds it to a pill, and the choice is
+remembered (it starts folded on narrow screens).
+
+**The plan view reads the city as a map.** `P` (or *Plan view* in the title
+bar) rises from wherever you are to a camera straight above the point you were
+looking at, north up, through a 28° lens so towers do not lean out of frame and
+hide their neighbours. Fog is pushed back by the altitude while it is up.
+Picking still works (click a building to inspect it), minimap clicks glide the
+plan instead of dropping out of it, and a *Copy view link* taken in the plan
+reopens in the plan. `P` again hands the exact vantage back to free flight,
+still looking down, so nothing jumps.
 
 **City Hall** is the one building that is not a file: it is the repository's own
 report card, standing at the centre of the plan on a plaza the districts are laid
@@ -793,10 +909,15 @@ analyzer/
   walk.py                git-first file enumeration
   parse/                 python_ast · notebook · brace · markup · tabular
   gitmeta.py             one `git log --numstat` pass → authorship, churn,
-                         recency, co-change coupling
+                         recency, co-change coupling, fix commits
   metrics.py             per-file metrics, confidence and degeneration rules
   health.py              architect's signals: hotspots, knowledge risk,
-                         oversized, orphans, import cycles
+                         oversized, orphans, import cycles, defect-prone,
+                         trend, hubs, import depth
+  architecture.py        folder coupling, layering, hidden coupling,
+                         main sequence, coordination cost
+  clones.py              clone twins by winnowed fingerprints
+  grades.py              A-F health grade per folder, now and at the baseline
   layout.py              district depth rule, nested treemap, road classes,
                          region plinths, building grid
   crypto.py              AES-256-GCM + PBKDF2, WebCrypto-compatible framing
@@ -804,10 +925,10 @@ analyzer/
 viewer/
   index.html · css/hud.css
   js/  main · loader · city · stream · interior · cityhall/tour · cameras
-       · collision · inspector · labels · sky · vault
+       · collision · inspector · labels · minimap · palette · selection · sky · vault
        parts/ massing · civic · construction · parks · beacons · health
 vendor/                  three.module.js (pinned, with provenance) · aes_gcm.py
-tests/                   105 stdlib tests + committed fixture repositories
+tests/                   139 stdlib tests + committed fixture repositories
 bench/                   synthetic repository generator and measured results
 ```
 

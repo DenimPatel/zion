@@ -94,7 +94,7 @@ class ImpactTests(TempRepoCase):
         self.assertEqual(by_rel["app/top.py"].impact, 0)
         manifest = read_json(os.path.join(result.out_dir, "city.json"))
         columns = manifest["indexColumns"]
-        self.assertEqual(columns[-3:], ["impact", "fixes", "debt"])
+        self.assertEqual(columns[-5:], ["impact", "fixes", "trend", "debt", "depth"])
         index = read_json(os.path.join(result.out_dir, "index.json"))
         rows = {row[columns.index("id")]: row for row in index}
         base_id = next(

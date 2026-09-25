@@ -23,6 +23,18 @@ Signals, each relative to the repository itself:
   a folder-level cycle, and the thinner direction is the edge to break.
 - **Cross-folder co-change**: co-change pairs whose ends live in different
   folders, summed per folder pair. Hidden coupling, at the scale of parts.
+- **Hidden coupling**, file by file: two files in different folders that keep
+  changing together although neither imports the other. The dependency is
+  real -- a shared format, a protocol, a copy -- but the code does not say so.
+- **Coordination cost** (Conway): per folder, how many people worked in it
+  over the last three months, how much of its work also had to touch another
+  folder in the same commit, and whether anyone leads it. Many recent authors
+  and no expert above 40% is "many cooks": the folder has no owner in practice.
+- **Abstractness and distance from the main sequence** (Martin's A and D):
+  ``A`` is the share of a folder's type definitions that are abstract, and
+  ``D = |A + I - 1|``. A stable, concrete folder (low A, low I) is the "zone
+  of pain": everything leans on it and nothing in it bends. An abstract folder
+  nothing depends on (high A, high I) is the "zone of uselessness".
 
 - **Abstractness and the main sequence**: the share of a folder's classes that
   are abstract (ABCs, Protocols, interfaces, traits). With instability it
@@ -79,6 +91,17 @@ CODE_LIMITS = {
     "max_floors": (lambda f: len(f.floors), "floors"),
     "max_debt": (lambda f: f.debt_markers, "debt markers"),
 }
+# File pairs: at least this many shared commits, and together in at least half
+# of the quieter file's commits, so two busy files are not paired by chance.
+HIDDEN_MIN_COMMITS = 3
+HIDDEN_MIN_SHARE = 0.5
+MAX_HIDDEN_PAIRS = 200
+MAX_HIDDEN_PER_FILE = 8
+# A folder needs a few recent authors working across folders to say its
+# coordination cost is real.
+RECENT_MONTHS = 3
+MANY_COOKS_AUTHORS = 5
+MANY_COOKS_TOP_SHARE = 0.4
 
 
 @dataclass
@@ -91,9 +114,16 @@ class DistrictDeps:
     violations: int = 0  # violating edges that start here
     classes: int = 0
     abstract: int = 0
-    abstractness: float | None = None  # abstract / classes; None with no classes
-    distance: float | None = None  # |A + I - 1|, when both are known
-    zone: str = ""  # "" | "pain" | "useless"
+    abstractness: float | None = None  # A: abstract / all type definitions
+    distance: float | None = None  # D = |A + I - 1|, distance from the main sequence
+    zone: str = ""  # "" | "pain" | "uselessness"
+    # Coordination cost (Conway): who works here, and how much of the work
+    # here also has to touch another folder in the same commit.
+    recent_authors: int = 0  # distinct authors in the last three months
+    commits: int = 0  # commits touching this folder
+    cross_share: float = 0.0  # of those, the share that also touched another folder
+    top_share: float = 0.0  # the leading expert's share of recency-weighted authorship
+    many_cooks: bool = False
 
 
 @dataclass
@@ -243,7 +273,7 @@ def _main_sequence(files, arch: Architecture) -> None:
         deps.distance = round(abs(deps.abstractness + deps.instability - 1.0), 4)
         if deps.distance < ZONE_DISTANCE or deps.classes < ZONE_MIN_CLASSES or deps.ca + deps.ce < ZONE_MIN_COUPLING:
             continue
-        deps.zone = "pain" if deps.abstractness + deps.instability < 1.0 else "useless"
+        deps.zone = "pain" if deps.abstractness + deps.instability < 1.0 else "uselessness"
 
 
 def _eligible(record) -> bool:
@@ -256,9 +286,14 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
     arch = Architecture()
     files = analysis.files
     by_rel = {f.rel: f for f in files}
+    analysis.hidden_couplings = []
+    analysis.flags.hidden_coupling = False
+    analysis.flags.abstractness = False
     for record in files:
         record.import_violations = []
         record.is_violation = False
+        record.hidden_coupling = []
+        record.is_hidden_coupling = False
         out = len(record.imports_resolved)
         total = out + record.import_in_degree
         record.file_instability = round(out / total, 4) if total else -1.0
@@ -266,6 +301,7 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
     rules_data, rules_path, error = load_rules(root or analysis.root)
     arch.rules_error = error
     _apply_codes(analysis, arch, rules_data)
+    _teams(analysis, arch)
 
     if not analysis.flags.imports:
         analysis.architecture = arch
@@ -293,14 +329,16 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
         importers_in.setdefault(d_dst, set()).add(src)
         importers_out.setdefault(d_src, set()).add(src)
     for key in {f.district for f in files}:
-        deps = DistrictDeps(ca=len(importers_in.get(key, ())), ce=len(importers_out.get(key, ())))
+        deps = arch.districts.setdefault(key, DistrictDeps())
+        deps.ca = len(importers_in.get(key, ()))
+        deps.ce = len(importers_out.get(key, ()))
         total = deps.ca + deps.ce
         deps.instability = round(deps.ce / total, 4) if total else None
-        arch.districts[key] = deps
     for (d_src, d_dst), count in arch.matrix.items():
         arch.districts[d_src].edges_out += count
         arch.districts[d_dst].edges_in += count
     _main_sequence(files, arch)
+    analysis.flags.abstractness = any(d.distance is not None for d in arch.districts.values())
 
     # -- violations -----------------------------------------------------------
     # A rules file that only declares building codes says nothing about the
@@ -351,6 +389,86 @@ def finalize_architecture(analysis, root: str | None = None) -> Architecture:
             bucket[1] += count
         ranked = sorted(pairs.items(), key=lambda kv: (-kv[1][1], -kv[1][0], kv[0]))
         arch.coupling = [(a, b, n, c) for (a, b), (n, c) in ranked[:MAX_DISTRICT_COUPLING]]
+        _hidden_coupling(analysis, by_rel)
 
     analysis.architecture = arch
     return arch
+
+
+def _hidden_coupling(analysis, by_rel: dict) -> None:
+    """Co-change without an import either way, across folders."""
+    git = analysis.git
+    for record in analysis.files:
+        record.hidden_coupling = []
+        record.is_hidden_coupling = False
+    resolved = {f.language for f in analysis.files if f.import_in_degree > 0}
+    found: list[tuple[str, str, int]] = []
+    for (path_a, path_b), count in git.coupling.items():
+        if count < HIDDEN_MIN_COMMITS:
+            continue
+        a, b = by_rel.get(path_a), by_rel.get(path_b)
+        if a is None or b is None or a.district == b.district:
+            continue
+        if not (_eligible(a) and _eligible(b)) or a.is_doc or b.is_doc or a.is_binary or b.is_binary:
+            continue
+        # Only where imports can be seen at all: otherwise every pair would be
+        # "hidden" simply because this language's imports never resolve.
+        if a.language not in resolved or b.language not in resolved:
+            continue
+        if path_b in a.imports_resolved or path_a in b.imports_resolved:
+            continue
+        quieter = max(1, min(a.commits, b.commits))
+        if count / quieter < HIDDEN_MIN_SHARE:
+            continue
+        found.append((path_a, path_b, count))
+    found.sort(key=lambda p: (-p[2], p[0], p[1]))
+    found = found[:MAX_HIDDEN_PAIRS]
+    for path_a, path_b, count in found:
+        for this, other in ((path_a, path_b), (path_b, path_a)):
+            record = by_rel[this]
+            record.is_hidden_coupling = True
+            if len(record.hidden_coupling) < MAX_HIDDEN_PER_FILE:
+                record.hidden_coupling.append((other, count))
+    analysis.hidden_couplings = found
+    analysis.flags.hidden_coupling = bool(found)
+
+
+def _teams(analysis, arch: Architecture) -> None:
+    """Per-folder coordination cost, from the commit hashes gitmeta kept."""
+    git = analysis.git
+    flags = analysis.flags
+    flags.teams = False
+    if not flags.authorship or git is None or not git.available:
+        return
+    districts_of_commit: dict[str, set[str]] = {}
+    members: dict[str, list] = {}
+    for record in analysis.files:
+        members.setdefault(record.district, []).append(record)
+        file_git = git.files.get(record.rel)
+        if file_git is None:
+            continue
+        for commit in file_git.hashes:
+            districts_of_commit.setdefault(commit, set()).add(record.district)
+    for key, records in members.items():
+        deps = arch.districts.setdefault(key, DistrictDeps())
+        recent = set()
+        scores: dict[str, float] = {}
+        commits: set[str] = set()
+        for record in records:
+            for author, buckets in record.author_buckets.items():
+                if any(b < RECENT_MONTHS for b in buckets):
+                    recent.add(author)
+            for author, score in record.expert_scores.items():
+                scores[author] = scores.get(author, 0.0) + score
+            file_git = git.files.get(record.rel)
+            if file_git is not None:
+                commits.update(file_git.hashes)
+        deps.recent_authors = len(recent)
+        deps.commits = len(commits)
+        crossing = sum(1 for c in commits if len(districts_of_commit.get(c, ())) > 1)
+        deps.cross_share = round(crossing / len(commits), 4) if commits else 0.0
+        total = sum(scores.values())
+        deps.top_share = round(max(scores.values()) / total, 4) if total else 0.0
+        deps.many_cooks = deps.recent_authors > MANY_COOKS_AUTHORS and deps.top_share < MANY_COOKS_TOP_SHARE
+        if deps.recent_authors:
+            flags.teams = True

@@ -29,10 +29,18 @@ export class MapLabels {
     this.lastUpdate = 0;
     this.enabled = true;
     this.span = 1000;
+    this.showGrades = true;
+  }
+
+  setGradesShown(shown) {
+    this.showGrades = shown;
+    this.lastUpdate = 0;
   }
 
   /**
-   * `items`: [{ text, x, z, y, level, kind: 'region'|'district', weight }].
+   * `items`: [{ text, x, z, y, level, kind: 'region'|'district', weight, grade? }].
+   * `grade` is the folder's health letter (analyzer/grades.py), drawn as a
+   * badge after the name when the grades are switched on.
    * `span` is the city's width, which the distance thresholds scale with.
    */
   setItems(items, span) {
@@ -108,12 +116,25 @@ export class MapLabels {
       const sx = p.x * width;
       const sy = p.y * height;
       // Skip a label that would sit on top of one already placed.
-      const w = Math.min(220, 8 + entry.item.text.length * 7.5);
+      const grade = this.showGrades && entry.item.grade ? entry.item.grade : '';
+      const w = Math.min(240, 8 + entry.item.text.length * 7.5 + (grade ? 22 : 0));
       const box = { x0: sx - w / 2, x1: sx + w / 2, y0: sy - 11, y1: sy + 11 };
       if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
       placed.push(box);
       const el = this.element(used++);
-      if (el.textContent !== entry.item.text) el.textContent = entry.item.text;
+      const key = `${entry.item.text}\u0000${grade}`;
+      if (el.dataset.key !== key) {
+        el.dataset.key = key;
+        el.dataset.text = entry.item.text;
+        el.textContent = entry.item.text;
+        if (grade) {
+          const badge = document.createElement('span');
+          badge.className = `grade-badge grade-${grade}`;
+          badge.textContent = grade;
+          badge.title = `health grade ${grade}`;
+          el.append(badge);
+        }
+      }
       const cls = `map-label ${entry.item.kind} level-${Math.min(3, entry.item.level || 0)}`;
       if (el.className !== cls) el.className = cls;
       el.hidden = false;
@@ -155,7 +176,7 @@ export class MapLabels {
 
   /** Labels currently on screen, for the self-test. */
   shown() {
-    return this.pool.filter((el) => !el.hidden).map((el) => el.textContent);
+    return this.pool.filter((el) => !el.hidden).map((el) => el.dataset.text || el.textContent);
   }
 }
 

@@ -43,11 +43,29 @@ BUCKET_DAYS = 30.0
 # used before this) and *recent* churn tell different stories.
 HEAT_HALF_LIFE_DAYS = 30.0
 
+# A commit whose subject says it repairs something. Conventional-commit
+# prefixes (`fix:`, `fix(api):`), the words people actually write, and issue
+# references with a closing verb. Deliberately narrow: "prefix" and "debug"
+# are not fixes, which is why every word is anchored on a boundary.
+FIX_RE = re.compile(
+    r"^(?:fix|hotfix|bugfix)(?:\([^)]*\))?!?:"
+    r"|\b(?:fix(?:e[sd])?|fixing|bug|bugs|hotfix|bugfix|regression|revert(?:s|ed)?|patch(?:e[sd])?|crash(?:es)?)\b"
+    r"|\b(?:close[sd]?|resolve[sd]?)\s+#\d+",
+    re.IGNORECASE,
+)
 
-# A commit subject that names a repair. Word-bounded and case-insensitive, so
-# "Fix typo" and "bugfix: x" count and "prefix" or "debug" do not.
-FIX_SUBJECT = re.compile(r"\b(?:fix(?:e[sd])?|bug(?:fix)?|bugs|hotfix|regression)\b", re.IGNORECASE)
-REVERT_SUBJECT = re.compile(r"^\s*(?:revert\b|back(?:ed)?\s*out\b)", re.IGNORECASE)
+
+def is_fix(message: str) -> bool:
+    return bool(FIX_RE.search(message or ""))
+
+
+# A commit that undoes an earlier one, kept apart from repairs: reverting is
+# tracked as its own signal, and a revert is never also counted as a fix.
+REVERT_RE = re.compile(r"^\s*(?:revert\b|back(?:ed)?\s*out\b)", re.IGNORECASE)
+
+
+def is_revert(message: str) -> bool:
+    return bool(REVERT_RE.search(message or ""))
 
 
 @dataclass
@@ -61,7 +79,7 @@ class FileGit:
     last_author: str = ""
     last_message: str = ""
     # Commits whose subject says they repair something (fix, bug, hotfix,
-    # regression) and, separately, ones that undo an earlier commit.
+    # regression; see FIX_RE) and, separately, ones that undo an earlier one.
     fix_commits: int = 0
     revert_commits: int = 0
     # Who made the file: the author of its oldest commit in the history
@@ -111,7 +129,9 @@ class GitIndex:
     authors: dict[str, int] = field(default_factory=dict)
     commit_count: int = 0
     bulk_commits: int = 0
-    fix_commits: int = 0  # commits whose subject names a repair
+    # Repo-wide, for the defect degeneration rule: commits whose subject names
+    # a repair, and those that undo an earlier commit.
+    fix_commits: int = 0
     revert_commits: int = 0
     eligible_commits: int = 0
     first_ts: float = 0.0
@@ -236,11 +256,11 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
         if not entries:
             continue
 
-        is_revert = bool(REVERT_SUBJECT.search(message))
-        is_fix = not is_revert and bool(FIX_SUBJECT.search(message))
+        reverted = is_revert(message)
+        fixed = is_fix(message) and not reverted
         index.commit_count += 1
-        index.fix_commits += is_fix
-        index.revert_commits += is_revert
+        index.fix_commits += fixed
+        index.revert_commits += reverted
         ts = _iso_to_ts(iso_date)
         if ts:
             index.first_ts = ts if not index.first_ts else min(index.first_ts, ts)
@@ -272,8 +292,8 @@ def read_git_index(root: str, candidates: set[str] | None = None, rev: str | Non
             record.added += added
             record.deleted += deleted
             record.hashes.append(commit_hash)
-            record.fix_commits += is_fix
-            record.revert_commits += is_revert
+            record.fix_commits += fixed
+            record.revert_commits += reverted
             if ts:
                 if not record.first_ts or ts <= record.first_ts:
                     record.first_author = author

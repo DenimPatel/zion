@@ -182,10 +182,54 @@ function signsFor(b, flags) {
   if (flags.complexity && b.braced) signs.push(['Cross-bracing', `one function has ${b.braceComplexity} decision points`, 'heavy']);
   if (flags.codeowners && b.ownerDrift) signs.push(['Owner notice', 'CODEOWNERS names people who do not write it', 'flag']);
   if (flags.defects && b.bugprone) signs.push(['Smoke', `bug-prone: ${b.fixCommits} of its ${b.commits} commits say they fix it`, 'hot']);
+  if (flags.defects && b.isDefect) signs.push(['Warning lamp', `defect-prone: ${pct(b.fixRatio)} of its ${plural(b.commits, 'commit')} are fixes`, 'risk']);
+  if (flags.hubs && b.isHub) signs.push(['Steel collar', 'a hub: widely imported and importing widely', 'heavy']);
   if (flags.debt && b.debt) signs.push(['Potholes', `${plural(b.debt, 'debt marker')} (TODO / FIXME / HACK / XXX) in its comments`, 'heavy']);
+  if (flags.trend && b.risingHotspot) signs.push(['Rising hotspot', 'a hotspot that got busier this quarter', 'hot']);
+  if (flags.clones && b.cloneOf && b.cloneOf.length) signs.push(['Twin', `shares copied code with ${plural(b.cloneOf.length, 'other file')}`, 'cycle']);
+  if (flags.hiddenCoupling && b.hiddenCoupling && b.hiddenCoupling.length) signs.push(['Hidden coupling', `changes with ${plural(b.hiddenCoupling.length, 'file')} in other folders that it never imports`, 'cycle']);
   if (flags.codes && b.codeViolations && b.codeViolations.length) signs.push(['Code notice', `breaks ${plural(b.codeViolations.length, 'declared building code')}`, 'risk']);
   if (flags.delta && b.delta) signs.push(['Survey stake', `${b.delta} since the baseline${b.locDelta ? ` (${b.locDelta > 0 ? '+' : ''}${b.locDelta} lines)` : ''}`, 'new']);
   return signs;
+}
+
+const SIGNAL_NAMES = {
+  hotspot: 'hotspots', defect: 'defect-prone', cycle: 'import cycles', violation: 'layering violations',
+  untested: 'untested risk', knowledge: 'owner gone', rising: 'rising hotspots', oversized: 'oversized',
+  hub: 'hubs', clone: 'copied code', hiddencoupling: 'hidden coupling', orphan: 'possible dead code',
+  drift: 'CODEOWNERS drift',
+};
+
+/**
+ * A folder's health grade (analyzer/grades.py): the letter, the score, which
+ * way it moved since the baseline, and which signals cost the points.
+ */
+export function gradeFact(target) {
+  if (!target || !target.grade) return null;
+  const badge = el('span', { className: `grade-badge grade-${target.grade}`, textContent: target.grade });
+  const moved = target.baselineGrade && target.baselineScore >= 0 ? target.score - target.baselineScore : 0;
+  const trend = target.baselineGrade
+    ? el('span', {
+      className: `grade-trend ${moved > 0.5 ? 'better' : moved < -0.5 ? 'worse' : ''}`,
+      textContent: moved > 0.5 ? `▲ from ${target.baselineGrade}` : moved < -0.5 ? `▼ from ${target.baselineGrade}` : `= ${target.baselineGrade} at the baseline`,
+    })
+    : null;
+  const item = el('div', { className: 'insp-fact' }, [
+    el('span', { className: 'insp-label', textContent: 'Health grade' }),
+    el('span', { className: 'insp-value' }, [badge, ` ${Math.round(target.score)} / 100`, trend]),
+    el('span', {
+      className: 'insp-gloss',
+      textContent: target.gradeWhy && target.gradeWhy.length
+        ? 'points lost to each signal, weighted by the square root of each file\'s lines:'
+        : 'none of its code carries a health signal',
+    }),
+  ]);
+  if (target.gradeWhy && target.gradeWhy.length) {
+    item.append(el('ul', { className: 'grade-why' }, target.gradeWhy.slice(0, 6).map(([signal, points]) =>
+      el('li', {}, [el('span', { textContent: SIGNAL_NAMES[signal] || signal }), el('span', { textContent: `−${points}` })])
+    )));
+  }
+  return item;
 }
 
 export class Inspector {
@@ -404,12 +448,50 @@ export class Inspector {
       activity.push(fact('Age', humanDays(b.ageDays), `${b.era === 'old' ? 'old town' : b.era === 'new' ? 'new build' : 'middle era'} — ${b.isNew ? 'still under scaffolding' : 'finished'}`));
     }
     if (b.importInDegree) activity.push(fact('Imported by', plural(b.importInDegree, 'file'), 'resolved imports pointing here (best-effort)'));
-    const spark = flags.churn ? sparkline(b.activity) : null;
+    if (b.commits && (b.fixCommits || flags.defects)) {
+      const item = fact(
+        'Fix commits',
+        `${b.fixCommits || 0} of ${b.commits} (${pct(b.fixRatio)})`,
+        b.isDefect
+          ? 'defect-prone: among the top tenth of the repository by share of fixes'
+          : 'commits whose subject reads as a fix: fix, bug, hotfix, revert, closes #n'
+      );
+      const bar = shareBar([
+        { label: 'fixes', value: b.fixCommits || 0, colour: '#ff2d55' },
+        { label: 'other', value: Math.max(0, b.commits - (b.fixCommits || 0)), colour: '#56657a' },
+      ]);
+      if (bar) item.append(bar);
+      activity.push(item);
+    }
+    if (flags.trend) {
+      const recent = (b.activity || []).slice(0, 3).reduce((a, v) => a + v, 0);
+      const before = (b.activity || []).slice(3, 6).reduce((a, v) => a + v, 0);
+      activity.push(fact(
+        'Trend',
+        b.trend > 0 ? 'rising' : b.trend < 0 ? 'cooling' : 'steady',
+        `${plural(recent, 'commit')} in the last three months, ${before} in the three before` +
+          (b.risingHotspot ? ' — a rising hotspot: refactor before it gets dearer' : '')
+      ));
+    }
+    const spark = flags.churn || flags.trend ? sparkline(b.activity) : null;
     this.metrics.append(section('Activity', [...activity, spark], false));
 
     // -- Structure: imports, layering, tests ---------------------------------------
     const structureFacts = this._structure(b, flags);
     if (structureFacts.length) this.metrics.append(section('Structure', structureFacts, false));
+
+    // -- Written-down debt ------------------------------------------------------------
+    if (b.debtMarkers && b.debtMarkers.length) {
+      const rows = b.debtMarkers.map(([line, marker, text]) => {
+        const said = source.locked || text < 0 ? '' : source.s(text);
+        return el('li', {}, [
+          el('code', { textContent: `${marker}` }),
+          ` line ${line}`,
+          said ? el('span', { className: 'insp-gloss', textContent: ` — ${said}` }) : null,
+        ]);
+      });
+      this.metrics.append(section(`Debt markers (${b.debtMarkers.length})`, [el('ul', { className: 'insp-notes' }, rows)], false));
+    }
 
     // -- Since the baseline ---------------------------------------------------------
     const delta = source.manifest.delta;
@@ -507,11 +589,43 @@ export class Inspector {
       if (links) item.append(links);
       items.push(item);
     }
+    if (flags.imports && b.importDepth) {
+      items.push(fact(
+        'Import depth',
+        plural(b.importDepth, 'level'),
+        b.importDepth >= 5
+          ? 'a long chain below it: a change at the bottom travels a long way up to here'
+          : 'the longest chain of imports below it, cycles counted once'
+      ));
+    }
+    if (b.isHub) {
+      items.push(fact('Hub', 'yes', 'top tenth both for importers and for imports: split it along its callers'));
+    }
+    if (b.hiddenCoupling && b.hiddenCoupling.length) {
+      const item = fact(
+        'Hidden coupling',
+        plural(b.hiddenCoupling.length, 'file'),
+        'changes in the same commits, in another folder, with no import either way: dashed violet arcs'
+      );
+      const links = fileLinks(b.hiddenCoupling.map(([id]) => id), this.pathForId, 6);
+      if (links) item.append(links);
+      items.push(item);
+    }
+    if (b.cloneOf && b.cloneOf.length) {
+      const item = fact(
+        'Copied code',
+        b.cloneOf.map(([, ratio]) => pct(ratio)).join(', ') + ' shared',
+        'files with a long near-identical block: a fix in one is easily missed in the other'
+      );
+      const links = fileLinks(b.cloneOf.map(([id]) => id), this.pathForId, 6);
+      if (links) item.append(links);
+      items.push(item);
+    }
     if (b.classes) {
       items.push(fact(
         'Classes',
         `${b.classes} · ${b.abstractClasses || 0} abstract`,
-        'abstract = an ABC, Protocol, interface or trait; the folder’s share places it on the main sequence'
+        'classes, interfaces, traits and protocols; the folder’s share places it on the main sequence'
       ));
     }
     if (b.packages && b.packages.length) {
@@ -823,14 +937,25 @@ export class Inspector {
     if (district.contributors !== undefined) {
       people.push(fact('Contributors', String(district.contributors), district.busFactor ? `bus factor ${district.busFactor}: ${plural(district.busFactor, 'person', 'people')} wrote half of it` : ''));
     }
-    if (people.length) this.metrics.append(section('People', people));
     if (flags.authorship && district.experts && district.experts.length) {
       people.push(fact('Who to ask', district.experts.map((e) => this._name(e.name)).join(', '), 'recency-weighted authorship across its files'));
     }
     if (flags.codeowners) {
       people.push(fact('CODEOWNERS', `${district.ownerDrift || 0} drifted · ${district.unowned || 0} unowned`, 'files whose declared owners do not write them / that no rule covers'));
     }
+    if (flags.teams && district.recentAuthors !== undefined) {
+      people.push(fact(
+        'Coordination',
+        `${plural(district.recentAuthors, 'person', 'people')} in 3 months · ${pct(district.crossShare)} of commits cross folders`,
+        district.manyCooks
+          ? `many cooks: nobody leads it (top expert ${pct(district.topShare)}). Name an owner`
+          : `leading expert holds ${pct(district.topShare)} of its recency-weighted authorship`
+      ));
+    }
+    if (people.length) this.metrics.append(section('People', people));
     const health = this._healthFacts([district], flags);
+    const graded = gradeFact(district);
+    if (graded) health.unshift(graded);
     if (flags.churn) health.unshift(fact('Heat', district.heat ? `${Math.round(district.heat * 100)}%` : 'quiet', 'mean recent activity of its files; the pavement warms with it'));
     if (flags.tests && district.sourceFiles) {
       health.push(fact('Tested', `${district.testedFiles} of ${district.sourceFiles}`, `source files with a linked test${district.untestedRisk ? ` · ${district.untestedRisk} risky ones without` : ''}`));
@@ -840,6 +965,10 @@ export class Inspector {
       health.push(fact('Fire record', `${plural(district.fixCommits || 0, 'fix')} · ${district.bugprone || 0} bug-prone`,
         'commits to its files whose subject names a repair; bug-prone files have smoke rising off the roof'));
     }
+    if (flags.defects) health.push(fact('Defect-prone', String(district.defects || 0), 'files whose commits are unusually often fixes'));
+    if (flags.trend && district.rising) health.push(fact('Rising hotspots', String(district.rising), 'hotspots that got busier this quarter'));
+    if (flags.hubs && district.hubs) health.push(fact('Hubs', String(district.hubs), 'widely imported and importing widely'));
+    if (flags.clones && district.clones) health.push(fact('Copied code', String(district.clones), 'files with a clone twin somewhere'));
     if (flags.debt && district.debt) health.push(fact('Potholes', plural(district.debt, 'debt marker'), 'TODO / FIXME / HACK / XXX in its code comments'));
     if (flags.codes && district.codeViolations) health.push(fact('Code breaches', plural(district.codeViolations, 'file'), 'files over a limit in .zion/rules.json'));
     this.metrics.append(section('Health', health));
@@ -892,6 +1021,20 @@ export class Inspector {
     }
     if (flags.layering && district.violations) {
       items.push(fact('Layering', `${plural(district.violations, 'import')} against the grain`, 'red arcs'));
+    }
+    if (district.abstractness !== undefined && district.abstractness >= 0) {
+      const zone = district.zone === 'pain'
+        ? 'zone of pain: stable and concrete. Everything leans on it and nothing in it bends; add interfaces before it hardens further'
+        : district.zone === 'uselessness'
+          ? 'zone of uselessness: abstract, and nothing depends on it. Is it still needed?'
+          : district.distance >= 0 && district.distance > 0.5
+            ? 'far from the main sequence: either more abstract than its dependants need, or more concrete'
+            : 'close to the main sequence: its abstraction matches how much is built on it';
+      items.push(fact(
+        'Main sequence',
+        `A ${district.abstractness.toFixed(2)}${district.distance >= 0 ? ` · D ${district.distance.toFixed(2)}` : ''}`,
+        `${district.abstractClasses} of ${district.classes} types abstract. ${zone}`
+      ));
     }
     const name = (id) => {
       const d = manifest.districts[id];
@@ -962,7 +1105,7 @@ export class Inspector {
       overview.push(fact('Sub-folders', children.map((c) => source.regionLabel(c)).join(', '), 'each on its own, higher plinth'));
     }
     this.metrics.append(section('What you’re looking at', overview));
-    this.metrics.append(section('Health', this._healthFacts(districts, flags)));
+    this.metrics.append(section('Health', [gradeFact(region), ...this._healthFacts(districts, flags)]));
     this.hint.textContent = 'Click a block inside it to inspect one district. Everything outside this folder is dimmed.';
     this.selected.districtIds = districts.map((d) => d.id);
     this._announce();
