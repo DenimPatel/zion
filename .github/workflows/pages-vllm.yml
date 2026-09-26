@@ -1,0 +1,52 @@
+name: Deploy vLLM city to GitHub Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"   # weekly rebuild so the city tracks upstream vLLM
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Zion
+        uses: actions/checkout@v4
+
+      - name: Check out vLLM (full history for authorship/churn/coupling)
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: vllm
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build city
+        run: python3 zion.py build vllm -o _site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
