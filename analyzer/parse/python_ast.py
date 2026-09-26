@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import io
 import tokenize
+import warnings
 
 from . import DEBT_MARKER, Floor, ParseResult, _shorten
 
@@ -226,7 +227,11 @@ def _abstractness(tree: ast.AST) -> tuple[int, int]:
 
 
 def parse_python(source: str) -> ParseResult:
-    tree = ast.parse(source)
+    # Compiling someone else's code surfaces their SyntaxWarnings (e.g. an
+    # invalid escape like '\\ ' on 3.12+); they say nothing about the city.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(source)
     comments, debt = _comments(source)
     docstrings = _docstring_lines(tree)
     total = len(source.splitlines())

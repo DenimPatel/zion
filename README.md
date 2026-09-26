@@ -5,6 +5,10 @@
 ![Zion-city-shot](<sample-zion.png>)
 **Turn any repository into an explorable 3D city.**
 
+**Live demo:** [the vLLM city](https://denimpatel.github.io/zion/), built from
+[vllm-project/vllm](https://github.com/vllm-project/vllm) by a GitHub Actions workflow
+and published to GitHub Pages.
+
 Folders are districts. Files are buildings. A file's insides are its floors. You
 answer *"which folders have no README?"*, *"which files are huge and
 undocumented?"* and *"who owns this part of the codebase?"* by reading a skyline
@@ -566,7 +570,8 @@ screen in each band.
 **New buildings wear scaffolding.** A file born in the newest slice of the
 repo's own history (at least 30 days, or the newest 10% of its lifetime,
 whichever is longer) is wrapped in a lattice, so recent additions are visible
-without opening a diff. The colour lens also has an "age (era)" option
+without opening a diff. Scaffolding starts switched off (in an active repo it
+covers thousands of buildings); turn it on under Keys → Scaffolding. The colour lens also has an "age (era)" option
 (brick → concrete → glass, oldest to newest) and a "recent activity (heat)"
 option (grey → amber → red), both computed relative to the repo's own history,
 never wall-clock time.
