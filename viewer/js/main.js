@@ -37,7 +37,7 @@ import { CityHall, Tour } from './tour.js';
 import { DistrictStreamer } from './stream.js';
 import { Vault } from './vault.js';
 import { Inspector } from './inspector.js';
-import { buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
+import { FLAG_BITS, buildFacets, columnIndex, edgeMaps, parseQuery, runQuery } from './facets.js';
 import { SelectionOverlay, PlanFlows, LINK_COLOURS, IMPACT_COLOURS, blastRadius } from './selection.js';
 import { Notes } from './notes.js';
 import { captureView, copyText, viewFromHash, viewToHash } from './views.js';
@@ -764,12 +764,15 @@ function renderHealth() {
 function csvText() {
   const manifest = state.source.manifest;
   const col = columnIndex(manifest.indexColumns);
+  // CSV word -> flag mask, read from facets.js so the bits live in one place.
   const names = [
-    ['hotspot', 9], ['oversized', 10], ['orphan', 11], ['cycle', 12], ['knowledge', 13], ['violation', 14],
-    ['untested', 15], ['untested-risk', 16], ['drift', 17], ['braced', 21], ['unowned', 22], ['defect', 23],
-    ['rising', 24], ['hub', 25], ['clone', 26], ['hidden-coupling', 27], ['test', 0], ['doc', 1], ['new', 6],
-    ['downtown', 7],
-  ];
+    ['hotspot', 'hotspot'], ['oversized', 'oversized'], ['orphan', 'orphan'], ['cycle', 'cycle'],
+    ['knowledge', 'knowledge'], ['violation', 'violation'], ['untested', 'untested'],
+    ['untested-risk', 'untestedrisk'], ['drift', 'drift'], ['braced', 'braced'], ['unowned', 'unowned'],
+    ['bugprone', 'bugprone'], ['debt', 'debt'], ['code-violation', 'codes'], ['defect', 'defect'],
+    ['rising', 'rising'], ['hub', 'hub'], ['clone', 'clone'], ['hidden-coupling', 'hiddencoupling'],
+    ['test', 'test'], ['doc', 'doc'], ['new', 'new'], ['downtown', 'downtown'],
+  ].map(([name, key]) => [name, FLAG_BITS[key]]);
   const quote = (value) => {
     const text = String(value === undefined || value === null ? '' : value);
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -792,7 +795,7 @@ function csvText() {
       get(row, 'cx'), get(row, 'fanin'), get(row, 'fanout'), get(row, 'fixes'), get(row, 'trend'), get(row, 'debt'),
       get(row, 'depth'), get(row, 'delta'),
       district ? district.grade || '' : '',
-      names.filter(([, bit]) => flags & (1 << bit)).map(([name]) => name).join(' '),
+      names.filter(([, mask]) => flags & mask).map(([name]) => name).join(' '),
     ].map(quote).join(','));
   }
   return lines.join('\n') + '\n';
@@ -1547,6 +1550,23 @@ function setPrompt(html) {
   }
   promptEl.hidden = false;
   promptEl.innerHTML = html;
+}
+
+/**
+ * The tour's key hints live inside the tour panel: the floating prompt sits
+ * at a fixed height and covered the panel's header (and its Pause button).
+ */
+function setTourPrompt() {
+  const tour = context.tour;
+  setPrompt('');
+  const hint = document.getElementById('tour-hint');
+  if (!tour || !tour.running) {
+    hint.innerHTML = '';
+  } else if (tour.paused) {
+    hint.innerHTML = 'Paused &nbsp;·&nbsp; <kbd>K</kbd> or <b>Resume</b> to carry on &nbsp;·&nbsp; <kbd>Esc</kbd> to end';
+  } else {
+    hint.innerHTML = '<kbd>K</kbd> pause &nbsp;·&nbsp; <kbd>T</kbd> or <kbd>Esc</kbd> to end &nbsp;·&nbsp; any movement key takes over';
+  }
 }
 
 function escapeHtml(text) {
@@ -3044,15 +3064,14 @@ window.addEventListener('keydown', async (event) => {
     case 'KeyN':
       context.tour.skipToNext();
       break;
+    case 'KeyK':
+      if (context.tour.togglePause()) setTourPrompt();
+      break;
     case 'KeyT':
       // The tour flies its own oblique route; it cannot run on a map.
       if (state.mode === 'top') setMode('fly');
       context.tour.start();
-      setPrompt(
-        context.tour.running
-          ? '<kbd>T</kbd> or <kbd>Esc</kbd> to end the tour &nbsp;·&nbsp; any movement key takes over'
-          : ''
-      );
+      setTourPrompt();
       break;
     case 'KeyC':
       context.cityHall.open ? context.cityHall.hide() : context.cityHall.show();
@@ -3960,6 +3979,29 @@ async function runSelfTest() {
       ? `marker shown on all ${dwellDistricts.length} held frames, e.g. district ${dwellDistricts[0].index}`
       : 'district marker missing or misplaced during a stop'
   );
+
+  // (c4) Pause holds the camera and the clock; Resume carries on from there.
+  {
+    const tour = context.tour;
+    // Somewhere mid-leg, where a frozen clock is easy to tell from a moving one.
+    const leg = tour.route.segments.find((segment) => segment.type === 'travel');
+    tour.elapsed = leg.start + leg.duration / 2;
+    tour.update(0);
+    document.getElementById('tour-pause').click();
+    const heldAt = camera.position.clone();
+    const heldClock = tour.elapsed;
+    for (let i = 0; i < 40; i++) tour.update(1 / 20);
+    const drift = camera.position.distanceTo(heldAt);
+    const label = document.getElementById('tour-pause').textContent;
+    document.getElementById('tour-pause').click();
+    tour.update(1 / 20);
+    const resumed = camera.position.distanceTo(heldAt);
+    check(
+      'tour-pause-resume',
+      drift < 1e-6 && tour.elapsed - heldClock < 0.051 && label === 'Resume' && !tour.paused && resumed > 0,
+      `held ${drift.toFixed(4)}m over 2s paused (button "${label}"), moved ${resumed.toFixed(2)}m on resume`
+    );
+  }
 
   // (d) Handing control back must not move the camera at all.
   context.tour.stopTour();
@@ -4915,6 +4957,7 @@ async function boot() {
     container: document.getElementById('tour'),
     caption: document.getElementById('tour-caption'),
     label: document.getElementById('tour-label'),
+    pause: document.getElementById('tour-pause'),
     // The tour keeps this in step so handing control back never moves the view.
     fly: context.fly,
     // Show the viewer which block is being described.
@@ -4923,6 +4966,19 @@ async function boot() {
       // Light up everything that belongs to this district, not just its outline.
       if (context.city) context.city.highlightDistrict(district.id);
     },
+  });
+  {
+    const controls = document.getElementById('controls');
+    const hud = document.getElementById('hud');
+    const measure = () => hud.style.setProperty('--controls-height', `${controls.offsetHeight}px`);
+    measure();
+    if (window.ResizeObserver) new ResizeObserver(measure).observe(controls);
+  }
+  document.getElementById('tour-pause').addEventListener('click', (event) => {
+    context.tour.togglePause();
+    setTourPrompt();
+    // Drop focus so Space goes back to meaning "take over", not "press again".
+    event.currentTarget.blur();
   });
 
   context.fly.setFromManifest(manifest.camera);
