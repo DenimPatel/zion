@@ -53,6 +53,10 @@ const promptEl = document.getElementById('prompt');
 
 const params = new URLSearchParams(location.search);
 
+// Legend layers that start switched off: scaffolding covers thousands of
+// buildings in an active repo and hides the massing, so it is opt-in.
+const DEFAULT_HIDDEN_LAYERS = ['new_construction'];
+
 const state = {
   source: new CitySource('.'),
   mode: 'fly', // fly | walk | orbit | top | interior
@@ -73,8 +77,8 @@ const state = {
   hiddenArchetypes: new Set(),
   // Legend entries the user has switched off. Keyed by the manifest legend id
   // so the panel is driven by the analyzer's own list rather than a second one
-  // kept here by hand.
-  hiddenLayers: new Set(),
+  // kept here by hand. Starts from DEFAULT_HIDDEN_LAYERS.
+  hiddenLayers: new Set(DEFAULT_HIDDEN_LAYERS),
   // Folders the current district/region selection focuses on (S14): every
   // building outside them fades, the way a filter fades non-matches.
   focus: null,
@@ -455,7 +459,9 @@ function syncKeyRows() {
   }
   const reset = document.getElementById('guide-reset');
   if (reset) {
-    reset.hidden = state.hiddenArchetypes.size === 0 && state.hiddenLayers.size === 0;
+    reset.hidden = state.hiddenArchetypes.size === 0
+      && state.hiddenLayers.size === DEFAULT_HIDDEN_LAYERS.length
+      && DEFAULT_HIDDEN_LAYERS.every((id) => state.hiddenLayers.has(id));
   }
 }
 
@@ -546,7 +552,7 @@ function scheduleRebuild() {
 
 function resetKeys() {
   state.hiddenArchetypes.clear();
-  state.hiddenLayers.clear();
+  state.hiddenLayers = new Set(DEFAULT_HIDDEN_LAYERS);
   syncKeyRows();
   scheduleRebuild();
 }
