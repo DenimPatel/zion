@@ -11,7 +11,7 @@
 
 // Bit positions must match analyzer/emit.py's FLAG_* constants exactly --
 // this is the one place that correspondence has to be kept by hand.
-const FLAG_BITS = {
+export const FLAG_BITS = {
   test: 1 << 0,
   doc: 1 << 1,
   binary: 1 << 2,

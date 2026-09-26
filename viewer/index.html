@@ -148,9 +148,13 @@
   </section>
 
   <div id="tour" hidden>
-    <span id="tour-label"></span>
+    <div id="tour-head">
+      <span id="tour-label"></span>
+      <button id="tour-pause" type="button" aria-pressed="false" title="Pause the tour (K)">Pause</button>
+    </div>
     <p id="tour-caption"></p>
     <div id="tour-progress"><div id="tour-progress-bar"></div></div>
+    <p id="tour-hint"></p>
   </div>
 
   <!-- The minimap: the whole plan in a corner. Click to fly, drag to scrub,
@@ -227,6 +231,7 @@
       <span><kbd>E</kbd> enter</span>
       <span><kbd>T</kbd> tour</span>
       <span><kbd>N</kbd> next stop</span>
+      <span><kbd>K</kbd> pause/resume tour</span>
       <span><kbd>C</kbd> city hall</span>
       <span><kbd>O</kbd> orbit city</span>
       <span><kbd>P</kbd> plan view</span>

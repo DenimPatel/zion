@@ -369,9 +369,20 @@ const CRUISE_SPEED = 60; // metres per second, before normalising
 // stops and holds on what the caption is describing -- twice the time per stop
 // compared with travelling straight through.
 const DWELL_FACTOR = 1.0;
+// How far toward its target the camera drifts while holding on a stop.
+const DWELL_PUSH = 0.06;
 const SECONDS_PER_STOP = 6.8;
 const MIN_CIRCUIT_SECONDS = 20;
 const MAX_CIRCUIT_SECONDS = 150;
+
+// Hard ceiling on camera speed. The circuit target above fits a normal repo,
+// but on a wide city (vLLM: 16 stops over ~25 km) squeezing every leg into it
+// crossed 2.6 km in 3.4 s. A leg too long for its share of the circuit is
+// stretched until it peaks at this speed, so a big city gets a longer tour
+// rather than a sprint. smootherStep peaks at 15/8 of its average velocity.
+const MAX_PEAK_SPEED = 350; // metres per second
+const SMOOTHERSTEP_PEAK = 15 / 8;
+const DWELL_FLOOR = 0.6;
 
 // A tour of 320 districts is not a tour. Beyond this, stops are sampled evenly
 // so the circuit stays an overview, and the label says so.
@@ -391,6 +402,7 @@ export class Tour {
     this.flight = flight;
     this.dom = dom; // { container, caption, label, fly }
     this.running = false;
+    this.paused = false;
     this.stopIndex = -1;
     this.route = null;
     this.phase = 'lead';
@@ -461,9 +473,10 @@ export class Tour {
       // A vertical arc, so the approach lifts over the skyline rather than
       // ploughing through it.
       lift: Math.min(140, Math.max(18, approach * 0.22)),
-      duration: Math.min(
-        MAX_LEG_SECONDS * 1.4,
-        Math.max(MIN_LEG_SECONDS, approach / CRUISE_SPEED)
+      duration: Math.max(
+        Math.min(MAX_LEG_SECONDS * 1.4, Math.max(MIN_LEG_SECONDS, approach / CRUISE_SPEED)),
+        // The arc's lift adds to the chord, so allow for it.
+        (SMOOTHERSTEP_PEAK * (approach + 2 * Math.min(140, Math.max(18, approach * 0.22)))) / MAX_PEAK_SPEED
       ),
     };
 
@@ -495,12 +508,32 @@ export class Tour {
     const factor = 1 + DWELL_FACTOR;
     const scale = rawTotal > 0 ? target / (rawTotal * factor) : 1;
 
+    // The spline does not move evenly with its parameter, so a leg's peak
+    // speed depends on its fastest stretch, not its length: sample the metres
+    // covered per unit of leg parameter and keep the largest.
+    const legStretch = (i) => {
+      const samples = 48;
+      let most = 0;
+      let last = this.route.eye.getPoint(i / stops.length);
+      for (let k = 1; k <= samples; k++) {
+        const point = this.route.eye.getPoint((i + k / samples) / stops.length);
+        most = Math.max(most, point.distanceTo(last) * samples);
+        last = point;
+      }
+      return most;
+    };
+
+    // Travel stretches for speed; dwells stretch less (DWELL_FLOOR of the leg),
+    // so a long leg still ends in a real hold without a 12-second pause.
+    this.route.dwellTimes = [];
     let accumulated = 0;
-    for (const time of raw) {
-      const scaled = time * scale;
-      this.route.legTimes.push(scaled);
+    for (let i = 0; i < raw.length; i++) {
+      const scaled = raw[i] * scale;
+      const travel = Math.max(scaled, (SMOOTHERSTEP_PEAK * legStretch(i)) / MAX_PEAK_SPEED);
+      this.route.dwellTimes.push(Math.max(scaled * DWELL_FACTOR, travel * DWELL_FLOOR));
+      this.route.legTimes.push(travel);
       this.route.legStarts.push(accumulated);
-      accumulated += scaled;
+      accumulated += travel;
     }
     this.route.total = accumulated;
 
@@ -510,7 +543,7 @@ export class Tour {
     this.route.segments = [];
     let clock = 0;
     for (let i = 0; i < stops.length; i++) {
-      const dwell = this.route.legTimes[i] * DWELL_FACTOR;
+      const dwell = this.route.dwellTimes[i];
       this.route.segments.push({ type: 'dwell', stop: i, start: clock, duration: dwell });
       clock += dwell;
       this.route.segments.push({
@@ -528,6 +561,7 @@ export class Tour {
     this.elapsed = 0;
     this.stopIndex = -1;
     this.running = true;
+    this._setPaused(false);
     this.dom.container.hidden = false;
     this._announce(0);
     this.update(0);
@@ -535,10 +569,41 @@ export class Tour {
 
   stopTour() {
     this.running = false;
+    this._setPaused(false);
     this.dom.container.hidden = true;
     // Leave the fly camera exactly where the tour left the view, so releasing
     // control does not move the camera at all.
     this._syncFly();
+  }
+
+  /**
+   * Hold the tour where it is. The camera stays put, the caption and the
+   * district highlight stay on, and `resume()` carries on from this moment.
+   */
+  pause() {
+    if (!this.running || this.paused) return false;
+    this._setPaused(true);
+    return true;
+  }
+
+  resume() {
+    if (!this.running || !this.paused) return false;
+    this._setPaused(false);
+    return true;
+  }
+
+  togglePause() {
+    return this.paused ? this.resume() : this.pause();
+  }
+
+  _setPaused(paused) {
+    this.paused = paused;
+    const button = this.dom.pause;
+    if (!button) return;
+    button.textContent = paused ? 'Resume' : 'Pause';
+    button.setAttribute('aria-pressed', String(paused));
+    button.title = paused ? 'Resume the tour (K)' : 'Pause the tour (K)';
+    this.dom.container.classList.toggle('paused', paused);
   }
 
   get progress() {
@@ -587,6 +652,9 @@ export class Tour {
   /** Advance the tour. Returns true when it drove the camera this frame. */
   update(dt) {
     if (!this.running || !this.route) return false;
+    // Paused: keep placing the camera at the frozen moment (so N can still
+    // jump to the next stop and hold there) but let no time pass.
+    if (this.paused) dt = 0;
     this.elapsed += dt;
 
     if (this.phase === 'lead') {
@@ -623,7 +691,7 @@ export class Tour {
       const u = segment.stop / legs;
       const position = this.route.eye.getPoint(u);
       const target = this.route.look.getPoint(u);
-      const push = 0.06 * local;
+      const push = DWELL_PUSH * local;
       position.lerp(target, push);
       this._announce(segment.stop);
       this._place(position, target);
@@ -636,7 +704,13 @@ export class Tour {
       // Announce the destination, so the highlight is already on the block the
       // camera is approaching.
       this._announce(segment.to);
-      this._place(this.route.eye.getPoint(u), this.route.look.getPoint(u));
+      // Unwind the dwell's inward drift over the leg rather than dropping it:
+      // starting back at the bare spline point snapped the camera by 6% of the
+      // stop's viewing distance (~90m on a wide city) every time it moved off.
+      const position = this.route.eye.getPoint(u);
+      const target = this.route.look.getPoint(u);
+      position.lerp(target, DWELL_PUSH * (1 - eased));
+      this._place(position, target);
     }
     this._syncFly();
     return true;
